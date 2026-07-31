@@ -1728,7 +1728,12 @@ def _apply_to_policy(a, policy_id, allow, deny):
     unchanged (update is a full replace). Creates the policy when it doesn't exist and
     create_missing_policy is on. Returns (action, sent_block_dict) where action is created|updated."""
     from databricks.sdk.errors import NotFound
-    from databricks.sdk.service.settings import AccountNetworkPolicy
+    from databricks.sdk.service.settings import (
+        AccountNetworkPolicy,
+        EgressNetworkPolicyNetworkAccessPolicy as EgressAccess,
+        EgressNetworkPolicyNetworkAccessPolicyRestrictionMode as EgressRestriction,
+        NetworkPolicyEgress,
+    )
 
     try:
         existing = a.network_policies.get_network_policy_rpc(network_policy_id=policy_id)
@@ -1738,7 +1743,13 @@ def _apply_to_policy(a, policy_id, allow, deny):
             raise ValueError(
                 f"Network policy '{policy_id}' does not exist and create_missing_policy=false. "
                 f"Create it first or set widget 5c (create_missing_policy) to true.")
-        existing = AccountNetworkPolicy(account_id=ACCOUNT_ID, network_policy_id=policy_id)
+        # On create there is no egress block to preserve, but the API requires
+        # egress.network_access.restriction_mode. Default to FULL_ACCESS (does not restrict egress).
+        existing = AccountNetworkPolicy(
+            account_id=ACCOUNT_ID, network_policy_id=policy_id,
+            egress=NetworkPolicyEgress(
+                network_access=EgressAccess(restriction_mode=EgressRestriction.FULL_ACCESS)),
+        )
         action = "created"
 
     setattr(existing, POLICY_MODE_TARGET, _build_ingress_block(allow, deny))
@@ -1756,8 +1767,20 @@ def _apply_to_policy(a, policy_id, allow, deny):
 
 
 # A policy name is only a label — if the user didn't set one (widget 5a), generate a sensible
-# default so apply just works rather than bailing.
-RESOLVED_POLICY_ID = NETWORK_POLICY_ID or f"cbi-helper-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}"
+# default so apply just works rather than bailing. Names have a length limit (empirically ~30
+# chars; a 16-digit workspace id appended to a long base is rejected), so keep them short.
+MAX_POLICY_ID_LEN = 30
+RESOLVED_POLICY_ID = NETWORK_POLICY_ID or f"cbi-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}"
+
+
+def _policy_name(base, workspace_id=None):
+    """Build a valid, length-bounded policy id. For per-workspace we prefer a compact
+    'cbi-ws-<id>' (the 16-digit id already eats most of the budget); otherwise clamp the base."""
+    if workspace_id is not None:
+        name = f"cbi-ws-{workspace_id}"
+    else:
+        name = base
+    return name[:MAX_POLICY_ID_LEN]
 
 if not APPLY_POLICY:
     print(f"Not applying (mode={POLICY_MODE}, scope={POLICY_SCOPE}). Set apply_policy=true to apply. "
@@ -1771,9 +1794,10 @@ else:
 
     if POLICY_SCOPE == "single":
         p = policies.get(ALL_WORKSPACES) or next(iter(policies.values()))
-        print(f"Applying policy '{RESOLVED_POLICY_ID}' ({POLICY_MODE_TARGET}, {POLICY_MODE} mode, "
+        single_id = _policy_name(RESOLVED_POLICY_ID)
+        print(f"Applying policy '{single_id}' ({POLICY_MODE_TARGET}, {POLICY_MODE} mode, "
               f"create_missing={CREATE_MISSING_POLICY})...")
-        action, effective_id, sent = _apply_to_policy(a, RESOLVED_POLICY_ID, p["allow"], p["deny"])
+        action, effective_id, sent = _apply_to_policy(a, single_id, p["allow"], p["deny"])
         print(f"Policy {action}: {effective_id}")
         print(json.dumps({POLICY_MODE_TARGET: sent}, indent=2))
         print("Done." if POLICY_MODE == "dry_run"
@@ -1782,11 +1806,16 @@ else:
         # per_workspace: get-or-create one policy per workspace, then bind the workspace to it.
         from databricks.sdk.service.settings import WorkspaceNetworkOption
 
-        ws_targets = sorted(t for t in policies if t != ALL_WORKSPACES)
+        # workspace_id 0 is account-level, not a bindable workspace — never create/bind a
+        # per-workspace policy for it (even if account-level rows were included in analysis).
+        ws_targets = sorted(t for t in policies if t != ALL_WORKSPACES and int(t) != 0)
+        skipped_ws0 = [t for t in policies if t != ALL_WORKSPACES and int(t) == 0]
+        if skipped_ws0:
+            print("  (skipping workspace_id=0 — account-level, not a bindable workspace)")
         print(f"per_workspace apply ({POLICY_MODE} mode, create_missing={CREATE_MISSING_POLICY}): "
               f"applying + binding {len(ws_targets)} workspace policy(ies).\n")
         for tgt in ws_targets:
-            pid = f"{RESOLVED_POLICY_ID}-ws-{tgt}"
+            pid = _policy_name(RESOLVED_POLICY_ID, workspace_id=tgt)
             p = policies[tgt]
             try:
                 action, effective_id, _ = _apply_to_policy(a, pid, p["allow"], p["deny"])
