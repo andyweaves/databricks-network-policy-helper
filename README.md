@@ -62,6 +62,16 @@ It answers: *who connects to this workspace, from where, and what should the inb
 | `docs/account-admin-setup.md` | Account-admin service-principal + secret-scope setup. |
 | `docs/egress-fqdns.md` | External hosts to allow when behind egress controls / SEG. |
 | `genie/genie-space-spec.md` | Spec for a backing AI/BI Genie space (build once tables persist). |
+| `.assistant/skills/cbi-policy-advisor/` | Databricks Genie Code skill wrapping this workflow. |
+
+## Databricks Genie Code skill
+
+`.assistant/skills/cbi-policy-advisor/SKILL.md` is a [Databricks Genie Code
+skill](https://docs.databricks.com/aws/en/genie-code/skills) that teaches the coding agent to run
+this workflow. Genie Code auto-discovers skills under `.assistant/skills/`; to make it available,
+copy the `cbi-policy-advisor` folder into your workspace skills directory
+(`Workspace/.assistant/skills/`) or user skills directory (`/Users/<you>/.assistant/skills/`). You
+can then `@cbi-policy-advisor` in Genie Code chat to invoke it explicitly.
 
 ## Genie space
 
