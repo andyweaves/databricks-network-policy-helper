@@ -123,7 +123,9 @@ dbutils.widgets.dropdown(
 
 # --- Account authentication (needed for identity resolution + apply; both are account-level) ---
 dbutils.widgets.text("account_id", "", "4a. Databricks account_id (blank = set manually)")
-dbutils.widgets.text("account_host", "", "4b. Account console host (blank = AWS default)")
+dbutils.widgets.text(
+    "account_host", "https://accounts.cloud.databricks.com", "4b. Account console host (edit for Azure/GCP)"
+)
 dbutils.widgets.text("account_sp_client_id", "", "4c. Account admin SP client_id")
 dbutils.widgets.text("account_secret_scope", "", "4d. Secret scope holding SP secret")
 dbutils.widgets.text("account_secret_key", "", "4e. Secret key for SP secret")
