@@ -198,6 +198,9 @@ _decisions = pd.DataFrame([
     ("5c. confirm_phrase", "(set)" if CONFIRM_PHRASE else "(unset)",
      f"Must equal '{REQUIRED_PHRASE}' for the current policy_mode to apply."),
 ], columns=["widget", "value", "meaning"])
+# The value column mixes int/bool/str; cast to string so display()'s Arrow conversion doesn't fail
+# on the resulting object-dtype column.
+_decisions["value"] = _decisions["value"].astype(str)
 print(f"scoping: destination={SCOPE_DESTINATION} identity={SCOPE_IDENTITY} | "
       f"policy_mode={POLICY_MODE} -> {POLICY_MODE_TARGET}")
 display(_decisions)
