@@ -132,6 +132,10 @@ dbutils.widgets.text("account_secret_key", "", "4e. Secret key for SP secret")
 dbutils.widgets.text("network_policy_id", "", "5a. Target network_policy_id")
 dbutils.widgets.dropdown("apply_policy", "false", ["true", "false"], "5b. Apply the policy?")
 dbutils.widgets.text("confirm_phrase", "", "5c. Mode confirm phrase")
+# If the target policy doesn't exist yet, create it (default). Set false to require it to pre-exist.
+dbutils.widgets.dropdown(
+    "create_missing_policy", "true", ["true", "false"], "5d. Create policy if missing?"
+)
 
 # COMMAND ----------
 
@@ -188,6 +192,7 @@ ACCOUNT_SECRET_KEY = dbutils.widgets.get("account_secret_key").strip()
 NETWORK_POLICY_ID = dbutils.widgets.get("network_policy_id").strip()
 APPLY_POLICY = dbutils.widgets.get("apply_policy") == "true"
 CONFIRM_PHRASE = dbutils.widgets.get("confirm_phrase").strip()
+CREATE_MISSING_POLICY = dbutils.widgets.get("create_missing_policy") == "true"
 
 
 def _require_account_id(operation):
@@ -260,6 +265,8 @@ _decisions = pd.DataFrame([
     ("5b. apply_policy", APPLY_POLICY, "Master switch for the gated apply step."),
     ("5c. confirm_phrase", "(set)" if CONFIRM_PHRASE else "(unset)",
      f"Must equal '{REQUIRED_PHRASE}' for the current policy_mode to apply."),
+    ("5d. create_missing_policy", CREATE_MISSING_POLICY,
+     "If the target policy doesn't exist, create it (default true) vs require it to pre-exist."),
 ], columns=["widget", "value", "meaning"])
 # The value column mixes int/bool/str; cast to string so display()'s Arrow conversion doesn't fail
 # on the resulting object-dtype column.
@@ -1594,25 +1601,46 @@ display(_policy_explainer)
 # MAGIC — `APPLY DRY RUN` / `APPLY ENFORCE`. Requires an **account-admin** `AccountClient` (see
 # MAGIC "Account admin requirements" near the top; configure via widgets 4a–4e).
 # MAGIC
+# MAGIC By default it **creates the policy if it doesn't exist** (`create_missing_policy=true`,
+# MAGIC widget 5d); set that to false to require the policy to pre-exist.
+# MAGIC
 # MAGIC **Scope behaviour:**
-# MAGIC - `policy_scope=single` — updates the single existing policy named in `network_policy_id`.
+# MAGIC - `policy_scope=single` — creates/updates the single policy named in `network_policy_id`.
 # MAGIC - `policy_scope=per_workspace` — treats `network_policy_id` as a **prefix**: for each
-# MAGIC   workspace it updates policy `<prefix>-ws-<workspace_id>` and binds the workspace to it via
-# MAGIC   `update_workspace_network_option_rpc`. **Those per-workspace policies must already exist**
-# MAGIC   (create them in the account console first) — this cell updates + binds, it does not create
-# MAGIC   policies. Per-workspace failures are reported individually and don't stop the others.
+# MAGIC   workspace it creates/updates policy `<prefix>-ws-<workspace_id>` and binds the workspace to
+# MAGIC   it via `update_workspace_network_option_rpc`. Per-workspace failures are reported
+# MAGIC   individually and don't stop the others.
 
 # COMMAND ----------
 
 # DBTITLE 1,Apply proposed rules (dry_run or enforce)
 def _apply_to_policy(a, policy_id, allow, deny):
-    """Update one existing account network policy's target block (ingress|ingress_dry_run) with the
-    proposed allow+deny rules, leaving the other blocks and egress unchanged (update is a full
-    replace). Returns the sent block dict for logging."""
-    existing = a.network_policies.get_network_policy_rpc(network_policy_id=policy_id)
+    """Get-or-create an account network policy `policy_id` and set its target block
+    (ingress|ingress_dry_run) to the proposed allow+deny rules, leaving the other blocks and egress
+    unchanged (update is a full replace). Creates the policy when it doesn't exist and
+    create_missing_policy is on. Returns (action, sent_block_dict) where action is created|updated."""
+    from databricks.sdk.errors import NotFound
+    from databricks.sdk.service.settings import AccountNetworkPolicy
+
+    try:
+        existing = a.network_policies.get_network_policy_rpc(network_policy_id=policy_id)
+        action = "updated"
+    except NotFound:
+        if not CREATE_MISSING_POLICY:
+            raise ValueError(
+                f"Network policy '{policy_id}' does not exist and create_missing_policy=false. "
+                f"Create it first or set widget 5d to true.")
+        existing = AccountNetworkPolicy(account_id=ACCOUNT_ID, network_policy_id=policy_id)
+        action = "created"
+
     setattr(existing, POLICY_MODE_TARGET, _build_ingress_block(allow, deny))
-    a.network_policies.update_network_policy_rpc(network_policy_id=policy_id, network_policy=existing)
-    return getattr(existing, POLICY_MODE_TARGET).as_dict()
+    if action == "created":
+        result = a.network_policies.create_network_policy_rpc(network_policy=existing)
+        # The server may assign the id; report whatever it returns.
+        globals()["_last_created_policy_id"] = result.network_policy_id or policy_id
+    else:
+        a.network_policies.update_network_policy_rpc(network_policy_id=policy_id, network_policy=existing)
+    return action, getattr(existing, POLICY_MODE_TARGET).as_dict()
 
 
 if not (APPLY_POLICY and CONFIRM_PHRASE == REQUIRED_PHRASE):
@@ -1620,9 +1648,10 @@ if not (APPLY_POLICY and CONFIRM_PHRASE == REQUIRED_PHRASE):
           f"AND confirm_phrase='{REQUIRED_PHRASE}'.")
 elif not NETWORK_POLICY_ID:
     print("Set network_policy_id (widget 5a) first.\n"
-          "  - single scope: the existing policy to update.\n"
+          f"  - single scope: the policy to create/update (created if missing when "
+          f"create_missing_policy=true).\n"
           "  - per_workspace scope: used as a PREFIX; each workspace binds to policy "
-          "'<network_policy_id>-ws-<workspace_id>' (which must already exist).")
+          "'<network_policy_id>-ws-<workspace_id>' (created if missing).")
 elif not policies:
     print("No allow or deny rule specs to apply — check the suggestions above.")
 else:
@@ -1630,31 +1659,31 @@ else:
 
     if POLICY_SCOPE == "single":
         p = policies.get(ALL_WORKSPACES) or next(iter(policies.values()))
-        print(f"Updating policy '{NETWORK_POLICY_ID}' ({POLICY_MODE_TARGET}, {POLICY_MODE} mode)...")
-        sent = _apply_to_policy(a, NETWORK_POLICY_ID, p["allow"], p["deny"])
+        print(f"Applying policy '{NETWORK_POLICY_ID}' ({POLICY_MODE_TARGET}, {POLICY_MODE} mode, "
+              f"create_missing={CREATE_MISSING_POLICY})...")
+        action, sent = _apply_to_policy(a, NETWORK_POLICY_ID, p["allow"], p["deny"])
+        print(f"Policy {action}.")
         print(json.dumps({POLICY_MODE_TARGET: sent}, indent=2))
         print("Done." if POLICY_MODE == "dry_run"
               else "⛔ Done — ENFORCED. Verify you can still reach the workspace.")
     else:
-        # per_workspace: update one policy per workspace, then bind the workspace to it. Each policy
-        # '<prefix>-ws-<id>' MUST already exist (create it in the account console first) — this cell
-        # updates + binds, it does not create policies.
+        # per_workspace: get-or-create one policy per workspace, then bind the workspace to it.
         from databricks.sdk.service.settings import WorkspaceNetworkOption
 
-        print(f"per_workspace apply ({POLICY_MODE} mode): updating + binding "
-              f"{len([t for t in policies if t != ALL_WORKSPACES])} workspace policy(ies).\n"
-              f"  Each policy '{NETWORK_POLICY_ID}-ws-<id>' must already exist.\n")
-        for tgt in sorted(t for t in policies if t != ALL_WORKSPACES):
+        ws_targets = sorted(t for t in policies if t != ALL_WORKSPACES)
+        print(f"per_workspace apply ({POLICY_MODE} mode, create_missing={CREATE_MISSING_POLICY}): "
+              f"applying + binding {len(ws_targets)} workspace policy(ies).\n")
+        for tgt in ws_targets:
             pid = f"{NETWORK_POLICY_ID}-ws-{tgt}"
             p = policies[tgt]
             try:
-                _apply_to_policy(a, pid, p["allow"], p["deny"])
+                action, _ = _apply_to_policy(a, pid, p["allow"], p["deny"])
                 a.workspace_network_configuration.update_workspace_network_option_rpc(
                     workspace_id=int(tgt),
                     workspace_network_option=WorkspaceNetworkOption(
                         workspace_id=int(tgt), network_policy_id=pid),
                 )
-                print(f"  ✅ workspace {tgt}: updated '{pid}' and bound.")
+                print(f"  ✅ workspace {tgt}: {action} '{pid}' and bound.")
             except Exception as e:  # noqa: BLE001 - surface per-workspace failures, keep going
                 print(f"  ❌ workspace {tgt}: {e}")
         print("\nDone." if POLICY_MODE == "dry_run"

@@ -67,9 +67,11 @@ trial an ingress policy in dry-run before enforcing.
 
 - `single` (default) — one policy across all workspaces.
 - `per_workspace` — a tailored policy per workspace + a recommended workspace→policy assignment
-  table. On apply, `network_policy_id` is a prefix; each workspace binds to `<prefix>-ws-<id>`
-  (which must already exist). Audit `workspace_id = 0` is account-level, excluded unless
-  `include_account_level=true`.
+  table. On apply, `network_policy_id` is a prefix; each workspace binds to `<prefix>-ws-<id>`.
+  Audit `workspace_id = 0` is account-level, excluded unless `include_account_level=true`.
+
+On apply, the target policy is **created if it doesn't exist** by default (`create_missing_policy`,
+widget 5d); set it false to require the policy to pre-exist.
 
 The notebook knows the Databricks network-policy limits and **warns + auto-caps** to keep proposals
 valid: **50 ingress rules, 2000 CIDR blocks, 100 identities per policy; 1000 policies per account**.
