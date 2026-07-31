@@ -31,7 +31,7 @@ CustomerFacingIngressNetworkPolicy
 └── cross_workspace_access: ...
 
 CustomerFacingIngressNetworkPolicyPublicAccess
-├── restriction_mode: {FULL_ACCESS | RESTRICTED_ACCESS}   # advisor always uses RESTRICTED_ACCESS
+├── restriction_mode: {FULL_ACCESS | RESTRICTED_ACCESS}   # helper always uses RESTRICTED_ACCESS
 ├── allow_rules: [CustomerFacingIngressNetworkPolicyPublicIngressRule]   # the suggested allow-list
 └── deny_rules:  [CustomerFacingIngressNetworkPolicyPublicIngressRule]   # optional threat-intel deny rules
                                                                           # (same rule shape; origin CIDRs only)

@@ -56,22 +56,28 @@ It answers: *who connects to this workspace, from where, and what should the inb
 | Path | What |
 |---|---|
 | `notebooks/audit_log_cbi.py` | The analysis + proposal + apply notebook (the engine). |
+| `notebooks/install_skill.py` | Installs the Genie Code skill into your user skills directory. |
 | `scripts/deploy_notebook.py` | Import/update the notebook into a workspace via the CLI. |
 | `docs/threat-intel-feeds.md` | The enrichment feeds, what each represents, licensing. |
 | `docs/cbi-sdk-schema.md` | The verified `AccountNetworkPolicy` SDK object model. |
 | `docs/account-admin-setup.md` | Account-admin service-principal + secret-scope setup. |
 | `docs/egress-fqdns.md` | External hosts to allow when behind egress controls / SEG. |
 | `genie/genie-space-spec.md` | Spec for a backing AI/BI Genie space (build once tables persist). |
-| `.assistant/skills/cbi-policy-advisor/` | Databricks Genie Code skill wrapping this workflow. |
+| `.assistant/skills/cbi-helper/` | Databricks Genie Code skill wrapping this workflow. |
 
 ## Databricks Genie Code skill
 
-`.assistant/skills/cbi-policy-advisor/SKILL.md` is a [Databricks Genie Code
+`.assistant/skills/cbi-helper/SKILL.md` is a [Databricks Genie Code
 skill](https://docs.databricks.com/aws/en/genie-code/skills) that teaches the coding agent to run
-this workflow. Genie Code auto-discovers skills under `.assistant/skills/`; to make it available,
-copy the `cbi-policy-advisor` folder into your workspace skills directory
-(`Workspace/.assistant/skills/`) or user skills directory (`/Users/<you>/.assistant/skills/`). You
-can then `@cbi-policy-advisor` in Genie Code chat to invoke it explicitly.
+this workflow. Genie Code discovers per-user skills under `/Users/<you>/.assistant/skills/`.
+
+**Easiest install:** run **`notebooks/install_skill.py`** from the repo / git-folder checkout — it
+copies the `cbi-helper` skill into your user skills directory for you (defaults to the user scope;
+a `workspace` scope option exists for account-wide install if you have permission). Alternatively,
+copy the `.assistant/skills/cbi-helper` folder there by hand.
+
+Once installed, Genie Code picks it up next time you use it; invoke it explicitly with
+`@cbi-helper` in chat.
 
 ## Genie space
 

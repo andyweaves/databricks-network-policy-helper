@@ -18,15 +18,15 @@ Pure analysis, and IP-only / destination-only proposals you don't apply from the
 2. **Generate an OAuth secret** for it — note the `client_id` and the secret (shown once).
 3. **Store the secret in a Databricks secret scope** (never hardcode):
    ```bash
-   databricks secrets create-scope cbi_advisor
-   databricks secrets put-secret cbi_advisor account_sp_secret
+   databricks secrets create-scope cbi_helper
+   databricks secrets put-secret cbi_helper account_sp_secret
    ```
 4. **Set the notebook widgets** (group 4):
    - `4a account_id` — your Databricks account id
    - `4b account_host` — e.g. `https://accounts.cloud.databricks.com`
      (Azure: `https://accounts.azuredatabricks.net`; GCP: `https://accounts.gcp.databricks.com`)
    - `4c account_sp_client_id` — the SP's client_id
-   - `4d account_secret_scope` — `cbi_advisor`
+   - `4d account_secret_scope` — `cbi_helper`
    - `4e account_secret_key` — `account_sp_secret`
 
 `_account_client()` then builds `AccountClient(host, account_id, client_id, client_secret=<secret>)`.

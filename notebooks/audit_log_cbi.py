@@ -1,6 +1,6 @@
 # Databricks notebook source
 # MAGIC %md
-# MAGIC # Candidate Context-Based Ingress (CBI) policy advisor
+# MAGIC # Context-Based Ingress (CBI) Helper
 # MAGIC
 # MAGIC This notebook analyses recent `system.access.audit` traffic and proposes a first-pass
 # MAGIC **context-based ingress (CBI)** allow-list for a Databricks account network policy.
@@ -528,7 +528,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 FEED_TIMEOUT_SECONDS = 30
-FEED_USER_AGENT = "Databricks-CBI-Advisor"
+FEED_USER_AGENT = "Databricks-CBI-Helper"
 
 
 def _http_get(url, as_json=False):
@@ -1295,7 +1295,7 @@ if not suggestions_pdf.empty:
             continue
 
         spec = {
-            "label": f"cbi-advisor-{row['rdap_owner']}"[:250],
+            "label": f"cbi-helper-{row['rdap_owner']}"[:250],
             "cidrs": ipv4_cidrs,
             "destination": row["scoped_destination"] if SCOPE_DESTINATION else "all_destinations",
             "identity_type": "ALL_USERS",
@@ -1328,7 +1328,7 @@ if SCOPING_MODE == "ip_only":
                 if c not in all_cidrs:
                     all_cidrs.append(c)
         target_specs[tgt] = [{
-            "label": "cbi-advisor-ip-only",
+            "label": "cbi-helper-ip-only",
             "cidrs": all_cidrs,
             "destination": "all_destinations",
             "identity_type": "ALL_USERS",
@@ -1417,7 +1417,7 @@ if THREAT_DENY_RULES != "off":
         for feed in sorted(by_feed):
             cidrs = sorted(by_feed[feed])
             if cidrs:
-                deny_specs.append({"label": f"cbi-advisor-deny-{feed}"[:250], "cidrs": cidrs})
+                deny_specs.append({"label": f"cbi-helper-deny-{feed}"[:250], "cidrs": cidrs})
         print(f"\nBuilt {len(deny_specs)} threat-intel deny rule(s) [{THREAT_DENY_RULES}], "
               f"{total:,} CIDR(s) total:")
         for spec in deny_specs:

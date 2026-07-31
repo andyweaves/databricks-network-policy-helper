@@ -1,9 +1,9 @@
 ---
-name: cbi-policy-advisor
+name: cbi-helper
 description: Suggest and optionally apply Databricks Context-Based Ingress (CBI) network-policy allow-lists from real audit-log traffic. Use when the user wants to build/suggest a context-based ingress policy, tighten inbound network access, allow-list source IPs, analyse who connects to a workspace and from where, or turn system.access.audit logs into a CBI / account network-policy proposal. Analyses public source IPs carrying successful traffic, enriches them with open threat-intelligence and cloud-provider ranges plus RDAP ownership, proposes minimal/optimal/maximum CIDR framings optionally scoped by destination (Apps/Lakebase) and identity (users/SPs), and can write the result into a network policy's dry-run (log-only) or enforced ingress block via the Databricks SDK.
 ---
 
-# CBI Policy Advisor
+# Context-Based Ingress (CBI) Helper
 
 Turn real `system.access.audit` traffic into a proposed **Context-Based Ingress (CBI)** allow-list
 for a Databricks **account network policy**, with threat-intel + cloud-range enrichment, optional
@@ -11,7 +11,7 @@ destination/identity scoping, and a safe dry-run-first apply path.
 
 The engine is the notebook `notebooks/audit_log_cbi.py` at the repo root. This skill helps deploy it,
 run it with sensible parameters, and review/apply a policy responsibly. Paths below are relative to
-this skill folder (`.assistant/skills/cbi-policy-advisor/`).
+this skill folder (`.assistant/skills/cbi-helper/`).
 
 ## When to use
 
@@ -33,9 +33,9 @@ trial an ingress policy in dry-run before enforcing.
 
 1. **Authenticate.** Analysis needs only workspace read on `system.access.audit`. **Applying a
    policy, or identity scoping, needs an account admin** — recommended: an account-admin service
-   principal via OAuth M2M with its secret in a secret scope. See `../../../docs/account-admin-setup.md`.
+   principal via OAuth M2M with its secret in a secret scope. See `docs/account-admin-setup.md`.
 2. **Deploy the notebook** into the workspace:
-   `python ../../../scripts/deploy_notebook.py --profile <cli-profile> --overwrite`
+   `python scripts/deploy_notebook.py --profile <cli-profile> --overwrite`
    (imports `notebooks/audit_log_cbi.py`; pass `--path` to choose the destination).
 3. **Set parameters** — every decision is a widget at the top of the notebook (see its
    "Parameters & decisions" table). Key ones: `lookback_days`, `min_events`, `threat_feeds`,
@@ -86,15 +86,22 @@ independent of the allow-list: `off` (none), `matched_only` (deny only threat CI
 observed traffic), or `all` (deny entire feeds regardless of matches — one deny rule per feed, with
 a size cap to avoid oversized policies).
 
-## References (relative to this skill)
+## Source repo
 
-- `../../../docs/threat-intel-feeds.md` — the enrichment feeds, what each represents, licensing.
-- `../../../docs/cbi-sdk-schema.md` — the verified `AccountNetworkPolicy` SDK object model.
-- `../../../docs/account-admin-setup.md` — account-admin SP + secret-scope setup.
-- `../../../docs/egress-fqdns.md` — external hosts to allow when behind egress controls / SEG.
-- `../../../genie/genie-space-spec.md` — spec for a backing AI/BI Genie space (build once tables persist).
+This skill wraps the **databricks-cbi-helper** repo
+(`https://github.com/andyweaves/databricks-cbi-helper`). The paths below are relative to that repo
+root. If this skill was copied out of the repo (e.g. into `/Users/<you>/.assistant/skills/`), find
+those files back in the repo / the git folder it was installed from.
+
+## References
+
+- `docs/threat-intel-feeds.md` — the enrichment feeds, what each represents, licensing.
+- `docs/cbi-sdk-schema.md` — the verified `AccountNetworkPolicy` SDK object model.
+- `docs/account-admin-setup.md` — account-admin SP + secret-scope setup.
+- `docs/egress-fqdns.md` — external hosts to allow when behind egress controls / SEG.
+- `genie/genie-space-spec.md` — spec for a backing AI/BI Genie space (build once tables persist).
 
 ## Engine & helper (repo root)
 
-- `../../../notebooks/audit_log_cbi.py` — the analysis + proposal + apply notebook (source of truth).
-- `../../../scripts/deploy_notebook.py` — import/update the notebook into a workspace via the CLI.
+- `notebooks/audit_log_cbi.py` — the analysis + proposal + apply notebook (source of truth).
+- `scripts/deploy_notebook.py` — import/update the notebook into a workspace via the CLI.

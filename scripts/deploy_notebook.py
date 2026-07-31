@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deploy (import/update) the CBI advisor notebook into a Databricks workspace.
+"""Deploy (import/update) the CBI Helper notebook into a Databricks workspace.
 
 The notebook `audit_log_cbi.py` (next to this script) is the analysis + proposal + apply engine.
 This helper imports it via the Databricks CLI so it can be run in the target workspace.
@@ -69,7 +69,7 @@ def main():
     r = _run(cmd)
     if r.returncode != 0:
         sys.exit(f"Import failed:\n{r.stderr or r.stdout}")
-    print(f"Imported CBI advisor notebook -> {path}")
+    print(f"Imported CBI Helper notebook -> {path}")
     print("Open it in the workspace, set the widgets at the top, and run top to bottom.")
 
 

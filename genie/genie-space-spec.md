@@ -1,4 +1,4 @@
-# Genie space spec — CBI Policy Advisor
+# Genie space spec — Context-Based Ingress (CBI) Helper
 
 Spec for a Genie space that lets an operator ask the CBI audit + enrichment data in natural
 language. **Build it (via the Genie UI, the Genie REST API, or any Genie authoring tooling) only
@@ -15,7 +15,7 @@ after the enrichment tables are persisted** to a stable schema (set the notebook
 
 ## Space title & description
 
-- **Title:** CBI Policy Advisor — Ingress Traffic & Threat Enrichment
+- **Title:** Context-Based Ingress (CBI) Helper — Ingress Traffic & Threat Enrichment
 - **Description:** Ask about public source IPs reaching the workspace, who connects from where, and
   which observed IPs match threat-intel or cloud-provider ranges — the inputs to a context-based
   ingress allow-list.
