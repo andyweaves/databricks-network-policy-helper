@@ -63,6 +63,17 @@ trial an ingress policy in dry-run before enforcing.
   SCIM; account admin required). Groups are **not** supported — only users and service principals.
 - `ip_identity_and_destination` — both.
 
+## Policy scope (`policy_scope`) & limits
+
+- `single` (default) — one policy across all workspaces.
+- `per_workspace` — a tailored policy per workspace + a recommended workspace→policy assignment
+  table. On apply, `network_policy_id` is a prefix; each workspace binds to `<prefix>-ws-<id>`
+  (which must already exist). Audit `workspace_id = 0` is account-level, excluded unless
+  `include_account_level=true`.
+
+The notebook knows the Databricks network-policy limits and **warns + auto-caps** to keep proposals
+valid: **50 ingress rules, 2000 CIDR blocks, 100 identities per policy; 1000 policies per account**.
+
 ## Flagged groups & threat-intel deny rules
 
 Threat/cloud-owned groups are **always excluded** from proposed allow rules — an allow-list must

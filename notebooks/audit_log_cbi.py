@@ -15,7 +15,10 @@
 # MAGIC    service principals). Flagged (threat/cloud-owned) groups are always excluded.
 # MAGIC 5. Optionally adds **threat-intel deny rules** (one per feed) — either just the ranges that
 # MAGIC    matched observed traffic, or entire feeds regardless of matches (`threat_deny_rules`).
-# MAGIC 6. Optionally writes the result into the account network policy via the Databricks SDK, in
+# MAGIC 6. Builds either **one policy for all workspaces** (`policy_scope=single`) or a **tailored
+# MAGIC    policy per workspace** with recommended assignments (`policy_scope=per_workspace`), and
+# MAGIC    warns + auto-caps to the network-policy limits (50 rules / 2000 CIDRs / 100 identities).
+# MAGIC 7. Optionally writes the result into the account network policy via the Databricks SDK, in
 # MAGIC    **`dry_run`** (log-only) or **`enforce`** (blocking) mode — both gated behind an explicit,
 # MAGIC    mode-specific confirmation.
 # MAGIC
@@ -67,6 +70,11 @@ dbutils.widgets.dropdown(
     "treat_null_status_as_success", "true", ["true", "false"], "1c. NULL status = success?"
 )
 dbutils.widgets.dropdown("include_ipv6", "false", ["true", "false"], "1d. Include IPv6?")
+# workspace_id = 0 in the audit log means account-level access. We build workspace network policies,
+# so exclude those rows by default; set true to include them.
+dbutils.widgets.dropdown(
+    "include_account_level", "false", ["true", "false"], "1e. Include account-level (ws_id=0)?"
+)
 
 # --- Enrichment ---
 # multiselect requires the default to be a SINGLE value present in choices (it cannot pre-select
@@ -93,6 +101,11 @@ dbutils.widgets.dropdown(
     "scoping_mode", "ip_only",
     ["ip_only", "ip_and_destination", "ip_and_identity", "ip_identity_and_destination"],
     "3b. Scoping mode",
+)
+# single = one policy across all workspaces (built from all candidate traffic); per_workspace =
+# a tailored policy per workspace with a recommended workspace->policy assignment.
+dbutils.widgets.dropdown(
+    "policy_scope", "single", ["single", "per_workspace"], "3b2. Policy scope"
 )
 # Flagged (threat/cloud) groups are ALWAYS excluded from proposed rules — remove any stale
 # exclude_flagged widget from earlier versions so it doesn't linger in the widget bar.
@@ -125,10 +138,17 @@ dbutils.widgets.text("confirm_phrase", "", "5c. Mode confirm phrase")
 # DBTITLE 1,Read widgets into constants + explain them
 import pandas as pd
 
+# Databricks account network-policy limits (used to warn + auto-cap so proposals stay valid).
+MAX_INGRESS_RULES_PER_POLICY = 50
+MAX_CIDRS_PER_POLICY = 2000
+MAX_IDENTITIES_PER_POLICY = 100
+MAX_POLICIES_PER_ACCOUNT = 1000
+
 LOOKBACK_DAYS = int(dbutils.widgets.get("lookback_days"))
 MIN_EVENTS = int(dbutils.widgets.get("min_events"))
 TREAT_NULL_STATUS_AS_SUCCESS = dbutils.widgets.get("treat_null_status_as_success") == "true"
 INCLUDE_IPV6 = dbutils.widgets.get("include_ipv6") == "true"
+INCLUDE_ACCOUNT_LEVEL = dbutils.widgets.get("include_account_level") == "true"
 
 _threat_feeds_raw = [f.strip() for f in dbutils.widgets.get("threat_feeds").split(",") if f.strip()]
 # "ALL" (the default sentinel) or an empty selection expands to every feed.
@@ -143,6 +163,7 @@ ENABLE_RDAP = dbutils.widgets.get("enable_rdap") == "true"
 
 POLICY_FRAMING = dbutils.widgets.get("policy_framing")
 SCOPING_MODE = dbutils.widgets.get("scoping_mode")
+POLICY_SCOPE = dbutils.widgets.get("policy_scope")  # single | per_workspace
 POLICY_MODE = dbutils.widgets.get("policy_mode")
 THREAT_DENY_RULES = dbutils.widgets.get("threat_deny_rules")  # off | matched_only | all
 
@@ -217,12 +238,14 @@ _decisions = pd.DataFrame([
     ("1c. treat_null_status_as_success", TREAT_NULL_STATUS_AS_SUCCESS,
      "Whether NULL status_code counts as success. false = stricter (safer for an allow-list)."),
     ("1d. include_ipv6", INCLUDE_IPV6, "Include IPv6 sources in analysis (CBI policy itself is IPv4-only)."),
+    ("1e. include_account_level", INCLUDE_ACCOUNT_LEVEL, "Include account-level (workspace_id=0) audit rows (default false)."),
     ("2a. threat_feeds", ",".join(SELECTED_THREAT_FEEDS), "Which open threat-intel feeds to load."),
     ("2b. refresh_enrichment", REFRESH_ENRICHMENT, "Re-download feeds this run vs reuse existing tables."),
     ("2c/2d. enrichment target", ENRICHMENT_PREFIX or "temp views", "Where enrichment Delta tables live."),
     ("2e. enable_rdap", ENABLE_RDAP, "Do RDAP owner lookups (external calls; needed for 'maximum' framing)."),
     ("3a. policy_framing", POLICY_FRAMING, "minimal=/32s, optimal=collapsed, maximum=full RDAP range."),
     ("3b. scoping_mode", SCOPING_MODE, "Whether rules are scoped by destination and/or identity."),
+    ("3b2. policy_scope", POLICY_SCOPE, "single=one policy for all workspaces; per_workspace=a tailored policy + assignment per workspace."),
     ("3c. policy_mode", POLICY_MODE, "dry_run=log-only (ingress_dry_run); enforce=blocking (ingress)."),
     ("3d. threat_deny_rules", THREAT_DENY_RULES,
      "off=none; matched_only=deny threat CIDRs that matched observed IPs; all=deny whole feeds (one rule each)."),
@@ -424,11 +447,15 @@ print(f"audit_recent rows: {audit_recent.count():,}")
 
 # DBTITLE 1,frequent_public_ips
 _ipv6_predicate = "OR ip_version = 6" if INCLUDE_IPV6 else ""
+# workspace_id = 0 is account-level access; exclude unless the user opts in (we build workspace
+# network policies). Kept as an explicit, visible predicate.
+_account_level_predicate = "" if INCLUDE_ACCOUNT_LEVEL else "AND workspace_id <> 0"
 
 frequent_public_ips = spark.sql(
     f"""
     WITH successful AS (
       SELECT
+        workspace_id,
         principal, principal_email, subject_name,
         service_name, action_name,
         normalized_ip AS public_ip, ip_version,
@@ -437,6 +464,7 @@ frequent_public_ips = spark.sql(
       WHERE normalized_ip IS NOT NULL
         AND (ip_version = 4 {_ipv6_predicate})
         AND (status_code < 400 OR (status_code IS NULL AND {_null_status_ok}))
+        {_account_level_predicate}
         AND NOT (
           ip_version = 4 AND (
             ip_cidr_contains('10.0.0.0/8', normalized_ip)
@@ -467,7 +495,8 @@ frequent_public_ips = spark.sql(
       sort_array(collect_set(principal)) AS principal_list,
       sort_array(collect_set(principal_email)) AS principal_emails,
       sort_array(collect_set(subject_name)) AS subject_names,
-      sort_array(collect_set(service_name)) AS service_list
+      sort_array(collect_set(service_name)) AS service_list,
+      sort_array(collect_set(workspace_id)) AS workspace_ids
     FROM successful
     GROUP BY public_ip
     HAVING COUNT(*) >= {MIN_EVENTS}
@@ -1024,6 +1053,7 @@ for record in candidates_pdf.to_dict(orient="records"):
     record["principal_list"] = _as_list(record.get("principal_list"))
     record["principal_emails"] = _as_list(record.get("principal_emails"))
     record["subject_names"] = _as_list(record.get("subject_names"))
+    record["workspace_ids"] = [int(w) for w in _as_list(record.get("workspace_ids"))]
 
     threat_hits, threat_cidrs = _match_ranges(ip_obj, threat_ranges)
     cloud_hits, _ = _match_ranges(ip_obj, cloud_ranges)
@@ -1053,15 +1083,27 @@ for record in candidates_pdf.to_dict(orient="records"):
     enriched.append(record)
 
 
+ALL_WORKSPACES = "__ALL__"  # policy_target sentinel for a single account-wide policy
+
+
 def _fallback_group_key(rec):
     if rec["ip_obj"].version == 4:
         return str(ipaddress.ip_network(f"{rec['public_ip']}/24", strict=False))
     return str(ipaddress.ip_network(f"{rec['public_ip']}/48", strict=False))
 
 
+# Group by (policy_target, rdap_owner). policy_target is ALL_WORKSPACES for single scope, else the
+# workspace_id (each IP fans out to every workspace it was seen in). This lets per_workspace produce
+# a tailored policy per workspace while single collapses everything to one.
 groups = defaultdict(list)
 for rec in enriched:
-    groups[rec["rdap_owner_name"] or _fallback_group_key(rec)].append(rec)
+    owner = rec["rdap_owner_name"] or _fallback_group_key(rec)
+    if POLICY_SCOPE == "per_workspace":
+        targets = rec["workspace_ids"] or [ALL_WORKSPACES]
+    else:
+        targets = [ALL_WORKSPACES]
+    for tgt in targets:
+        groups[(tgt, owner)].append(rec)
 
 
 def _collapse_destinations(dest_sets):
@@ -1076,7 +1118,7 @@ def _collapse_destinations(dest_sets):
 
 
 suggestion_rows = []
-for owner, recs in groups.items():
+for (policy_target, owner), recs in groups.items():
     ip_objs = [r["ip_obj"] for r in recs]
     minimal = [f"{ip}/{ip.max_prefixlen}" for ip in sorted(set(ip_objs), key=int)]
     optimal = [str(n) for n in ipaddress.collapse_addresses(sorted(set(ip_objs), key=int))]
@@ -1088,6 +1130,7 @@ for owner, recs in groups.items():
     subject_names = sorted({sn for r in recs for sn in (r.get("subject_names") or []) if sn})
     scoped_destination = _collapse_destinations([set(r["destinations"]) for r in recs])
     suggestion_rows.append({
+        "policy_target": policy_target,
         "rdap_owner": owner,
         "distinct_ips": len(set(ip_objs)),
         "total_events": sum(r["events"] for r in recs),
@@ -1108,7 +1151,7 @@ for owner, recs in groups.items():
     })
 
 suggestions_pdf = pd.DataFrame(suggestion_rows).sort_values(
-    ["recommendation", "total_events"], ascending=[True, False]
+    ["policy_target", "recommendation", "total_events"], ascending=[True, True, False]
 ) if suggestion_rows else pd.DataFrame()
 if suggestions_pdf.empty:
     print("No candidate IP groups produced suggestions — check the candidate set / thresholds above.")
@@ -1225,16 +1268,17 @@ else:
 
 # COMMAND ----------
 
-# DBTITLE 1,Assemble rule specs
+# DBTITLE 1,Assemble rule specs (per policy target, with limit enforcement)
 _framing_col = {"minimal": "minimal_cidrs", "optimal": "optimal_cidrs", "maximum": "maximum_cidrs"}[POLICY_FRAMING]
 
-rule_specs = []          # list of dicts: {label, cidrs, destination, identities, identity_type}
+# Build allow rule specs grouped by policy_target (ALL_WORKSPACES for single scope, else workspace_id).
+target_specs = defaultdict(list)   # policy_target -> [allow spec, ...]
 skipped_ipv6 = 0
-excluded_flagged = 0     # groups always held out because they hit threat-intel or a cloud range
+excluded_flagged = 0
 if not suggestions_pdf.empty:
     for _, row in suggestions_pdf.iterrows():
-        # Flagged groups (threat-intel or cloud-owned) are ALWAYS excluded from proposed rules —
-        # an allow-list must never include a known-bad or cloud-provider-owned range.
+        # Flagged groups (threat-intel or cloud-owned) are ALWAYS excluded — an allow-list must
+        # never include a known-bad or cloud-provider-owned range.
         if row["threat_feeds"] or row["cloud_provider"]:
             excluded_flagged += 1
             continue
@@ -1262,7 +1306,6 @@ if not suggestions_pdf.empty:
             for p in (row["principal_emails"] + row["subject_names"]):
                 if p in identity_resolution:
                     resolved.append(identity_resolution[p])
-            # De-dupe resolved identities by (id, type)
             seen, deduped = set(), []
             for r in resolved:
                 key = (r["principal_id"], r["principal_type"])
@@ -1273,33 +1316,77 @@ if not suggestions_pdf.empty:
                 spec["identity_type"] = "SELECTED_IDENTITIES"
                 spec["identities"] = deduped
             else:
-                # Nothing resolved — leave open but flag it so the reviewer knows the rule is loose.
                 spec["label"] += " [identity-unresolved]"
-        rule_specs.append(spec)
+        target_specs[row["policy_target"]].append(spec)
 
-# In ip_only mode collapse everything to one blanket rule (all CIDRs, all destinations/identities).
-if SCOPING_MODE == "ip_only" and rule_specs:
-    all_cidrs = []
-    for spec in rule_specs:
-        for c in spec["cidrs"]:
-            if c not in all_cidrs:
-                all_cidrs.append(c)
-    rule_specs = [{
-        "label": "cbi-advisor-ip-only",
-        "cidrs": all_cidrs,
-        "destination": "all_destinations",
-        "identity_type": "ALL_USERS",
-        "identities": [],
-    }]
+# ip_only: collapse each target's groups into a single blanket rule (all CIDRs, all dest/identities).
+if SCOPING_MODE == "ip_only":
+    for tgt, specs in list(target_specs.items()):
+        all_cidrs = []
+        for spec in specs:
+            for c in spec["cidrs"]:
+                if c not in all_cidrs:
+                    all_cidrs.append(c)
+        target_specs[tgt] = [{
+            "label": "cbi-advisor-ip-only",
+            "cidrs": all_cidrs,
+            "destination": "all_destinations",
+            "identity_type": "ALL_USERS",
+            "identities": [],
+        }]
 
-print(f"Built {len(rule_specs)} allow rule spec(s) using '{POLICY_FRAMING}' framing, scoping_mode="
-      f"{SCOPING_MODE}. Excluded {excluded_flagged} flagged group(s) (threat-intel / cloud-owned).")
-for spec in rule_specs:
-    ident = spec["identity_type"] if spec["identity_type"] == "ALL_USERS" else \
-        f"{len(spec['identities'])} identities"
-    print(f"  {spec['label']}: {len(spec['cidrs'])} CIDR(s), dest={spec['destination']}, ident={ident}")
-if skipped_ipv6:
-    print(f"  ({skipped_ipv6} IPv6 CIDR(s) omitted — CBI policy supports IPv4 only)")
+
+def _enforce_limits(specs, deny, target):
+    """Warn about and auto-cap a target policy's rules to the Databricks network-policy limits:
+    50 ingress rules, 2000 CIDRs, 100 identities per policy. Mutates/returns capped (specs, deny)."""
+    label = "single policy" if target == ALL_WORKSPACES else f"workspace {target}"
+
+    # Identities per rule (100). Cap each rule's identity list.
+    for spec in specs:
+        n = len(spec.get("identities") or [])
+        if n > MAX_IDENTITIES_PER_POLICY:
+            print(f"  ⚠️  [{label}] rule '{spec['label']}' has {n} identities > "
+                  f"{MAX_IDENTITIES_PER_POLICY} — using the first {MAX_IDENTITIES_PER_POLICY}.")
+            spec["identities"] = spec["identities"][:MAX_IDENTITIES_PER_POLICY]
+
+    # Ingress rules per policy (50): allow + deny combined.
+    all_rules = specs + list(deny)
+    if len(all_rules) > MAX_INGRESS_RULES_PER_POLICY:
+        print(f"  ⚠️  [{label}] {len(all_rules)} rules (allow+deny) > {MAX_INGRESS_RULES_PER_POLICY} "
+              f"— keeping the first {MAX_INGRESS_RULES_PER_POLICY} (allow rules prioritised).")
+        specs = specs[:MAX_INGRESS_RULES_PER_POLICY]
+        remaining = MAX_INGRESS_RULES_PER_POLICY - len(specs)
+        deny = deny[:max(remaining, 0)]
+
+    # CIDRs per policy (2000): sum across all rules; trim from the tail if over.
+    def _total_cidrs(rs):
+        return sum(len(r["cidrs"]) for r in rs)
+    budget = MAX_CIDRS_PER_POLICY - _total_cidrs(specs)
+    if budget < 0:
+        print(f"  ⚠️  [{label}] allow CIDRs alone exceed {MAX_CIDRS_PER_POLICY} — trimming allow rules.")
+        trimmed, used = [], 0
+        for r in specs:
+            room = MAX_CIDRS_PER_POLICY - used
+            if room <= 0:
+                break
+            r = dict(r, cidrs=r["cidrs"][:room])
+            trimmed.append(r)
+            used += len(r["cidrs"])
+        specs, deny = trimmed, []
+    else:
+        # Fit deny CIDRs into the remaining budget.
+        trimmed_deny, used = [], 0
+        for r in deny:
+            room = budget - used
+            if room <= 0:
+                print(f"  ⚠️  [{label}] deny CIDRs trimmed to fit the {MAX_CIDRS_PER_POLICY}-CIDR "
+                      f"policy limit.")
+                break
+            r = dict(r, cidrs=r["cidrs"][:room])
+            trimmed_deny.append(r)
+            used += len(r["cidrs"])
+        deny = trimmed_deny
+    return specs, deny
 
 # --- Optional threat-intel DENY rules (one per source_feed), independent of allow rules ---
 # off: none. matched_only: only threat CIDRs that matched an observed IP. all: every IPv4 CIDR in
@@ -1335,6 +1422,26 @@ if THREAT_DENY_RULES != "off":
               f"{total:,} CIDR(s) total:")
         for spec in deny_specs:
             print(f"  DENY {spec['label']}: {len(spec['cidrs'])} CIDR(s)")
+
+# Finalise per-target policies: attach the (shared) deny rules to each target and enforce limits.
+# `policies` maps policy_target -> {"allow": [...], "deny": [...]}. Deny rules apply to every target.
+print(f"\nFinalising policies (policy_scope={POLICY_SCOPE}) with limit enforcement "
+      f"({MAX_INGRESS_RULES_PER_POLICY} rules / {MAX_CIDRS_PER_POLICY} CIDRs / "
+      f"{MAX_IDENTITIES_PER_POLICY} identities per policy):")
+policies = {}
+for tgt in sorted(target_specs, key=str):
+    allow, deny = _enforce_limits(list(target_specs[tgt]), list(deny_specs), tgt)
+    policies[tgt] = {"allow": allow, "deny": deny}
+    label = "single (all workspaces)" if tgt == ALL_WORKSPACES else f"workspace {tgt}"
+    print(f"  {label}: {len(allow)} allow + {len(deny)} deny rule(s), "
+          f"{sum(len(r['cidrs']) for r in allow + deny)} CIDR(s)")
+
+if POLICY_SCOPE == "per_workspace" and len(policies) > MAX_POLICIES_PER_ACCOUNT:
+    print(f"⚠️  {len(policies)} per-workspace policies > {MAX_POLICIES_PER_ACCOUNT} account limit — "
+          f"consider policy_scope=single or consolidating workspaces.")
+if skipped_ipv6:
+    print(f"({skipped_ipv6} IPv6 CIDR(s) omitted overall — CBI policy supports IPv4 only)")
+print(f"Excluded {excluded_flagged} flagged group(s) (threat-intel / cloud-owned).")
 
 # COMMAND ----------
 
@@ -1426,15 +1533,31 @@ if POLICY_MODE == "enforce":
 else:
     print("🔎 MODE = DRY_RUN — proposal targets the log-only `ingress_dry_run` block; nothing is blocked.\n")
 
-if rule_specs or deny_specs:
-    _preview_block = _build_ingress_block(rule_specs, deny_specs)
-    print(f"Proposed `{POLICY_MODE_TARGET}` block "
-          f"({len(rule_specs)} allow + {len(deny_specs)} deny rule(s) — exactly what the "
-          f"apply-cell would send):\n")
-    print(json.dumps({POLICY_MODE_TARGET: _preview_block.as_dict()}, indent=2))
-else:
+if not policies:
     print("No rule specs — nothing to preview. Revisit the framing / scoping / threat_deny_rules "
           "widgets, or check whether every candidate group was flagged and excluded.")
+else:
+    for tgt in sorted(policies, key=str):
+        allow, deny = policies[tgt]["allow"], policies[tgt]["deny"]
+        if not (allow or deny):
+            continue
+        label = "single policy (all workspaces)" if tgt == ALL_WORKSPACES else f"workspace {tgt}"
+        block = _build_ingress_block(allow, deny)
+        print(f"\n=== {label}: `{POLICY_MODE_TARGET}` block "
+              f"({len(allow)} allow + {len(deny)} deny rule(s)) ===")
+        print(json.dumps({POLICY_MODE_TARGET: block.as_dict()}, indent=2))
+
+# Recommended workspace assignments (per_workspace scope only).
+if POLICY_SCOPE == "per_workspace" and policies:
+    _assign = pd.DataFrame(
+        [{"workspace_id": t, "allow_rules": len(p["allow"]), "deny_rules": len(p["deny"]),
+          "total_cidrs": sum(len(r["cidrs"]) for r in p["allow"] + p["deny"])}
+         for t, p in policies.items() if t != ALL_WORKSPACES]
+    )
+    if not _assign.empty:
+        print("\nRecommended per-workspace policy assignments "
+              "(bind a policy to each workspace via the apply cell):")
+        display(_assign.sort_values("workspace_id"))
 
 
 def _touched(block):
@@ -1470,35 +1593,69 @@ display(_policy_explainer)
 # MAGIC executes when **both** `apply_policy = true` **and** `confirm_phrase` matches the mode phrase
 # MAGIC — `APPLY DRY RUN` / `APPLY ENFORCE`. Requires an **account-admin** `AccountClient` (see
 # MAGIC "Account admin requirements" near the top; configure via widgets 4a–4e).
+# MAGIC
+# MAGIC **Scope behaviour:**
+# MAGIC - `policy_scope=single` — updates the single existing policy named in `network_policy_id`.
+# MAGIC - `policy_scope=per_workspace` — treats `network_policy_id` as a **prefix**: for each
+# MAGIC   workspace it updates policy `<prefix>-ws-<workspace_id>` and binds the workspace to it via
+# MAGIC   `update_workspace_network_option_rpc`. **Those per-workspace policies must already exist**
+# MAGIC   (create them in the account console first) — this cell updates + binds, it does not create
+# MAGIC   policies. Per-workspace failures are reported individually and don't stop the others.
 
 # COMMAND ----------
 
 # DBTITLE 1,Apply proposed rules (dry_run or enforce)
-def apply_policy(existing, specs, target_attr, deny=None):
-    """Replace `existing`'s target block (ingress or ingress_dry_run) with the proposed allow (+
-    optional deny) rules, leaving the other blocks and egress unchanged. Reuses the preview builder."""
-    setattr(existing, target_attr, _build_ingress_block(specs, deny))
-    return existing
+def _apply_to_policy(a, policy_id, allow, deny):
+    """Update one existing account network policy's target block (ingress|ingress_dry_run) with the
+    proposed allow+deny rules, leaving the other blocks and egress unchanged (update is a full
+    replace). Returns the sent block dict for logging."""
+    existing = a.network_policies.get_network_policy_rpc(network_policy_id=policy_id)
+    setattr(existing, POLICY_MODE_TARGET, _build_ingress_block(allow, deny))
+    a.network_policies.update_network_policy_rpc(network_policy_id=policy_id, network_policy=existing)
+    return getattr(existing, POLICY_MODE_TARGET).as_dict()
 
 
 if not (APPLY_POLICY and CONFIRM_PHRASE == REQUIRED_PHRASE):
-    print(f"Not applying (mode={POLICY_MODE}). To apply: set apply_policy=true AND "
-          f"confirm_phrase='{REQUIRED_PHRASE}'.")
+    print(f"Not applying (mode={POLICY_MODE}, scope={POLICY_SCOPE}). To apply: set apply_policy=true "
+          f"AND confirm_phrase='{REQUIRED_PHRASE}'.")
 elif not NETWORK_POLICY_ID:
-    print("Set network_policy_id (widget 5a) to the target account network policy first.")
-elif not (rule_specs or deny_specs):
+    print("Set network_policy_id (widget 5a) first.\n"
+          "  - single scope: the existing policy to update.\n"
+          "  - per_workspace scope: used as a PREFIX; each workspace binds to policy "
+          "'<network_policy_id>-ws-<workspace_id>' (which must already exist).")
+elif not policies:
     print("No allow or deny rule specs to apply — check the suggestions above.")
 else:
     a = _account_client()  # account admin required — see "Account admin requirements" above
-    existing = a.network_policies.get_network_policy_rpc(network_policy_id=NETWORK_POLICY_ID)
-    updated = apply_policy(existing, rule_specs, POLICY_MODE_TARGET, deny_specs)
-    print(f"Submitting {POLICY_MODE_TARGET} update ({POLICY_MODE} mode). Block being sent:")
-    print(json.dumps({POLICY_MODE_TARGET: getattr(updated, POLICY_MODE_TARGET).as_dict()}, indent=2))
-    a.network_policies.update_network_policy_rpc(network_policy_id=NETWORK_POLICY_ID, network_policy=updated)
-    if POLICY_MODE == "dry_run":
-        print("\nDone. ingress_dry_run now set — log-only, blocks no traffic.")
-        print("Review the dry-run logs, then re-run with policy_mode=enforce to enforce.")
+
+    if POLICY_SCOPE == "single":
+        p = policies.get(ALL_WORKSPACES) or next(iter(policies.values()))
+        print(f"Updating policy '{NETWORK_POLICY_ID}' ({POLICY_MODE_TARGET}, {POLICY_MODE} mode)...")
+        sent = _apply_to_policy(a, NETWORK_POLICY_ID, p["allow"], p["deny"])
+        print(json.dumps({POLICY_MODE_TARGET: sent}, indent=2))
+        print("Done." if POLICY_MODE == "dry_run"
+              else "⛔ Done — ENFORCED. Verify you can still reach the workspace.")
     else:
-        print("\n⛔ Done. ENFORCED ingress now set — non-matching source IPs are now BLOCKED.")
-        print("Verify you can still reach the workspace. To roll back, re-run with a corrected")
-        print("allow-list or clear the ingress block in the account console.")
+        # per_workspace: update one policy per workspace, then bind the workspace to it. Each policy
+        # '<prefix>-ws-<id>' MUST already exist (create it in the account console first) — this cell
+        # updates + binds, it does not create policies.
+        from databricks.sdk.service.settings import WorkspaceNetworkOption
+
+        print(f"per_workspace apply ({POLICY_MODE} mode): updating + binding "
+              f"{len([t for t in policies if t != ALL_WORKSPACES])} workspace policy(ies).\n"
+              f"  Each policy '{NETWORK_POLICY_ID}-ws-<id>' must already exist.\n")
+        for tgt in sorted(t for t in policies if t != ALL_WORKSPACES):
+            pid = f"{NETWORK_POLICY_ID}-ws-{tgt}"
+            p = policies[tgt]
+            try:
+                _apply_to_policy(a, pid, p["allow"], p["deny"])
+                a.workspace_network_configuration.update_workspace_network_option_rpc(
+                    workspace_id=int(tgt),
+                    workspace_network_option=WorkspaceNetworkOption(
+                        workspace_id=int(tgt), network_policy_id=pid),
+                )
+                print(f"  ✅ workspace {tgt}: updated '{pid}' and bound.")
+            except Exception as e:  # noqa: BLE001 - surface per-workspace failures, keep going
+                print(f"  ❌ workspace {tgt}: {e}")
+        print("\nDone." if POLICY_MODE == "dry_run"
+              else "\n⛔ Done — ENFORCED per workspace. Verify workspace reachability.")
