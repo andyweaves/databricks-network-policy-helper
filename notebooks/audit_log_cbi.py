@@ -1068,7 +1068,10 @@ for owner, recs in groups.items():
 suggestions_pdf = pd.DataFrame(suggestion_rows).sort_values(
     ["recommendation", "total_events"], ascending=[True, False]
 ) if suggestion_rows else pd.DataFrame()
-display(suggestions_pdf)
+if suggestions_pdf.empty:
+    print("No candidate IP groups produced suggestions — check the candidate set / thresholds above.")
+else:
+    display(suggestions_pdf)
 
 # COMMAND ----------
 
@@ -1088,6 +1091,7 @@ threat_matches_pdf = (
     if threat_match_rows else pd.DataFrame()
 )
 if threat_matches_pdf.empty:
+    # A column-less empty DataFrame can't be display()'d (CANNOT_INFER_EMPTY_SCHEMA), so just note it.
     print("✅ No observed source IPs matched any threat-intelligence feed.")
 else:
     n_ips = threat_matches_pdf["observed_ip"].nunique()
@@ -1095,7 +1099,7 @@ else:
     print(f"⚠️  {n_ips} observed IP(s) matched threat intel across feed(s): {feeds}.\n"
           f"    Review these regardless of the allow-list — traffic from a flagged IP that already\n"
           f"    reached the workspace may indicate a compromised identity.")
-display(threat_matches_pdf)
+    display(threat_matches_pdf)
 
 # COMMAND ----------
 
