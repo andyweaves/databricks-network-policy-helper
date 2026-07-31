@@ -63,11 +63,17 @@ trial an ingress policy in dry-run before enforcing.
   SCIM; account admin required). Groups are **not** supported — only users and service principals.
 - `ip_identity_and_destination` — both.
 
-## Flagged groups
+## Flagged groups & threat-intel deny rules
 
-Threat/cloud-flagged groups are **kept and clearly flagged** by default (`exclude_flagged=false`).
-Set `exclude_flagged=true` to hold them out of the proposal automatically. A threat-intel match on
-an IP already reaching the workspace warrants investigation regardless of the allow-list.
+Threat/cloud-owned groups are **always excluded** from proposed allow rules — an allow-list must
+never include a known-bad or cloud-provider range. They still appear in the ⚠️ threat-match table
+for investigation (traffic from a flagged IP already reaching the workspace may mean a compromised
+identity).
+
+Separately, the `threat_deny_rules` widget can add **deny rules** built from the threat-intel table,
+independent of the allow-list: `off` (none), `matched_only` (deny only threat CIDRs that matched
+observed traffic), or `all` (deny entire feeds regardless of matches — one deny rule per feed, with
+a size cap to avoid oversized policies).
 
 ## References (relative to this skill)
 

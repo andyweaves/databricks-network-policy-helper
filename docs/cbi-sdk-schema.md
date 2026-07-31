@@ -32,8 +32,9 @@ CustomerFacingIngressNetworkPolicy
 
 CustomerFacingIngressNetworkPolicyPublicAccess
 ├── restriction_mode: {FULL_ACCESS | RESTRICTED_ACCESS}   # advisor always uses RESTRICTED_ACCESS
-├── allow_rules: [CustomerFacingIngressNetworkPolicyPublicIngressRule]
-└── deny_rules:  [...]
+├── allow_rules: [CustomerFacingIngressNetworkPolicyPublicIngressRule]   # the suggested allow-list
+└── deny_rules:  [CustomerFacingIngressNetworkPolicyPublicIngressRule]   # optional threat-intel deny rules
+                                                                          # (same rule shape; origin CIDRs only)
 
 PublicIngressRule
 ├── label: str

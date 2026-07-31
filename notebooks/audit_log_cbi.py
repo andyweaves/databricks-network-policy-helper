@@ -10,9 +10,12 @@
 # MAGIC 2. Finds the public source IPs that account for real, successful traffic.
 # MAGIC 3. Enriches those IPs with **threat intelligence** (known-bad ranges) and **cloud-provider
 # MAGIC    range** membership, plus RDAP owner lookup.
-# MAGIC 4. Proposes CIDR framings per IP group (`minimal` / `optimal` / `maximum`), optionally scoped
-# MAGIC    by **destination** (e.g. Apps-only) and **identity** (specific users / service principals).
-# MAGIC 5. Optionally writes the result into the account network policy via the Databricks SDK, in
+# MAGIC 4. Proposes allow-rule CIDR framings per IP group (`minimal` / `optimal` / `maximum`),
+# MAGIC    optionally scoped by **destination** (e.g. Apps-only) and **identity** (specific users /
+# MAGIC    service principals). Flagged (threat/cloud-owned) groups are always excluded.
+# MAGIC 5. Optionally adds **threat-intel deny rules** (one per feed) — either just the ranges that
+# MAGIC    matched observed traffic, or entire feeds regardless of matches (`threat_deny_rules`).
+# MAGIC 6. Optionally writes the result into the account network policy via the Databricks SDK, in
 # MAGIC    **`dry_run`** (log-only) or **`enforce`** (blocking) mode — both gated behind an explicit,
 # MAGIC    mode-specific confirmation.
 # MAGIC
@@ -98,10 +101,16 @@ try:
 except Exception:  # noqa: BLE001 - widget may not exist
     pass
 dbutils.widgets.dropdown("policy_mode", "dry_run", ["dry_run", "enforce"], "3c. Policy mode")
+# Optionally add deny rules from threat intel, independent of observed traffic. off = none;
+# matched_only = deny just the threat CIDRs that matched an observed IP (small); all = deny the
+# whole threat-intel table, one rule per feed (can be large — a size cap applies).
+dbutils.widgets.dropdown(
+    "threat_deny_rules", "off", ["off", "matched_only", "all"], "3d. Threat-intel deny rules"
+)
 
 # --- Account authentication (needed for identity resolution + apply; both are account-level) ---
-dbutils.widgets.text("account_id", "", "4a. Databricks account_id (blank = auto-detect)")
-dbutils.widgets.text("account_host", "", "4b. Account console host (blank = auto-detect)")
+dbutils.widgets.text("account_id", "", "4a. Databricks account_id (blank = set manually)")
+dbutils.widgets.text("account_host", "", "4b. Account console host (blank = AWS default)")
 dbutils.widgets.text("account_sp_client_id", "", "4c. Account admin SP client_id")
 dbutils.widgets.text("account_secret_scope", "", "4d. Secret scope holding SP secret")
 dbutils.widgets.text("account_secret_key", "", "4e. Secret key for SP secret")
@@ -135,66 +144,22 @@ ENABLE_RDAP = dbutils.widgets.get("enable_rdap") == "true"
 POLICY_FRAMING = dbutils.widgets.get("policy_framing")
 SCOPING_MODE = dbutils.widgets.get("scoping_mode")
 POLICY_MODE = dbutils.widgets.get("policy_mode")
+THREAT_DENY_RULES = dbutils.widgets.get("threat_deny_rules")  # off | matched_only | all
 
-def _spark_conf(key):
-    try:
-        return spark.conf.get(key)
-    except Exception:  # noqa: BLE001 - conf key may be absent
-        return None
-
+# Safety cap on total CIDRs placed into threat-intel deny rules, to avoid oversized policies.
+MAX_DENY_CIDRS = 5000
 
 # json is imported later in the feed-helpers cell; ensure it's available here too.
 import json  # noqa: E402
 
 DEFAULT_ACCOUNT_HOST = "https://accounts.cloud.databricks.com"
 
-
-def _auto_account_id():
-    """Best-effort numeric account id from the runtime. Widgets always win; this only fills a blank
-    one. The account id is not reliably exposed to a workspace runtime, so this may return None —
-    in which case the user must set widget 4a manually (needed only for SCIM / apply)."""
-    # 1) cluster usage tags as a JSON list of {key,value}
-    tags = _spark_conf("spark.databricks.clusterUsageTags.clusterAllTags")
-    if tags:
-        try:
-            for t in json.loads(tags):
-                if str(t.get("key", "")).lower() == "accountid" and t.get("value"):
-                    return t.get("value")
-        except (ValueError, TypeError):
-            pass
-    # 2) direct confs some runtimes expose
-    for key in ("spark.databricks.clusterUsageTags.accountId",
-                "spark.databricks.clusterUsageTags.billingAccountId",
-                "spark.databricks.accountId"):
-        val = _spark_conf(key)
-        if val:
-            return val
-    # 3) notebook context (dbutils) — accountId is sometimes present in the tag map
-    try:
-        ctx = dbutils.notebook.entry_point.getDbutils().notebook().getContext()
-        tag = ctx.tags().get("accountId")
-        # py4j Options expose isDefined()/get()
-        if tag is not None and hasattr(tag, "isDefined") and tag.isDefined():
-            return tag.get()
-    except Exception:  # noqa: BLE001 - context/tag may be unavailable
-        pass
-    return None
-
-
-def _auto_account_host():
-    """Derive the account console host from the workspace URL's cloud suffix, ALWAYS falling back to
-    the AWS console default if the workspace URL is blank/unrecognised. Overridden by widget 4b."""
-    ws = (_spark_conf("spark.databricks.workspaceUrl") or "").lower()
-    if "azuredatabricks.net" in ws:
-        return "https://accounts.azuredatabricks.net"
-    if "gcp.databricks.com" in ws:
-        return "https://accounts.gcp.databricks.com"
-    return DEFAULT_ACCOUNT_HOST
-
-
-ACCOUNT_ID = dbutils.widgets.get("account_id").strip() or (_auto_account_id() or "")
-# Host: widget wins; else auto-derive; else the default. Guaranteed non-blank.
-ACCOUNT_HOST = dbutils.widgets.get("account_host").strip() or _auto_account_host() or DEFAULT_ACCOUNT_HOST
+# account_id is an account-console concept and is not reliably exposed to a workspace runtime, so we
+# do not try to auto-detect it — leave it blank unless set in widget 4a. The SCIM and apply steps
+# fail early with a clear message if it's needed but unset (see _require_account_id).
+ACCOUNT_ID = dbutils.widgets.get("account_id").strip()
+# Host: widget value wins; otherwise the sensible default. (Azure/GCP users set widget 4b.)
+ACCOUNT_HOST = dbutils.widgets.get("account_host").strip() or DEFAULT_ACCOUNT_HOST
 ACCOUNT_SP_CLIENT_ID = dbutils.widgets.get("account_sp_client_id").strip()
 ACCOUNT_SECRET_SCOPE = dbutils.widgets.get("account_secret_scope").strip()
 ACCOUNT_SECRET_KEY = dbutils.widgets.get("account_secret_key").strip()
@@ -204,26 +169,38 @@ APPLY_POLICY = dbutils.widgets.get("apply_policy") == "true"
 CONFIRM_PHRASE = dbutils.widgets.get("confirm_phrase").strip()
 
 
+def _require_account_id(operation):
+    """Raise a clear, actionable error if account_id is unset. account_id can't be auto-detected
+    from a workspace runtime, so the user must supply it for any account-level operation."""
+    if not ACCOUNT_ID:
+        raise ValueError(
+            f"{operation} requires a Databricks account_id, which is not set.\n"
+            "  Set widget '4a. Databricks account_id' to your numeric account id and re-run.\n"
+            "  Find it in the Account console (accounts.cloud.databricks.com) → top-right user\n"
+            "  menu, or in the account console URL after '/account/'."
+        )
+
+
 def _account_client():
     """Build an account-admin AccountClient. Both account-level operations this notebook can do —
-    SCIM identity resolution and applying a network policy — require an account admin.
+    SCIM identity resolution and applying a network policy — require an account admin AND an
+    account_id (widget 4a).
 
     Preferred: an account-level service principal that is an account admin, via OAuth M2M. Provide
-    account_id + client_id + a secret scope/key holding its OAuth secret (widgets 4a–4e). If those
-    are blank, falls back to the runtime's ambient account credentials (AccountClient()), which
-    only works if the environment is already configured for the account."""
+    account_id + client_id + a secret scope/key holding its OAuth secret (widgets 4a–4e). If the SP
+    fields are blank, falls back to the runtime's ambient account credentials, which only works if
+    the environment is already configured for the account."""
     from databricks.sdk import AccountClient
 
+    _require_account_id("Building an account client")
     if ACCOUNT_SP_CLIENT_ID and ACCOUNT_SECRET_SCOPE and ACCOUNT_SECRET_KEY:
-        if not ACCOUNT_ID:
-            raise ValueError("account_id (widget 4a) is required with an account SP client_id.")
         secret = dbutils.secrets.get(scope=ACCOUNT_SECRET_SCOPE, key=ACCOUNT_SECRET_KEY)
         return AccountClient(
             host=ACCOUNT_HOST, account_id=ACCOUNT_ID,
             client_id=ACCOUNT_SP_CLIENT_ID, client_secret=secret,
         )
     # Ambient fallback — relies on the runtime already holding account credentials.
-    return AccountClient(host=ACCOUNT_HOST, account_id=ACCOUNT_ID) if ACCOUNT_ID else AccountClient()
+    return AccountClient(host=ACCOUNT_HOST, account_id=ACCOUNT_ID)
 
 # Derived
 _null_status_ok = "TRUE" if TREAT_NULL_STATUS_AS_SUCCESS else "FALSE"
@@ -247,9 +224,11 @@ _decisions = pd.DataFrame([
     ("3a. policy_framing", POLICY_FRAMING, "minimal=/32s, optimal=collapsed, maximum=full RDAP range."),
     ("3b. scoping_mode", SCOPING_MODE, "Whether rules are scoped by destination and/or identity."),
     ("3c. policy_mode", POLICY_MODE, "dry_run=log-only (ingress_dry_run); enforce=blocking (ingress)."),
-    ("4a. account_id", ACCOUNT_ID or "(not detected — set manually)",
-     "Databricks account_id (needed for SCIM + apply). Auto-detected from the runtime when blank."),
-    ("4b. account_host", ACCOUNT_HOST, "Account console host. Auto-derived from the workspace cloud when blank."),
+    ("3d. threat_deny_rules", THREAT_DENY_RULES,
+     "off=none; matched_only=deny threat CIDRs that matched observed IPs; all=deny whole feeds (one rule each)."),
+    ("4a. account_id", ACCOUNT_ID or "(unset — set manually)",
+     "Databricks account_id (needed for SCIM + apply). Not auto-detectable from a workspace runtime."),
+    ("4b. account_host", ACCOUNT_HOST, "Account console host. Defaults to AWS; set for Azure/GCP."),
     ("4c. account_sp_client_id", ACCOUNT_SP_CLIENT_ID or "(ambient)",
      "Account-admin service principal client_id for OAuth M2M."),
     ("4d/4e. account secret", f"{ACCOUNT_SECRET_SCOPE}/{ACCOUNT_SECRET_KEY}" if ACCOUNT_SECRET_SCOPE else "(ambient)",
@@ -264,13 +243,8 @@ _decisions = pd.DataFrame([
 _decisions["value"] = _decisions["value"].astype(str)
 print(f"scoping: destination={SCOPE_DESTINATION} identity={SCOPE_IDENTITY} | "
       f"policy_mode={POLICY_MODE} -> {POLICY_MODE_TARGET}")
-print(f"account_host resolved to: {ACCOUNT_HOST}")
-if ACCOUNT_ID:
-    print(f"account_id resolved to: {ACCOUNT_ID}")
-else:
-    print("account_id: NOT auto-detected — set widget 4a manually if you need SCIM / apply.\n"
-          "  (workspaceUrl seen: "
-          f"{_spark_conf('spark.databricks.workspaceUrl') or '(none)'})")
+print(f"account_host: {ACCOUNT_HOST}")
+print(f"account_id: {ACCOUNT_ID or '(unset — set widget 4a if you need identity scoping or apply)'}")
 display(_decisions)
 
 # COMMAND ----------
@@ -1318,7 +1292,7 @@ if SCOPING_MODE == "ip_only" and rule_specs:
         "identities": [],
     }]
 
-print(f"Built {len(rule_specs)} rule spec(s) using '{POLICY_FRAMING}' framing, scoping_mode="
+print(f"Built {len(rule_specs)} allow rule spec(s) using '{POLICY_FRAMING}' framing, scoping_mode="
       f"{SCOPING_MODE}. Excluded {excluded_flagged} flagged group(s) (threat-intel / cloud-owned).")
 for spec in rule_specs:
     ident = spec["identity_type"] if spec["identity_type"] == "ALL_USERS" else \
@@ -1326,6 +1300,41 @@ for spec in rule_specs:
     print(f"  {spec['label']}: {len(spec['cidrs'])} CIDR(s), dest={spec['destination']}, ident={ident}")
 if skipped_ipv6:
     print(f"  ({skipped_ipv6} IPv6 CIDR(s) omitted — CBI policy supports IPv4 only)")
+
+# --- Optional threat-intel DENY rules (one per source_feed), independent of allow rules ---
+# off: none. matched_only: only threat CIDRs that matched an observed IP. all: every IPv4 CIDR in
+# the threat-intel table. CBI is IPv4-only, so IPv6 threat ranges are skipped. A cap (MAX_DENY_CIDRS)
+# guards against oversized policies.
+deny_specs = []
+if THREAT_DENY_RULES != "off":
+    by_feed = defaultdict(set)  # source_feed -> {cidr}
+    if THREAT_DENY_RULES == "matched_only":
+        for m in threat_match_rows:
+            c = m["matched_cidr"]
+            try:
+                if ipaddress.ip_network(c, strict=False).version == 4:
+                    by_feed[m["source_feed"]].add(c)
+            except ValueError:
+                pass
+    else:  # "all" — every IPv4 range in the loaded threat table
+        for net, meta in threat_ranges:
+            if net.version == 4:
+                by_feed[meta["source_feed"]].add(str(net))
+
+    total = sum(len(v) for v in by_feed.values())
+    if total > MAX_DENY_CIDRS:
+        print(f"\n⚠️  Threat-intel deny list has {total:,} CIDRs (> cap {MAX_DENY_CIDRS:,}). "
+              f"Skipping deny rules to avoid an oversized policy — use 'matched_only', deselect "
+              f"large feeds (widget 2a), or raise MAX_DENY_CIDRS deliberately.")
+    else:
+        for feed in sorted(by_feed):
+            cidrs = sorted(by_feed[feed])
+            if cidrs:
+                deny_specs.append({"label": f"cbi-advisor-deny-{feed}"[:250], "cidrs": cidrs})
+        print(f"\nBuilt {len(deny_specs)} threat-intel deny rule(s) [{THREAT_DENY_RULES}], "
+              f"{total:,} CIDR(s) total:")
+        for spec in deny_specs:
+            print(f"  DENY {spec['label']}: {len(spec['cidrs'])} CIDR(s)")
 
 # COMMAND ----------
 
@@ -1384,8 +1393,20 @@ def _build_rule(spec):
                 origin=origin, destination=destination, authentication=authentication)
 
 
-def _build_ingress_block(specs):
-    """Assemble a CustomerFacingIngressNetworkPolicy from rule specs — shared by preview + apply."""
+def _build_deny_rule(spec):
+    """A deny rule is just an origin (CIDRs) with a label — no destination/identity scoping."""
+    from databricks.sdk.service.settings import (
+        CustomerFacingIngressNetworkPolicyIpRanges as IpRanges,
+        CustomerFacingIngressNetworkPolicyPublicIngressRule as Rule,
+        CustomerFacingIngressNetworkPolicyPublicRequestOrigin as Origin,
+    )
+    return Rule(label=f"{spec['label']} ({POLICY_MODE_RULE_LABEL})",
+                origin=Origin(included_ip_ranges=IpRanges(ip_ranges=list(spec["cidrs"]))))
+
+
+def _build_ingress_block(specs, deny=None):
+    """Assemble a CustomerFacingIngressNetworkPolicy from allow specs (+ optional deny specs).
+    Shared by preview + apply so the JSON you review is exactly what gets sent."""
     from databricks.sdk.service.settings import (
         CustomerFacingIngressNetworkPolicy as IngressPolicy,
         CustomerFacingIngressNetworkPolicyPublicAccess as PublicAccess,
@@ -1394,6 +1415,7 @@ def _build_ingress_block(specs):
     public = PublicAccess(
         restriction_mode=RestrictionMode.RESTRICTED_ACCESS,
         allow_rules=[_build_rule(s) for s in specs],
+        deny_rules=[_build_deny_rule(s) for s in (deny or [])] or None,
     )
     return IngressPolicy(public_access=public)
 
@@ -1404,13 +1426,15 @@ if POLICY_MODE == "enforce":
 else:
     print("🔎 MODE = DRY_RUN — proposal targets the log-only `ingress_dry_run` block; nothing is blocked.\n")
 
-if rule_specs:
-    _preview_block = _build_ingress_block(rule_specs)
-    print(f"Proposed `{POLICY_MODE_TARGET}` block (exactly what the apply-cell would send):\n")
+if rule_specs or deny_specs:
+    _preview_block = _build_ingress_block(rule_specs, deny_specs)
+    print(f"Proposed `{POLICY_MODE_TARGET}` block "
+          f"({len(rule_specs)} allow + {len(deny_specs)} deny rule(s) — exactly what the "
+          f"apply-cell would send):\n")
     print(json.dumps({POLICY_MODE_TARGET: _preview_block.as_dict()}, indent=2))
 else:
-    print("No rule specs — nothing to preview. Revisit the framing / scoping widgets, or check "
-          "whether every candidate group was flagged and excluded.")
+    print("No rule specs — nothing to preview. Revisit the framing / scoping / threat_deny_rules "
+          "widgets, or check whether every candidate group was flagged and excluded.")
 
 
 def _touched(block):
@@ -1450,10 +1474,10 @@ display(_policy_explainer)
 # COMMAND ----------
 
 # DBTITLE 1,Apply proposed rules (dry_run or enforce)
-def apply_policy(existing, specs, target_attr):
-    """Replace `existing`'s target block (ingress or ingress_dry_run) with the proposed rules,
-    leaving the other blocks and egress unchanged. Reuses the preview builder."""
-    setattr(existing, target_attr, _build_ingress_block(specs))
+def apply_policy(existing, specs, target_attr, deny=None):
+    """Replace `existing`'s target block (ingress or ingress_dry_run) with the proposed allow (+
+    optional deny) rules, leaving the other blocks and egress unchanged. Reuses the preview builder."""
+    setattr(existing, target_attr, _build_ingress_block(specs, deny))
     return existing
 
 
@@ -1462,12 +1486,12 @@ if not (APPLY_POLICY and CONFIRM_PHRASE == REQUIRED_PHRASE):
           f"confirm_phrase='{REQUIRED_PHRASE}'.")
 elif not NETWORK_POLICY_ID:
     print("Set network_policy_id (widget 5a) to the target account network policy first.")
-elif not rule_specs:
-    print("No rule specs to apply — check the suggestions above.")
+elif not (rule_specs or deny_specs):
+    print("No allow or deny rule specs to apply — check the suggestions above.")
 else:
     a = _account_client()  # account admin required — see "Account admin requirements" above
     existing = a.network_policies.get_network_policy_rpc(network_policy_id=NETWORK_POLICY_ID)
-    updated = apply_policy(existing, rule_specs, POLICY_MODE_TARGET)
+    updated = apply_policy(existing, rule_specs, POLICY_MODE_TARGET, deny_specs)
     print(f"Submitting {POLICY_MODE_TARGET} update ({POLICY_MODE} mode). Block being sent:")
     print(json.dumps({POLICY_MODE_TARGET: getattr(updated, POLICY_MODE_TARGET).as_dict()}, indent=2))
     a.network_policies.update_network_policy_rpc(network_policy_id=NETWORK_POLICY_ID, network_policy=updated)
