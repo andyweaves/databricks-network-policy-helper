@@ -940,6 +940,26 @@ def _service_to_destination(service_name):
 
 candidates_pdf = frequent_public_ips.toPandas()
 
+
+def _as_list(value):
+    """Coerce a record field to a plain Python list. Spark array<> columns come back from toPandas()
+    as numpy arrays, whose truthiness is ambiguous — so `arr or []` raises. Handle None/NaN, numpy
+    arrays and lists uniformly, dropping null/empty entries."""
+    if value is None:
+        return []
+    if hasattr(value, "tolist"):  # numpy array
+        value = value.tolist()
+    elif not isinstance(value, (list, tuple)):
+        # scalar NaN (float) or a lone string
+        try:
+            if pd.isna(value):
+                return []
+        except (TypeError, ValueError):
+            pass
+        value = [value]
+    return [v for v in value if v is not None and v != ""]
+
+
 rdap_cache = {}
 enriched = []
 threat_match_rows = []
@@ -958,6 +978,11 @@ for record in candidates_pdf.to_dict(orient="records"):
     else:
         rdap = {"rdap_owner_name": None, "rdap_type": None, "maximum_cidrs": None}
 
+    # Normalise Spark array<> columns (numpy arrays after toPandas) to plain lists up front.
+    record["principal_list"] = _as_list(record.get("principal_list"))
+    record["principal_emails"] = _as_list(record.get("principal_emails"))
+    record["subject_names"] = _as_list(record.get("subject_names"))
+
     threat_hits, threat_cidrs = _match_ranges(ip_obj, threat_ranges)
     cloud_hits, _ = _match_ranges(ip_obj, cloud_ranges)
     for meta, matched_cidr in zip(threat_hits, threat_cidrs):
@@ -971,7 +996,7 @@ for record in candidates_pdf.to_dict(orient="records"):
             "last_active_date": record.get("last_active_date"),
         })
 
-    destinations = sorted({_service_to_destination(s) for s in (record.get("service_list") or [])})
+    destinations = sorted({_service_to_destination(s) for s in _as_list(record.get("service_list"))})
     record.update({
         "ip_obj": ip_obj,
         "rdap_owner_name": rdap["rdap_owner_name"],
