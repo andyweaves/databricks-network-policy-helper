@@ -1711,6 +1711,8 @@ display(_policy_explainer)
 # MAGIC widget 5c); set that to false to require the policy to pre-exist.
 # MAGIC
 # MAGIC **Scope behaviour:**
+# MAGIC If `network_policy_id` (widget 5a) is left blank, a name is auto-generated
+# MAGIC (`cbi-helper-<timestamp>`) so apply just works.
 # MAGIC - `policy_scope=single` — creates/updates the single policy named in `network_policy_id`.
 # MAGIC - `policy_scope=per_workspace` — treats `network_policy_id` as a **prefix**: for each
 # MAGIC   workspace it creates/updates policy `<prefix>-ws-<workspace_id>` and binds the workspace to
@@ -1735,40 +1737,44 @@ def _apply_to_policy(a, policy_id, allow, deny):
         if not CREATE_MISSING_POLICY:
             raise ValueError(
                 f"Network policy '{policy_id}' does not exist and create_missing_policy=false. "
-                f"Create it first or set widget 5d to true.")
+                f"Create it first or set widget 5c (create_missing_policy) to true.")
         existing = AccountNetworkPolicy(account_id=ACCOUNT_ID, network_policy_id=policy_id)
         action = "created"
 
     setattr(existing, POLICY_MODE_TARGET, _build_ingress_block(allow, deny))
     if action == "created":
+        # network_policy_id may be caller-supplied or server-assigned depending on the API — trust
+        # whatever the created policy comes back with for any downstream use (e.g. ws binding).
         result = a.network_policies.create_network_policy_rpc(network_policy=existing)
-        # The server may assign the id; report whatever it returns.
-        globals()["_last_created_policy_id"] = result.network_policy_id or policy_id
+        effective_id = result.network_policy_id or policy_id
+        sent = getattr(result, POLICY_MODE_TARGET, None) or getattr(existing, POLICY_MODE_TARGET)
     else:
         a.network_policies.update_network_policy_rpc(network_policy_id=policy_id, network_policy=existing)
-    return action, getattr(existing, POLICY_MODE_TARGET).as_dict()
+        effective_id = policy_id
+        sent = getattr(existing, POLICY_MODE_TARGET)
+    return action, effective_id, sent.as_dict()
 
+
+# A policy name is only a label — if the user didn't set one (widget 5a), generate a sensible
+# default so apply just works rather than bailing.
+RESOLVED_POLICY_ID = NETWORK_POLICY_ID or f"cbi-helper-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}"
 
 if not APPLY_POLICY:
     print(f"Not applying (mode={POLICY_MODE}, scope={POLICY_SCOPE}). Set apply_policy=true to apply. "
           f"policy_mode=dry_run is the safe default (log-only); enforce blocks non-matching IPs.")
-elif not NETWORK_POLICY_ID:
-    print("Set network_policy_id (widget 5a) first.\n"
-          f"  - single scope: the policy to create/update (created if missing when "
-          f"create_missing_policy=true).\n"
-          "  - per_workspace scope: used as a PREFIX; each workspace binds to policy "
-          "'<network_policy_id>-ws-<workspace_id>' (created if missing).")
 elif not policies:
     print("No allow or deny rule specs to apply — check the suggestions above.")
 else:
     a = _account_client()  # account admin required — see "Account admin requirements" above
+    if not NETWORK_POLICY_ID:
+        print(f"No network_policy_id set (widget 5a) — using generated name '{RESOLVED_POLICY_ID}'.")
 
     if POLICY_SCOPE == "single":
         p = policies.get(ALL_WORKSPACES) or next(iter(policies.values()))
-        print(f"Applying policy '{NETWORK_POLICY_ID}' ({POLICY_MODE_TARGET}, {POLICY_MODE} mode, "
+        print(f"Applying policy '{RESOLVED_POLICY_ID}' ({POLICY_MODE_TARGET}, {POLICY_MODE} mode, "
               f"create_missing={CREATE_MISSING_POLICY})...")
-        action, sent = _apply_to_policy(a, NETWORK_POLICY_ID, p["allow"], p["deny"])
-        print(f"Policy {action}.")
+        action, effective_id, sent = _apply_to_policy(a, RESOLVED_POLICY_ID, p["allow"], p["deny"])
+        print(f"Policy {action}: {effective_id}")
         print(json.dumps({POLICY_MODE_TARGET: sent}, indent=2))
         print("Done." if POLICY_MODE == "dry_run"
               else "⛔ Done — ENFORCED. Verify you can still reach the workspace.")
@@ -1780,16 +1786,16 @@ else:
         print(f"per_workspace apply ({POLICY_MODE} mode, create_missing={CREATE_MISSING_POLICY}): "
               f"applying + binding {len(ws_targets)} workspace policy(ies).\n")
         for tgt in ws_targets:
-            pid = f"{NETWORK_POLICY_ID}-ws-{tgt}"
+            pid = f"{RESOLVED_POLICY_ID}-ws-{tgt}"
             p = policies[tgt]
             try:
-                action, _ = _apply_to_policy(a, pid, p["allow"], p["deny"])
+                action, effective_id, _ = _apply_to_policy(a, pid, p["allow"], p["deny"])
                 a.workspace_network_configuration.update_workspace_network_option_rpc(
                     workspace_id=int(tgt),
                     workspace_network_option=WorkspaceNetworkOption(
-                        workspace_id=int(tgt), network_policy_id=pid),
+                        workspace_id=int(tgt), network_policy_id=effective_id),
                 )
-                print(f"  ✅ workspace {tgt}: {action} '{pid}' and bound.")
+                print(f"  ✅ workspace {tgt}: {action} '{effective_id}' and bound.")
             except Exception as e:  # noqa: BLE001 - surface per-workspace failures, keep going
                 print(f"  ❌ workspace {tgt}: {e}")
         print("\nDone." if POLICY_MODE == "dry_run"
