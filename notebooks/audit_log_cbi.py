@@ -1397,36 +1397,73 @@ def _enforce_limits(specs, deny, target):
 
 # --- Optional threat-intel DENY rules (one per source_feed), independent of allow rules ---
 # off: none. matched_only: only threat CIDRs that matched an observed IP. all: every IPv4 CIDR in
-# the threat-intel table. CBI is IPv4-only, so IPv6 threat ranges are skipped. A cap (MAX_DENY_CIDRS)
-# guards against oversized policies.
+# the threat-intel table. CBI is IPv4-only, so IPv6 threat ranges are skipped.
+#
+# When the deny list exceeds MAX_DENY_CIDRS we don't skip — we PRIORITISE and trim to the highest-
+# value entries: keep confidence 1 (drop confidence 2), put threat_type='attacker_subnet' first,
+# then take the top MAX_DENY_CIDRS. Selection order is preserved so the later per-policy 2000-CIDR
+# cap (in _enforce_limits) also drops the lowest-priority entries first. A summary reports what's in
+# vs out.
+DENY_TYPE_PRIORITY = {"attacker_subnet": 0}  # everything else sorts after (priority 1)
+
+
+def _deny_sort_key(rec):
+    return (DENY_TYPE_PRIORITY.get(rec["threat_type"], 1), rec["confidence"], rec["source_feed"], rec["cidr"])
+
+
 deny_specs = []
 if THREAT_DENY_RULES != "off":
-    by_feed = defaultdict(set)  # source_feed -> {cidr}
+    # Collect per-CIDR records carrying feed/type/confidence, de-duped on cidr (keep most severe).
+    by_cidr = {}
     if THREAT_DENY_RULES == "matched_only":
-        for m in threat_match_rows:
-            c = m["matched_cidr"]
-            try:
-                if ipaddress.ip_network(c, strict=False).version == 4:
-                    by_feed[m["source_feed"]].add(c)
-            except ValueError:
-                pass
-    else:  # "all" — every IPv4 range in the loaded threat table
-        for net, meta in threat_ranges:
-            if net.version == 4:
-                by_feed[meta["source_feed"]].add(str(net))
+        src = [{"cidr": m["matched_cidr"], "source_feed": m["source_feed"],
+                "threat_type": m["threat_type"], "confidence": m["confidence"]}
+               for m in threat_match_rows]
+    else:  # "all"
+        src = [{"cidr": str(net), "source_feed": meta["source_feed"],
+                "threat_type": meta["threat_type"], "confidence": meta["confidence"]}
+               for net, meta in threat_ranges if net.version == 4]
+    for rec in src:
+        try:
+            if ipaddress.ip_network(rec["cidr"], strict=False).version != 4:
+                continue
+        except ValueError:
+            continue
+        cur = by_cidr.get(rec["cidr"])
+        # Keep the more severe entry per CIDR: lower confidence number wins, attacker_subnet wins.
+        if cur is None or _deny_sort_key(rec) < _deny_sort_key(cur):
+            by_cidr[rec["cidr"]] = rec
 
-    total = sum(len(v) for v in by_feed.values())
+    all_records = list(by_cidr.values())
+    total = len(all_records)
+
     if total > MAX_DENY_CIDRS:
+        conf1 = [r for r in all_records if r["confidence"] == 1]
+        pool = conf1 if conf1 else all_records
+        pool.sort(key=_deny_sort_key)
+        selected = pool[:MAX_DENY_CIDRS]
+        dropped_conf2 = total - len(conf1) if conf1 else 0
         print(f"\n⚠️  Threat-intel deny list has {total:,} CIDRs (> cap {MAX_DENY_CIDRS:,}). "
-              f"Skipping deny rules to avoid an oversized policy — use 'matched_only', deselect "
-              f"large feeds (widget 2a), or raise MAX_DENY_CIDRS deliberately.")
+              f"Prioritising instead of skipping:")
+        print(f"    - kept confidence-1 only (dropped {dropped_conf2:,} confidence-2 CIDR(s))")
+        print(f"    - attacker_subnet ranges first, then took the top {MAX_DENY_CIDRS:,}")
+        print(f"    → INCLUDING {len(selected):,} of {total:,} threat CIDR(s); "
+              f"{total - len(selected):,} NOT included.")
+        print("    Raise MAX_DENY_CIDRS, use 'matched_only', or deselect feeds (2a) to change this.")
     else:
-        for feed in sorted(by_feed):
-            cidrs = sorted(by_feed[feed])
-            if cidrs:
-                deny_specs.append({"label": f"cbi-helper-deny-{feed}"[:250], "cidrs": cidrs})
+        selected = sorted(all_records, key=_deny_sort_key)
+
+    # Group the selected records into one deny rule per feed, preserving priority order.
+    by_feed = defaultdict(list)
+    for rec in selected:
+        if rec["cidr"] not in by_feed[rec["source_feed"]]:
+            by_feed[rec["source_feed"]].append(rec["cidr"])
+    for feed in sorted(by_feed):
+        deny_specs.append({"label": f"cbi-helper-deny-{feed}"[:250], "cidrs": by_feed[feed]})
+
+    if deny_specs:
         print(f"\nBuilt {len(deny_specs)} threat-intel deny rule(s) [{THREAT_DENY_RULES}], "
-              f"{total:,} CIDR(s) total:")
+              f"{sum(len(s['cidrs']) for s in deny_specs):,} CIDR(s) total:")
         for spec in deny_specs:
             print(f"  DENY {spec['label']}: {len(spec['cidrs'])} CIDR(s)")
 

@@ -85,8 +85,12 @@ identity).
 
 Separately, the `threat_deny_rules` widget can add **deny rules** built from the threat-intel table,
 independent of the allow-list: `off` (none), `matched_only` (deny only threat CIDRs that matched
-observed traffic), or `all` (deny entire feeds regardless of matches — one deny rule per feed, with
-a size cap to avoid oversized policies).
+observed traffic), or `all` (deny entire feeds regardless of matches — one deny rule per feed).
+
+When the deny list exceeds the `MAX_DENY_CIDRS` cap, it is **prioritised, not skipped**: keep
+confidence-1 entries (drop confidence-2), put `attacker_subnet` ranges first, then take the top N to
+fit — and report how many CIDRs are included vs excluded. (Selection order is preserved so the hard
+2000-CIDR-per-policy limit also trims the lowest-priority entries first.)
 
 ## Source repo
 
