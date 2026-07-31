@@ -16,25 +16,26 @@ It answers: *who connects to this workspace, from where, and what should the inb
      already talking to your workspace that appear on a blocklist.
    - **Cloud-provider ranges** (AWS, GCP, Oracle, Azure — official feeds) — flags cloud-owned IPs.
    - **Databricks-owned ranges** (official `databricks.com/networking/v1/ip-ranges.json`, all 3
-     clouds) — flags Databricks' own control-plane / serverless IPs so they're excluded, not
-     allow-listed.
+     clouds) — identifies Databricks' own control-plane / serverless IPs and **auto-adds them to the
+     allow-list** (they're the platform reaching in; this overrides the cloud-provider flag).
    - **RDAP** ownership — names the owning org and its full assigned range.
 3. Proposes CIDR framings per owner group — `minimal` / `optimal` / `maximum` — annotated with the
    enrichment, ranked, with known-bad / cloud-owned groups flagged for review.
 4. Optionally scopes rules by **destination** (Apps / Lakebase) and **identity** (specific users /
    service principals).
 5. Optionally writes the result into the network policy via the Databricks SDK, in **`dry_run`**
-   (log-only) or **`enforce`** (blocking) mode — both gated behind explicit, mode-specific
-   confirmation.
+   (log-only) or **`enforce`** (blocking) mode, gated by `apply_policy`.
 
 ## Safety model
 
 - Default `policy_mode` is **`dry_run`** — writes the log-only `ingress_dry_run` block and **blocks
   nothing**. Validate here first.
 - **`enforce` mode writes the enforced `ingress` block and CAN lock users out** if the allow-list
-  is incomplete. It requires a distinct confirm phrase (`APPLY ENFORCE`).
+  is incomplete. Keep `dry_run` until the logs look right.
+- Databricks' own control-plane / serverless IPs are auto-allowed, so an enforced policy won't lock
+  the platform out.
 - The CBI policy schema is **IPv4-only**; IPv6 is analysed but never put in a policy.
-- Nothing is written unless you set `apply_policy=true` **and** type the mode's confirm phrase.
+- Nothing is written unless you set `apply_policy=true`.
 
 ## Quick start
 

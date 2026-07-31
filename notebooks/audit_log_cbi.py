@@ -24,7 +24,8 @@
 # MAGIC
 # MAGIC > ⚠️ **Safety:** every suggestion is advisory. The default `policy_mode` is `dry_run`, which
 # MAGIC > cannot block traffic. **`enforce` CAN lock users out** if the allow-list is incomplete — it
-# MAGIC > requires a distinct confirmation phrase. Validate in `dry_run` and review its logs first.
+# MAGIC > only writes when `apply_policy=true`. Validate in `dry_run` and review its logs before
+# MAGIC > switching `policy_mode` to `enforce`.
 # MAGIC
 # MAGIC **All decisions are made via the widgets at the top (see "Parameters & decisions").**
 
@@ -133,10 +134,9 @@ dbutils.widgets.text("account_secret_key", "", "4e. Secret key for SP secret")
 # --- Apply (gated) ---
 dbutils.widgets.text("network_policy_id", "", "5a. Target network_policy_id")
 dbutils.widgets.dropdown("apply_policy", "false", ["true", "false"], "5b. Apply the policy?")
-dbutils.widgets.text("confirm_phrase", "", "5c. Mode confirm phrase")
 # If the target policy doesn't exist yet, create it (default). Set false to require it to pre-exist.
 dbutils.widgets.dropdown(
-    "create_missing_policy", "true", ["true", "false"], "5d. Create policy if missing?"
+    "create_missing_policy", "true", ["true", "false"], "5c. Create policy if missing?"
 )
 
 # COMMAND ----------
@@ -193,7 +193,6 @@ ACCOUNT_SECRET_KEY = dbutils.widgets.get("account_secret_key").strip()
 
 NETWORK_POLICY_ID = dbutils.widgets.get("network_policy_id").strip()
 APPLY_POLICY = dbutils.widgets.get("apply_policy") == "true"
-CONFIRM_PHRASE = dbutils.widgets.get("confirm_phrase").strip()
 CREATE_MISSING_POLICY = dbutils.widgets.get("create_missing_policy") == "true"
 
 
@@ -237,7 +236,6 @@ ENRICHMENT_PREFIX = f"{ENRICHMENT_CATALOG}.{ENRICHMENT_SCHEMA}." if PERSIST_ENRI
 SCOPE_DESTINATION = SCOPING_MODE in ("ip_and_destination", "ip_identity_and_destination")
 SCOPE_IDENTITY = SCOPING_MODE in ("ip_and_identity", "ip_identity_and_destination")
 POLICY_MODE_TARGET = {"dry_run": "ingress_dry_run", "enforce": "ingress"}[POLICY_MODE]
-REQUIRED_PHRASE = {"dry_run": "APPLY DRY RUN", "enforce": "APPLY ENFORCE"}[POLICY_MODE]
 
 _decisions = pd.DataFrame([
     ("1a. lookback_days", LOOKBACK_DAYS, "Days of system.access.audit history to analyse."),
@@ -264,10 +262,8 @@ _decisions = pd.DataFrame([
     ("4d/4e. account secret", f"{ACCOUNT_SECRET_SCOPE}/{ACCOUNT_SECRET_KEY}" if ACCOUNT_SECRET_SCOPE else "(ambient)",
      "Secret scope+key holding the SP's OAuth secret (never hardcode it)."),
     ("5a. network_policy_id", NETWORK_POLICY_ID or "(unset)", "Target account network policy to update."),
-    ("5b. apply_policy", APPLY_POLICY, "Master switch for the gated apply step."),
-    ("5c. confirm_phrase", "(set)" if CONFIRM_PHRASE else "(unset)",
-     f"Must equal '{REQUIRED_PHRASE}' for the current policy_mode to apply."),
-    ("5d. create_missing_policy", CREATE_MISSING_POLICY,
+    ("5b. apply_policy", APPLY_POLICY, "Master switch for the apply step (dry_run is the safe default mode)."),
+    ("5c. create_missing_policy", CREATE_MISSING_POLICY,
      "If the target policy doesn't exist, create it (default true) vs require it to pre-exist."),
 ], columns=["widget", "value", "meaning"])
 # The value column mixes int/bool/str; cast to string so display()'s Arrow conversion doesn't fail
@@ -1217,9 +1213,11 @@ for (policy_target, owner), recs in groups.items():
         "threat_feeds": threat_feeds or None,
         "cloud_provider": cloud_providers or None,
         "databricks_owned": databricks_owned or None,
+        # Databricks-owned takes precedence: those IPs are the platform and must be ALLOWED (else an
+        # enforced policy locks the control plane out), overriding any cloud-provider flag.
         "recommendation": (
+            "ALLOW — Databricks-owned" if databricks_owned else
             "REVIEW — known-bad range" if threat_feeds else
-            "EXCLUDE — Databricks-owned" if databricks_owned else
             "REVIEW — cloud-owned range" if cloud_providers else
             "candidate"
         ),
@@ -1352,10 +1350,10 @@ skipped_ipv6 = 0
 excluded_flagged = 0
 if not suggestions_pdf.empty:
     for _, row in suggestions_pdf.iterrows():
-        # Flagged groups are ALWAYS excluded — an allow-list must never include a known-bad,
-        # cloud-provider-owned, or Databricks-owned range (the last is the platform itself, not a
-        # customer network).
-        if row["threat_feeds"] or row["cloud_provider"] or row["databricks_owned"]:
+        # Databricks-owned groups are ALWAYS included (auto-allowed) and take precedence — they are
+        # the platform reaching in; excluding them would lock the control plane out under an enforced
+        # policy. Otherwise, threat-intel / cloud-provider-owned groups are always excluded.
+        if not row["databricks_owned"] and (row["threat_feeds"] or row["cloud_provider"]):
             excluded_flagged += 1
             continue
         ipv4_cidrs = []
@@ -1370,14 +1368,16 @@ if not suggestions_pdf.empty:
         if not ipv4_cidrs:
             continue
 
+        _label_base = "cbi-helper-databricks" if row["databricks_owned"] else f"cbi-helper-{row['rdap_owner']}"
         spec = {
-            "label": f"cbi-helper-{row['rdap_owner']}"[:250],
+            "label": _label_base[:250],
             "cidrs": ipv4_cidrs,
-            "destination": row["scoped_destination"] if SCOPE_DESTINATION else "all_destinations",
+            # Databricks-owned control-plane must reach everything, so never destination/identity-scope it.
+            "destination": row["scoped_destination"] if (SCOPE_DESTINATION and not row["databricks_owned"]) else "all_destinations",
             "identity_type": "ALL_USERS",
             "identities": [],
         }
-        if SCOPE_IDENTITY:
+        if SCOPE_IDENTITY and not row["databricks_owned"]:
             resolved = []
             for p in (row["principal_emails"] + row["subject_names"]):
                 if p in identity_resolution:
@@ -1702,13 +1702,13 @@ display(_policy_explainer)
 # MAGIC - **`dry_run`** → `ingress_dry_run.public_access` — **log-only, blocks nothing.**
 # MAGIC - **`enforce`** → `ingress.public_access` — **enforced: non-matching source IPs are blocked.**
 # MAGIC
-# MAGIC Other blocks (and `egress`) are read and re-sent unchanged (update is a full replace). Only
-# MAGIC executes when **both** `apply_policy = true` **and** `confirm_phrase` matches the mode phrase
-# MAGIC — `APPLY DRY RUN` / `APPLY ENFORCE`. Requires an **account-admin** `AccountClient` (see
-# MAGIC "Account admin requirements" near the top; configure via widgets 4a–4e).
+# MAGIC Other blocks (and `egress`) are read and re-sent unchanged (update is a full replace). Runs
+# MAGIC when `apply_policy = true`; the default `policy_mode=dry_run` is the safeguard (it only writes
+# MAGIC the log-only block). Requires an **account-admin** `AccountClient` (see "Account admin
+# MAGIC requirements" near the top; configure via widgets 4a–4e).
 # MAGIC
 # MAGIC By default it **creates the policy if it doesn't exist** (`create_missing_policy=true`,
-# MAGIC widget 5d); set that to false to require the policy to pre-exist.
+# MAGIC widget 5c); set that to false to require the policy to pre-exist.
 # MAGIC
 # MAGIC **Scope behaviour:**
 # MAGIC - `policy_scope=single` — creates/updates the single policy named in `network_policy_id`.
@@ -1749,9 +1749,9 @@ def _apply_to_policy(a, policy_id, allow, deny):
     return action, getattr(existing, POLICY_MODE_TARGET).as_dict()
 
 
-if not (APPLY_POLICY and CONFIRM_PHRASE == REQUIRED_PHRASE):
-    print(f"Not applying (mode={POLICY_MODE}, scope={POLICY_SCOPE}). To apply: set apply_policy=true "
-          f"AND confirm_phrase='{REQUIRED_PHRASE}'.")
+if not APPLY_POLICY:
+    print(f"Not applying (mode={POLICY_MODE}, scope={POLICY_SCOPE}). Set apply_policy=true to apply. "
+          f"policy_mode=dry_run is the safe default (log-only); enforce blocks non-matching IPs.")
 elif not NETWORK_POLICY_ID:
     print("Set network_policy_id (widget 5a) first.\n"
           f"  - single scope: the policy to create/update (created if missing when "

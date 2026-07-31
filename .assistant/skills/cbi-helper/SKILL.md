@@ -24,7 +24,7 @@ trial an ingress policy in dry-run before enforcing.
 - The notebook's default `policy_mode` is **`dry_run`** — writes the log-only `ingress_dry_run`
   block and **blocks nothing**. Always propose and validate here first.
 - **`enforce` mode writes the enforced `ingress` block and CAN lock users (and the operator) out**
-  if the allow-list is incomplete. It needs a distinct confirm phrase (`APPLY ENFORCE`).
+  if the allow-list is incomplete. Keep `policy_mode=dry_run` until the logs look right.
 - Never set `apply_policy=true` on the user's behalf without explicit, current confirmation of the
   mode and the exact CIDRs. Show the JSON preview first.
 - The CBI policy schema is **IPv4-only**; IPv6 is analysed but never put in a policy.
@@ -78,13 +78,16 @@ valid: **50 ingress rules, 2000 CIDR blocks, 100 identities per policy; 1000 pol
 
 ## Flagged groups & threat-intel deny rules
 
-Threat-intel, cloud-provider-owned, and **Databricks-owned** groups are **always excluded** from
-proposed allow rules — an allow-list must never include a known-bad or cloud-provider range, and
-Databricks' own control-plane / serverless IPs (identified from the official
-`databricks.com/networking/v1/ip-ranges.json` feed, all three clouds) are the platform reaching in,
-not a customer network to allow-list. Threat matches still appear in the ⚠️ threat-match table for
-investigation (traffic from a flagged IP already reaching the workspace may mean a compromised
-identity).
+Threat-intel and cloud-provider-owned groups are **always excluded** from proposed allow rules — an
+allow-list must never include a known-bad or cloud-provider range. Threat matches still appear in the
+⚠️ threat-match table for investigation (traffic from a flagged IP already reaching the workspace may
+mean a compromised identity).
+
+**Databricks-owned** IPs are the exception and take **precedence**: Databricks' own control-plane /
+serverless IPs (identified from the official `databricks.com/networking/v1/ip-ranges.json` feed, all
+three clouds) are **auto-added to the allow-list** in their own unscoped rule — they're the platform
+reaching in, so leaving them out would lock the control plane out under an enforced policy. This
+overrides the cloud-provider flag (a Databricks IP is also an AWS/Azure/GCP IP).
 
 Separately, the `threat_deny_rules` widget can add **deny rules** built from the threat-intel table,
 independent of the allow-list: `off` (none), `matched_only` (deny only threat CIDRs that matched
