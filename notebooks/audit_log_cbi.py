@@ -66,8 +66,16 @@ dbutils.widgets.dropdown(
 dbutils.widgets.dropdown("include_ipv6", "true", ["true", "false"], "1d. Include IPv6?")
 
 # --- Enrichment ---
+# multiselect requires the default to be a SINGLE value present in choices (it cannot pre-select
+# multiple). Use an "ALL" sentinel as the default; it expands to every feed when read below.
+# Remove any pre-existing threat_feeds widget first so a stale value (e.g. from an earlier build)
+# can't fail recreation by not being in the current choices list.
+try:
+    dbutils.widgets.remove("threat_feeds")
+except Exception:  # noqa: BLE001 - widget may not exist yet
+    pass
 dbutils.widgets.multiselect(
-    "threat_feeds", ",".join(ALL_THREAT_FEEDS), ALL_THREAT_FEEDS, "2a. Threat-intel feeds"
+    "threat_feeds", "ALL", ["ALL"] + ALL_THREAT_FEEDS, "2a. Threat-intel feeds (ALL = every feed)"
 )
 dbutils.widgets.dropdown("refresh_enrichment", "true", ["true", "false"], "2b. Refresh feeds?")
 dbutils.widgets.text("enrichment_catalog", "main", "2c. Enrichment catalog")
@@ -108,7 +116,12 @@ MIN_EVENTS = int(dbutils.widgets.get("min_events"))
 TREAT_NULL_STATUS_AS_SUCCESS = dbutils.widgets.get("treat_null_status_as_success") == "true"
 INCLUDE_IPV6 = dbutils.widgets.get("include_ipv6") == "true"
 
-SELECTED_THREAT_FEEDS = [f for f in dbutils.widgets.get("threat_feeds").split(",") if f in ALL_THREAT_FEEDS]
+_threat_feeds_raw = [f.strip() for f in dbutils.widgets.get("threat_feeds").split(",") if f.strip()]
+# "ALL" (the default sentinel) or an empty selection expands to every feed.
+if not _threat_feeds_raw or "ALL" in _threat_feeds_raw:
+    SELECTED_THREAT_FEEDS = list(ALL_THREAT_FEEDS)
+else:
+    SELECTED_THREAT_FEEDS = [f for f in _threat_feeds_raw if f in ALL_THREAT_FEEDS]
 REFRESH_ENRICHMENT = dbutils.widgets.get("refresh_enrichment") == "true"
 ENRICHMENT_CATALOG = dbutils.widgets.get("enrichment_catalog").strip()
 ENRICHMENT_SCHEMA = dbutils.widgets.get("enrichment_schema").strip()
