@@ -572,7 +572,10 @@ def _materialize(rows, columns, name):
     Returns the fully-qualified name/view used for querying."""
     df = spark.createDataFrame(rows, schema=columns) if rows else spark.createDataFrame([], schema=columns)
     if PERSIST_ENRICHMENT:
-        spark.sql(f"CREATE CATALOG IF NOT EXISTS {ENRICHMENT_CATALOG}")
+        try:
+            spark.sql(f"CREATE CATALOG IF NOT EXISTS {ENRICHMENT_CATALOG}")
+        except Exception:
+            pass  # Catalog already exists or workspace requires managed location
         spark.sql(f"CREATE SCHEMA IF NOT EXISTS {ENRICHMENT_CATALOG}.{ENRICHMENT_SCHEMA}")
         target = f"{ENRICHMENT_PREFIX}{name}"
         df.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(target)
