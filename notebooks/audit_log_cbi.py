@@ -91,10 +91,13 @@ dbutils.widgets.dropdown(
     ["ip_only", "ip_and_destination", "ip_and_identity", "ip_identity_and_destination"],
     "3b. Scoping mode",
 )
-# exclude_flagged is opt-in: by default threat/cloud-flagged groups are KEPT in the proposal (and
-# clearly flagged in the suggestions table). Set this to true to have them held out automatically.
-dbutils.widgets.dropdown("exclude_flagged", "false", ["true", "false"], "3c. Exclude flagged groups? (opt-in)")
-dbutils.widgets.dropdown("policy_mode", "dry_run", ["dry_run", "enforce"], "3d. Policy mode")
+# Flagged (threat/cloud) groups are ALWAYS excluded from proposed rules — remove any stale
+# exclude_flagged widget from earlier versions so it doesn't linger in the widget bar.
+try:
+    dbutils.widgets.remove("exclude_flagged")
+except Exception:  # noqa: BLE001 - widget may not exist
+    pass
+dbutils.widgets.dropdown("policy_mode", "dry_run", ["dry_run", "enforce"], "3c. Policy mode")
 
 # --- Account authentication (needed for identity resolution + apply; both are account-level) ---
 dbutils.widgets.text("account_id", "", "4a. Databricks account_id (blank = auto-detect)")
@@ -131,7 +134,6 @@ ENABLE_RDAP = dbutils.widgets.get("enable_rdap") == "true"
 
 POLICY_FRAMING = dbutils.widgets.get("policy_framing")
 SCOPING_MODE = dbutils.widgets.get("scoping_mode")
-EXCLUDE_FLAGGED = dbutils.widgets.get("exclude_flagged") == "true"
 POLICY_MODE = dbutils.widgets.get("policy_mode")
 
 def _spark_conf(key):
@@ -141,44 +143,58 @@ def _spark_conf(key):
         return None
 
 
-def _auto_account_id():
-    """Best-effort account id from the runtime. Widgets always win; this only fills a blank one.
+# json is imported later in the feed-helpers cell; ensure it's available here too.
+import json  # noqa: E402
 
-    Tries, in order: the account-id tag in the cluster usage-tags conf, then a couple of other
-    confs some runtimes expose. Returns None if none are present (then the user must set widget 4a)."""
+DEFAULT_ACCOUNT_HOST = "https://accounts.cloud.databricks.com"
+
+
+def _auto_account_id():
+    """Best-effort numeric account id from the runtime. Widgets always win; this only fills a blank
+    one. The account id is not reliably exposed to a workspace runtime, so this may return None —
+    in which case the user must set widget 4a manually (needed only for SCIM / apply)."""
+    # 1) cluster usage tags as a JSON list of {key,value}
     tags = _spark_conf("spark.databricks.clusterUsageTags.clusterAllTags")
     if tags:
         try:
             for t in json.loads(tags):
-                if t.get("key") in ("AccountId", "accountId"):
+                if str(t.get("key", "")).lower() == "accountid" and t.get("value"):
                     return t.get("value")
         except (ValueError, TypeError):
             pass
+    # 2) direct confs some runtimes expose
     for key in ("spark.databricks.clusterUsageTags.accountId",
-                "spark.databricks.clusterUsageTags.billingAccountId"):
+                "spark.databricks.clusterUsageTags.billingAccountId",
+                "spark.databricks.accountId"):
         val = _spark_conf(key)
         if val:
             return val
+    # 3) notebook context (dbutils) — accountId is sometimes present in the tag map
+    try:
+        ctx = dbutils.notebook.entry_point.getDbutils().notebook().getContext()
+        tag = ctx.tags().get("accountId")
+        # py4j Options expose isDefined()/get()
+        if tag is not None and hasattr(tag, "isDefined") and tag.isDefined():
+            return tag.get()
+    except Exception:  # noqa: BLE001 - context/tag may be unavailable
+        pass
     return None
 
 
 def _auto_account_host():
-    """Derive the account console host from the workspace URL's cloud suffix. Falls back to the AWS
-    console. Overridden by widget 4b when set."""
-    ws = _spark_conf("spark.databricks.workspaceUrl") or ""
+    """Derive the account console host from the workspace URL's cloud suffix, ALWAYS falling back to
+    the AWS console default if the workspace URL is blank/unrecognised. Overridden by widget 4b."""
+    ws = (_spark_conf("spark.databricks.workspaceUrl") or "").lower()
     if "azuredatabricks.net" in ws:
         return "https://accounts.azuredatabricks.net"
     if "gcp.databricks.com" in ws:
         return "https://accounts.gcp.databricks.com"
-    return "https://accounts.cloud.databricks.com"
+    return DEFAULT_ACCOUNT_HOST
 
-
-# json is imported later in the feed-helpers cell; ensure it's available here too.
-import json  # noqa: E402
 
 ACCOUNT_ID = dbutils.widgets.get("account_id").strip() or (_auto_account_id() or "")
-_account_host_widget = dbutils.widgets.get("account_host").strip()
-ACCOUNT_HOST = _account_host_widget or _auto_account_host()
+# Host: widget wins; else auto-derive; else the default. Guaranteed non-blank.
+ACCOUNT_HOST = dbutils.widgets.get("account_host").strip() or _auto_account_host() or DEFAULT_ACCOUNT_HOST
 ACCOUNT_SP_CLIENT_ID = dbutils.widgets.get("account_sp_client_id").strip()
 ACCOUNT_SECRET_SCOPE = dbutils.widgets.get("account_secret_scope").strip()
 ACCOUNT_SECRET_KEY = dbutils.widgets.get("account_secret_key").strip()
@@ -230,8 +246,7 @@ _decisions = pd.DataFrame([
     ("2e. enable_rdap", ENABLE_RDAP, "Do RDAP owner lookups (external calls; needed for 'maximum' framing)."),
     ("3a. policy_framing", POLICY_FRAMING, "minimal=/32s, optimal=collapsed, maximum=full RDAP range."),
     ("3b. scoping_mode", SCOPING_MODE, "Whether rules are scoped by destination and/or identity."),
-    ("3c. exclude_flagged", EXCLUDE_FLAGGED, "Opt-in: if true, hold threat/cloud-flagged groups out of the proposal (default false = keep + flag them)."),
-    ("3d. policy_mode", POLICY_MODE, "dry_run=log-only (ingress_dry_run); enforce=blocking (ingress)."),
+    ("3c. policy_mode", POLICY_MODE, "dry_run=log-only (ingress_dry_run); enforce=blocking (ingress)."),
     ("4a. account_id", ACCOUNT_ID or "(not detected — set manually)",
      "Databricks account_id (needed for SCIM + apply). Auto-detected from the runtime when blank."),
     ("4b. account_host", ACCOUNT_HOST, "Account console host. Auto-derived from the workspace cloud when blank."),
@@ -249,6 +264,13 @@ _decisions = pd.DataFrame([
 _decisions["value"] = _decisions["value"].astype(str)
 print(f"scoping: destination={SCOPE_DESTINATION} identity={SCOPE_IDENTITY} | "
       f"policy_mode={POLICY_MODE} -> {POLICY_MODE_TARGET}")
+print(f"account_host resolved to: {ACCOUNT_HOST}")
+if ACCOUNT_ID:
+    print(f"account_id resolved to: {ACCOUNT_ID}")
+else:
+    print("account_id: NOT auto-detected — set widget 4a manually if you need SCIM / apply.\n"
+          "  (workspaceUrl seen: "
+          f"{_spark_conf('spark.databricks.workspaceUrl') or '(none)'})")
 display(_decisions)
 
 # COMMAND ----------
@@ -1127,7 +1149,8 @@ else:
 # MAGIC The most security-relevant output: **observed source IPs that fell inside a known-bad or
 # MAGIC anonymiser range.** Each row names the matched CIDR, feed and `source_url`. These warrant
 # MAGIC investigation regardless of the allow-list (traffic from a flagged IP already reaching the
-# MAGIC workspace may mean a compromised identity), and by default are held out of the proposal.
+# MAGIC workspace may mean a compromised identity). Flagged groups (threat-intel or cloud-owned) are
+# MAGIC **always** excluded from the proposed rules.
 
 # COMMAND ----------
 
@@ -1233,9 +1256,13 @@ _framing_col = {"minimal": "minimal_cidrs", "optimal": "optimal_cidrs", "maximum
 
 rule_specs = []          # list of dicts: {label, cidrs, destination, identities, identity_type}
 skipped_ipv6 = 0
+excluded_flagged = 0     # groups always held out because they hit threat-intel or a cloud range
 if not suggestions_pdf.empty:
     for _, row in suggestions_pdf.iterrows():
-        if EXCLUDE_FLAGGED and (row["threat_feeds"] or row["cloud_provider"]):
+        # Flagged groups (threat-intel or cloud-owned) are ALWAYS excluded from proposed rules —
+        # an allow-list must never include a known-bad or cloud-provider-owned range.
+        if row["threat_feeds"] or row["cloud_provider"]:
+            excluded_flagged += 1
             continue
         ipv4_cidrs = []
         for cidr in (row[_framing_col] or []):
@@ -1292,7 +1319,7 @@ if SCOPING_MODE == "ip_only" and rule_specs:
     }]
 
 print(f"Built {len(rule_specs)} rule spec(s) using '{POLICY_FRAMING}' framing, scoping_mode="
-      f"{SCOPING_MODE} (exclude_flagged={EXCLUDE_FLAGGED}).")
+      f"{SCOPING_MODE}. Excluded {excluded_flagged} flagged group(s) (threat-intel / cloud-owned).")
 for spec in rule_specs:
     ident = spec["identity_type"] if spec["identity_type"] == "ALL_USERS" else \
         f"{len(spec['identities'])} identities"
@@ -1382,7 +1409,8 @@ if rule_specs:
     print(f"Proposed `{POLICY_MODE_TARGET}` block (exactly what the apply-cell would send):\n")
     print(json.dumps({POLICY_MODE_TARGET: _preview_block.as_dict()}, indent=2))
 else:
-    print("No rule specs — nothing to preview. Revisit framing / scoping / exclude_flagged widgets.")
+    print("No rule specs — nothing to preview. Revisit the framing / scoping widgets, or check "
+          "whether every candidate group was flagged and excluded.")
 
 
 def _touched(block):
