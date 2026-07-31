@@ -59,11 +59,11 @@ ALL_THREAT_FEEDS = ["spamhaus_drop", "tor_exit", "firehol_level1", "ipsum", "dsh
 
 # --- Analysis window & candidate selection ---
 dbutils.widgets.text("lookback_days", "30", "1a. Lookback (days)")
-dbutils.widgets.text("min_events", "10", "1b. Min successful events per IP")
+dbutils.widgets.text("min_events", "1", "1b. Min successful events per IP")
 dbutils.widgets.dropdown(
-    "treat_null_status_as_success", "false", ["true", "false"], "1c. NULL status = success?"
+    "treat_null_status_as_success", "true", ["true", "false"], "1c. NULL status = success?"
 )
-dbutils.widgets.dropdown("include_ipv6", "true", ["true", "false"], "1d. Include IPv6?")
+dbutils.widgets.dropdown("include_ipv6", "false", ["true", "false"], "1d. Include IPv6?")
 
 # --- Enrichment ---
 # multiselect requires the default to be a SINGLE value present in choices (it cannot pre-select
@@ -91,12 +91,14 @@ dbutils.widgets.dropdown(
     ["ip_only", "ip_and_destination", "ip_and_identity", "ip_identity_and_destination"],
     "3b. Scoping mode",
 )
-dbutils.widgets.dropdown("exclude_flagged", "true", ["true", "false"], "3c. Exclude flagged groups?")
+# exclude_flagged is opt-in: by default threat/cloud-flagged groups are KEPT in the proposal (and
+# clearly flagged in the suggestions table). Set this to true to have them held out automatically.
+dbutils.widgets.dropdown("exclude_flagged", "false", ["true", "false"], "3c. Exclude flagged groups? (opt-in)")
 dbutils.widgets.dropdown("policy_mode", "dry_run", ["dry_run", "enforce"], "3d. Policy mode")
 
 # --- Account authentication (needed for identity resolution + apply; both are account-level) ---
-dbutils.widgets.text("account_id", "", "4a. Databricks account_id")
-dbutils.widgets.text("account_host", "https://accounts.cloud.databricks.com", "4b. Account console host")
+dbutils.widgets.text("account_id", "", "4a. Databricks account_id (blank = auto-detect)")
+dbutils.widgets.text("account_host", "", "4b. Account console host (blank = auto-detect)")
 dbutils.widgets.text("account_sp_client_id", "", "4c. Account admin SP client_id")
 dbutils.widgets.text("account_secret_scope", "", "4d. Secret scope holding SP secret")
 dbutils.widgets.text("account_secret_key", "", "4e. Secret key for SP secret")
@@ -132,8 +134,51 @@ SCOPING_MODE = dbutils.widgets.get("scoping_mode")
 EXCLUDE_FLAGGED = dbutils.widgets.get("exclude_flagged") == "true"
 POLICY_MODE = dbutils.widgets.get("policy_mode")
 
-ACCOUNT_ID = dbutils.widgets.get("account_id").strip()
-ACCOUNT_HOST = dbutils.widgets.get("account_host").strip()
+def _spark_conf(key):
+    try:
+        return spark.conf.get(key)
+    except Exception:  # noqa: BLE001 - conf key may be absent
+        return None
+
+
+def _auto_account_id():
+    """Best-effort account id from the runtime. Widgets always win; this only fills a blank one.
+
+    Tries, in order: the account-id tag in the cluster usage-tags conf, then a couple of other
+    confs some runtimes expose. Returns None if none are present (then the user must set widget 4a)."""
+    tags = _spark_conf("spark.databricks.clusterUsageTags.clusterAllTags")
+    if tags:
+        try:
+            for t in json.loads(tags):
+                if t.get("key") in ("AccountId", "accountId"):
+                    return t.get("value")
+        except (ValueError, TypeError):
+            pass
+    for key in ("spark.databricks.clusterUsageTags.accountId",
+                "spark.databricks.clusterUsageTags.billingAccountId"):
+        val = _spark_conf(key)
+        if val:
+            return val
+    return None
+
+
+def _auto_account_host():
+    """Derive the account console host from the workspace URL's cloud suffix. Falls back to the AWS
+    console. Overridden by widget 4b when set."""
+    ws = _spark_conf("spark.databricks.workspaceUrl") or ""
+    if "azuredatabricks.net" in ws:
+        return "https://accounts.azuredatabricks.net"
+    if "gcp.databricks.com" in ws:
+        return "https://accounts.gcp.databricks.com"
+    return "https://accounts.cloud.databricks.com"
+
+
+# json is imported later in the feed-helpers cell; ensure it's available here too.
+import json  # noqa: E402
+
+ACCOUNT_ID = dbutils.widgets.get("account_id").strip() or (_auto_account_id() or "")
+_account_host_widget = dbutils.widgets.get("account_host").strip()
+ACCOUNT_HOST = _account_host_widget or _auto_account_host()
 ACCOUNT_SP_CLIENT_ID = dbutils.widgets.get("account_sp_client_id").strip()
 ACCOUNT_SECRET_SCOPE = dbutils.widgets.get("account_secret_scope").strip()
 ACCOUNT_SECRET_KEY = dbutils.widgets.get("account_secret_key").strip()
@@ -185,10 +230,11 @@ _decisions = pd.DataFrame([
     ("2e. enable_rdap", ENABLE_RDAP, "Do RDAP owner lookups (external calls; needed for 'maximum' framing)."),
     ("3a. policy_framing", POLICY_FRAMING, "minimal=/32s, optimal=collapsed, maximum=full RDAP range."),
     ("3b. scoping_mode", SCOPING_MODE, "Whether rules are scoped by destination and/or identity."),
-    ("3c. exclude_flagged", EXCLUDE_FLAGGED, "Hold threat/cloud-flagged groups out of the proposal."),
+    ("3c. exclude_flagged", EXCLUDE_FLAGGED, "Opt-in: if true, hold threat/cloud-flagged groups out of the proposal (default false = keep + flag them)."),
     ("3d. policy_mode", POLICY_MODE, "dry_run=log-only (ingress_dry_run); enforce=blocking (ingress)."),
-    ("4a. account_id", ACCOUNT_ID or "(unset)", "Databricks account_id (needed for SCIM + apply)."),
-    ("4b. account_host", ACCOUNT_HOST, "Account console host for the AccountClient."),
+    ("4a. account_id", ACCOUNT_ID or "(not detected — set manually)",
+     "Databricks account_id (needed for SCIM + apply). Auto-detected from the runtime when blank."),
+    ("4b. account_host", ACCOUNT_HOST, "Account console host. Auto-derived from the workspace cloud when blank."),
     ("4c. account_sp_client_id", ACCOUNT_SP_CLIENT_ID or "(ambient)",
      "Account-admin service principal client_id for OAuth M2M."),
     ("4d/4e. account secret", f"{ACCOUNT_SECRET_SCOPE}/{ACCOUNT_SECRET_KEY}" if ACCOUNT_SECRET_SCOPE else "(ambient)",
