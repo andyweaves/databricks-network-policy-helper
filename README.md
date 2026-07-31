@@ -82,7 +82,5 @@ notebook's `enrichment_schema` widget) — don't build over temp views.
 
 ## Notes & caveats
 
-- Feed licensing was researched but should be re-verified before any commercial redistribution;
-  some feeds are held back pending confirmation (see `docs/threat-intel-feeds.md`).
 - Requires `databricks-sdk>=0.113.0` for the CBI dataclasses — the notebook pins and restarts to
   ensure this on serverless / older runtimes.
