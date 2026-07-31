@@ -15,6 +15,9 @@ It answers: *who connects to this workspace, from where, and what should the inb
    - **Threat intelligence** (Spamhaus DROP, Tor, FireHOL, IPsum, DShield, CINS) — flags IPs
      already talking to your workspace that appear on a blocklist.
    - **Cloud-provider ranges** (AWS, GCP, Oracle, Azure — official feeds) — flags cloud-owned IPs.
+   - **Databricks-owned ranges** (official `databricks.com/networking/v1/ip-ranges.json`, all 3
+     clouds) — flags Databricks' own control-plane / serverless IPs so they're excluded, not
+     allow-listed.
    - **RDAP** ownership — names the owning org and its full assigned range.
 3. Proposes CIDR framings per owner group — `minimal` / `optimal` / `maximum` — annotated with the
    enrichment, ranked, with known-bad / cloud-owned groups flagged for review.

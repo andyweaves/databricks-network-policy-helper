@@ -78,9 +78,12 @@ valid: **50 ingress rules, 2000 CIDR blocks, 100 identities per policy; 1000 pol
 
 ## Flagged groups & threat-intel deny rules
 
-Threat/cloud-owned groups are **always excluded** from proposed allow rules — an allow-list must
-never include a known-bad or cloud-provider range. They still appear in the ⚠️ threat-match table
-for investigation (traffic from a flagged IP already reaching the workspace may mean a compromised
+Threat-intel, cloud-provider-owned, and **Databricks-owned** groups are **always excluded** from
+proposed allow rules — an allow-list must never include a known-bad or cloud-provider range, and
+Databricks' own control-plane / serverless IPs (identified from the official
+`databricks.com/networking/v1/ip-ranges.json` feed, all three clouds) are the platform reaching in,
+not a customer network to allow-list. Threat matches still appear in the ⚠️ threat-match table for
+investigation (traffic from a flagged IP already reaching the workspace may mean a compromised
 identity).
 
 Separately, the `threat_deny_rules` widget can add **deny rules** built from the threat-intel table,

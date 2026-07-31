@@ -44,6 +44,19 @@ All are the providers' **official** feeds:
 | Oracle | `docs.oracle.com/en-us/iaas/tools/public_ip_ranges.json` | stable |
 | Azure | scraped from `microsoft.com/.../details.aspx?id=56519` → dated `ServiceTags_Public_<date>.json` | Microsoft rotates the URL ~weekly; the notebook resolves the current one. **Do not** use third-party mirrors (e.g. femueller/cloud-ip-ranges). |
 
+## Databricks-owned ranges (`databricks_ranges` table)
+
+Columns: `cidr, platform, region, direction, loaded_at`. Databricks' own control-plane / serverless
+/ storage IPs appear as source IPs in the audit log (the platform reaching into the workspace) —
+they're flagged and their groups excluded from the allow-list, since they're not a customer network.
+
+Source: the official machine-readable feed **`databricks.com/networking/v1/ip-ranges.json`** — one
+JSON covering **AWS, Azure and GCP**, with `type` inbound/outbound per region. Verified to contain
+the same control-plane CIDRs published per-region at the HTML docs
+(`docs.databricks.com/.../resources/ip-domain-region`, and the Azure/GCP equivalents), so no HTML
+scraping is needed. SCC-relay FQDNs (`tunnel.*`) are not in the feed but matter only for customer
+egress allow-listing, not ingress source-IP analysis.
+
 ## VPN / SASE ranges — intentionally not included
 Enterprise SASE/SWG vendors (Zscaler, Palo Alto Prisma, Cisco Umbrella, Netskope) do **not** publish
 ungated IP lists. Consumer VPNs don't publish official lists either. The only free/ungated options

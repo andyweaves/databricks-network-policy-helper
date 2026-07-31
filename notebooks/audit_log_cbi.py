@@ -304,6 +304,7 @@ _egress = pd.DataFrame([
     ("docs.oracle.com", "Oracle Cloud published IP ranges", "cloud ranges: oracle"),
     ("www.microsoft.com", "Azure Service Tags download page (URL discovery)", "cloud ranges: azure"),
     ("download.microsoft.com", "Azure Service Tags JSON", "cloud ranges: azure"),
+    ("www.databricks.com", "Databricks published IP ranges (control plane / serverless)", "databricks ranges"),
     ("rdap.org", "RDAP bootstrap / owner lookup (redirects to RIR RDAP servers)", "enrichment: RDAP"),
     ("*.rir RDAP servers", "e.g. rdap.arin.net, rdap.db.ripe.net — followed from rdap.org referrals", "enrichment: RDAP"),
     ("pypi.org / files.pythonhosted.org", "pip install databricks-sdk", "SDK install (top of notebook)"),
@@ -854,6 +855,61 @@ else:
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ### Databricks-owned ranges (`databricks_ranges`)
+# MAGIC
+# MAGIC Databricks' **own** control-plane / serverless / storage IPs also appear as source IPs in the
+# MAGIC audit log (the platform reaching into the workspace). Those are not a customer network to
+# MAGIC allow-list, so we flag them and exclude such groups from the proposal.
+# MAGIC
+# MAGIC Source: the official machine-readable feed `databricks.com/networking/v1/ip-ranges.json`
+# MAGIC (covers AWS, Azure and GCP; includes control-plane inbound + storage/ingestion ranges — the
+# MAGIC same CIDRs published per-region at `docs.databricks.com/.../resources/ip-domain-region`). We
+# MAGIC keep `region` and `direction` (inbound/outbound) for context. SCC-relay *FQDNs* are not in the
+# MAGIC feed, but those matter for customer egress allow-listing, not our ingress source-IP analysis.
+
+# COMMAND ----------
+
+# DBTITLE 1,Refresh databricks_ranges
+DATABRICKS_COLUMNS = "cidr STRING, platform STRING, region STRING, direction STRING, loaded_at TIMESTAMP"
+_databricks_table_name = "databricks_ranges"
+DATABRICKS_IP_RANGES_URL = "https://www.databricks.com/networking/v1/ip-ranges.json"
+
+
+def _load_databricks_ranges():
+    now = datetime.now(timezone.utc)
+    rows = []
+    data = _http_get(DATABRICKS_IP_RANGES_URL, as_json=True)
+    if not data:
+        print("  ! Databricks IP ranges unavailable this run — continuing without them")
+        return rows
+    for entry in data.get("prefixes", []):
+        platform = entry.get("platform")
+        region = entry.get("region")
+        direction = entry.get("type")  # inbound | outbound
+        for cidr_raw in (entry.get("ipv4Prefixes", []) + entry.get("ipv6Prefixes", [])):
+            cidr = _valid_cidr(cidr_raw)
+            if cidr:
+                rows.append((cidr, platform, region, direction, now))
+    seen, deduped = set(), []
+    for row in rows:
+        # de-dupe on (cidr, direction) — the same CIDR can appear across regions
+        key = (row[0], row[3])
+        if key not in seen:
+            seen.add(key)
+            deduped.append(row)
+    return deduped
+
+
+if REFRESH_ENRICHMENT or not _table_exists(_databricks_table_name):
+    print("Refreshing databricks_ranges ...")
+    databricks_ref = _materialize(_load_databricks_ranges(), DATABRICKS_COLUMNS, _databricks_table_name)
+else:
+    databricks_ref = f"{ENRICHMENT_PREFIX}{_databricks_table_name}"
+    print(f"Using existing {databricks_ref}")
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## RDAP owner lookup (deduplicated, optional)
 # MAGIC
 # MAGIC For each **distinct** candidate IP we query RDAP once to recover the registered owner and the
@@ -998,7 +1054,9 @@ def _load_ranges(ref, extra_cols):
 
 threat_ranges = _load_ranges(threat_ref, ["source_feed", "threat_type", "confidence", "source_url"])
 cloud_ranges = _load_ranges(cloud_ref, ["provider", "service", "region"])
-print(f"loaded {len(threat_ranges):,} threat ranges, {len(cloud_ranges):,} cloud ranges")
+databricks_ranges = _load_ranges(databricks_ref, ["platform", "region", "direction"])
+print(f"loaded {len(threat_ranges):,} threat ranges, {len(cloud_ranges):,} cloud ranges, "
+      f"{len(databricks_ranges):,} Databricks ranges")
 
 
 def _match_ranges(ip_obj, ranges):
@@ -1069,6 +1127,7 @@ for record in candidates_pdf.to_dict(orient="records"):
 
     threat_hits, threat_cidrs = _match_ranges(ip_obj, threat_ranges)
     cloud_hits, _ = _match_ranges(ip_obj, cloud_ranges)
+    databricks_hits, _ = _match_ranges(ip_obj, databricks_ranges)
     for meta, matched_cidr in zip(threat_hits, threat_cidrs):
         threat_match_rows.append({
             "observed_ip": ip_str, "matched_cidr": matched_cidr,
@@ -1091,6 +1150,7 @@ for record in candidates_pdf.to_dict(orient="records"):
         "threat_types": sorted({h["threat_type"] for h in threat_hits}),
         "threat_confidence": min([h["confidence"] for h in threat_hits], default=None),
         "cloud_provider": sorted({h["provider"] for h in cloud_hits}),
+        "databricks_owned": sorted({h["platform"] for h in databricks_hits}),
     })
     enriched.append(record)
 
@@ -1137,6 +1197,7 @@ for (policy_target, owner), recs in groups.items():
     maximum = sorted({c for r in recs if r["maximum_cidrs"] for c in r["maximum_cidrs"]})
     threat_feeds = sorted({f for r in recs for f in r["threat_feeds"]})
     cloud_providers = sorted({p for r in recs for p in r["cloud_provider"]})
+    databricks_owned = sorted({p for r in recs for p in r.get("databricks_owned", [])})
     principals = sorted({p for r in recs for p in r["principal_list"]})
     principal_emails = sorted({e for r in recs for e in (r.get("principal_emails") or []) if e})
     subject_names = sorted({sn for r in recs for sn in (r.get("subject_names") or []) if sn})
@@ -1155,8 +1216,10 @@ for (policy_target, owner), recs in groups.items():
         "maximum_cidrs": maximum or None,
         "threat_feeds": threat_feeds or None,
         "cloud_provider": cloud_providers or None,
+        "databricks_owned": databricks_owned or None,
         "recommendation": (
             "REVIEW — known-bad range" if threat_feeds else
+            "EXCLUDE — Databricks-owned" if databricks_owned else
             "REVIEW — cloud-owned range" if cloud_providers else
             "candidate"
         ),
@@ -1289,9 +1352,10 @@ skipped_ipv6 = 0
 excluded_flagged = 0
 if not suggestions_pdf.empty:
     for _, row in suggestions_pdf.iterrows():
-        # Flagged groups (threat-intel or cloud-owned) are ALWAYS excluded — an allow-list must
-        # never include a known-bad or cloud-provider-owned range.
-        if row["threat_feeds"] or row["cloud_provider"]:
+        # Flagged groups are ALWAYS excluded — an allow-list must never include a known-bad,
+        # cloud-provider-owned, or Databricks-owned range (the last is the platform itself, not a
+        # customer network).
+        if row["threat_feeds"] or row["cloud_provider"] or row["databricks_owned"]:
             excluded_flagged += 1
             continue
         ipv4_cidrs = []
