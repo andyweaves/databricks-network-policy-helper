@@ -121,6 +121,8 @@ dbutils.widgets.dropdown("policy_mode", "dry_run", ["dry_run", "enforce"], "3c. 
 dbutils.widgets.dropdown(
     "threat_deny_rules", "off", ["off", "matched_only", "all"], "3d. Threat-intel deny rules"
 )
+# Prefix for generated policy names and rule labels (e.g. <prefix>-ws-<id>, <prefix>-deny-<feed>).
+dbutils.widgets.text("name_prefix", "cbi-helper", "3e. Name prefix for policies/rules")
 
 # --- Account authentication (needed for identity resolution + apply; both are account-level) ---
 dbutils.widgets.text("account_id", "", "4a. Databricks account_id (blank = set manually)")
@@ -178,6 +180,7 @@ SCOPING_MODE = dbutils.widgets.get("scoping_mode")
 POLICY_SCOPE = dbutils.widgets.get("policy_scope")  # single | per_workspace
 POLICY_MODE = dbutils.widgets.get("policy_mode")
 THREAT_DENY_RULES = dbutils.widgets.get("threat_deny_rules")  # off | matched_only | all
+NAME_PREFIX = dbutils.widgets.get("name_prefix").strip() or "cbi-helper"
 
 # Safety cap on total CIDRs placed into threat-intel deny rules, to avoid oversized policies.
 MAX_DENY_CIDRS = 5000
@@ -261,6 +264,8 @@ _decisions = pd.DataFrame([
     ("3c. policy_mode", POLICY_MODE, "dry_run=log-only (ingress_dry_run); enforce=blocking (ingress)."),
     ("3d. threat_deny_rules", THREAT_DENY_RULES,
      "off=none; matched_only=deny threat CIDRs that matched observed IPs; all=deny whole feeds (one rule each)."),
+    ("3e. name_prefix", NAME_PREFIX,
+     "Prefix for generated policy names + rule labels, e.g. <prefix>-ws-<id>, <prefix>-deny-<feed>."),
     ("4a. account_id", ACCOUNT_ID or "(unset — set manually)",
      "Databricks account_id (needed for SCIM + apply). Not auto-detectable from a workspace runtime."),
     ("4b. account_host", ACCOUNT_HOST, "Account console host. Defaults to AWS; set for Azure/GCP."),
@@ -1377,7 +1382,7 @@ if not suggestions_pdf.empty:
         if not ipv4_cidrs:
             continue
 
-        _label_base = "cbi-helper-databricks" if row["databricks_owned"] else f"cbi-helper-{row['rdap_owner']}"
+        _label_base = f"{NAME_PREFIX}-databricks" if row["databricks_owned"] else f"{NAME_PREFIX}-{row['rdap_owner']}"
         spec = {
             "label": _label_base[:250],
             "cidrs": ipv4_cidrs,
@@ -1413,7 +1418,7 @@ if SCOPING_MODE == "ip_only":
                 if c not in all_cidrs:
                     all_cidrs.append(c)
         target_specs[tgt] = [{
-            "label": "cbi-helper-ip-only",
+            "label": f"{NAME_PREFIX}-ip-only",
             "cidrs": all_cidrs,
             "destination": "all_destinations",
             "identity_type": "ALL_USERS",
@@ -1537,7 +1542,7 @@ if THREAT_DENY_RULES != "off":
         if rec["cidr"] not in by_feed[rec["source_feed"]]:
             by_feed[rec["source_feed"]].append(rec["cidr"])
     for feed in sorted(by_feed):
-        deny_specs.append({"label": f"cbi-helper-deny-{feed}"[:250], "cidrs": by_feed[feed]})
+        deny_specs.append({"label": f"{NAME_PREFIX}-deny-{feed}"[:250], "cidrs": by_feed[feed]})
 
     if deny_specs:
         print(f"\nBuilt {len(deny_specs)} threat-intel deny rule(s) [{THREAT_DENY_RULES}], "
@@ -1723,8 +1728,9 @@ display(_policy_explainer)
 # MAGIC widget 5c); set that to false to require the policy to pre-exist.
 # MAGIC
 # MAGIC **Scope behaviour:**
-# MAGIC If `network_policy_id` (widget 5a) is left blank, a name is auto-generated
-# MAGIC (`cbi-helper-<timestamp>`) so apply just works.
+# MAGIC If `network_policy_id` (widget 5a) is left blank, a name is auto-generated from the
+# MAGIC `name_prefix` widget (`<prefix>-<timestamp>`) so apply just works. Per-workspace policies are
+# MAGIC named `<prefix>-ws-<workspace_id>`.
 # MAGIC - `policy_scope=single` — creates/updates the single policy named in `network_policy_id`.
 # MAGIC - `policy_scope=per_workspace` — treats `network_policy_id` as a **prefix**: for each
 # MAGIC   workspace it creates/updates policy `<prefix>-ws-<workspace_id>` and binds the workspace to
@@ -1800,20 +1806,21 @@ def _apply_to_policy(a, policy_id, allow, deny):
 
 
 # A policy name is only a label — if the user didn't set one (widget 5a), generate a sensible
-# default so apply just works rather than bailing. Names have a length limit (empirically ~30
-# chars; a 16-digit workspace id appended to a long base is rejected), so keep them short.
+# default from the name prefix so apply just works rather than bailing. Names have a length limit
+# (empirically ~30 chars; a 16-digit workspace id appended to a long base is rejected).
 MAX_POLICY_ID_LEN = 30
-RESOLVED_POLICY_ID = NETWORK_POLICY_ID or f"cbi-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}"
+RESOLVED_POLICY_ID = NETWORK_POLICY_ID or f"{NAME_PREFIX}-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}"
 
 
 def _policy_name(base, workspace_id=None):
-    """Build a valid, length-bounded policy id. For per-workspace we prefer a compact
-    'cbi-ws-<id>' (the 16-digit id already eats most of the budget); otherwise clamp the base."""
+    """Build a valid, length-bounded policy id. For per-workspace, keep the full workspace id (the
+    meaningful discriminator) as '<base>-ws-<id>', truncating the base if needed to fit the limit.
+    Otherwise clamp the base itself."""
     if workspace_id is not None:
-        name = f"cbi-ws-{workspace_id}"
-    else:
-        name = base
-    return name[:MAX_POLICY_ID_LEN]
+        suffix = f"-ws-{workspace_id}"
+        room = MAX_POLICY_ID_LEN - len(suffix)
+        return f"{base[:max(room, 1)].rstrip('-')}{suffix}"
+    return base[:MAX_POLICY_ID_LEN]
 
 if not APPLY_POLICY:
     print(f"Not applying (mode={POLICY_MODE}, scope={POLICY_SCOPE}). Set apply_policy=true to apply. "
@@ -1847,8 +1854,11 @@ else:
             print("  (skipping workspace_id=0 — account-level, not a bindable workspace)")
         print(f"per_workspace apply ({POLICY_MODE} mode, create_missing={CREATE_MISSING_POLICY}): "
               f"applying + binding {len(ws_targets)} workspace policy(ies).\n")
+        # Per-workspace base: the user's name if set, else the prefix (no timestamp — the workspace
+        # id is the discriminator, and it keeps the name short).
+        ws_base = NETWORK_POLICY_ID or NAME_PREFIX
         for tgt in ws_targets:
-            pid = _policy_name(RESOLVED_POLICY_ID, workspace_id=tgt)
+            pid = _policy_name(ws_base, workspace_id=tgt)
             p = policies[tgt]
             try:
                 action, effective_id, _ = _apply_to_policy(a, pid, p["allow"], p["deny"])
