@@ -25,7 +25,7 @@ trial an ingress policy in dry-run before enforcing.
   block and **blocks nothing**. Always propose and validate here first.
 - **`enforce` mode writes the enforced `ingress` block and CAN lock users (and the operator) out**
   if the allow-list is incomplete. Keep `policy_mode=dry_run` until the logs look right.
-- Never set `apply_policy=true` on the user's behalf without explicit, current confirmation of the
+- Never set `create_policy=true` on the user's behalf without explicit, current confirmation of the
   mode and the exact CIDRs. Show the JSON preview first.
 - The CBI policy schema is **IPv4-only**; IPv6 is analysed but never put in a policy.
 
@@ -46,8 +46,9 @@ trial an ingress policy in dry-run before enforcing.
    ranked CIDR suggestions.
 5. **Review the proposal** — the JSON preview shows the exact block that would be sent. Confirm the
    framing, scoping and mode with the user.
-6. **Apply (gated)** — only with explicit go-ahead: set `apply_policy=true` and the mode's confirm
-   phrase. Default to `dry_run`; promote to `enforce` only after dry-run logs look right.
+6. **Create (gated)** — only with explicit go-ahead: set `create_policy=true` (and `auto_assign` to
+   bind the workspace(s)). Default to `dry_run`; promote to `enforce` only after dry-run logs look
+   right.
 
 ## CIDR framings (`policy_framing`)
 
@@ -67,14 +68,14 @@ trial an ingress policy in dry-run before enforcing.
 
 - `single` (default) — one policy across all workspaces.
 - `per_workspace` — a tailored policy per workspace + a recommended workspace→policy assignment
-  table. On apply, `network_policy_id` is a prefix; each workspace binds to `<prefix>-ws-<id>`.
+  table. Policies are named `<name_prefix>-ws-<id>`; single scope is just `<name_prefix>`.
   Audit `workspace_id = 0` is account-level, excluded unless `include_account_level=true`.
 
-On apply, the target policy is **created if it doesn't exist** by default (`create_missing_policy`,
-widget 5c); set it false to require the policy to pre-exist. When creating, the basic egress policy
-is set from `egress_policy` (widget 5d): `allow_all` (FULL_ACCESS), `dry_run` (restricted, log-only
-for all products), or `restricted` (enforced — configure allowed destinations yourself afterwards).
-Existing policies keep their egress untouched.
+Creating is two independent switches: **`create_policy`** creates/updates the policy (idempotent —
+the name is deterministic), and **`auto_assign`** binds the workspace(s) to it. When creating, the
+basic egress policy is set from `egress_policy`: `allow_all` (FULL_ACCESS), `dry_run` (restricted,
+log-only for all products), or `restricted` (enforced — configure allowed destinations yourself
+afterwards). Existing policies keep their egress untouched.
 
 ## Existing IP access list & denied requests
 

@@ -52,8 +52,7 @@ dbutils.widgets.text("account_host", "https://accounts.cloud.databricks.com", "5
 dbutils.widgets.text("account_sp_client_id", "", "5c. Account admin SP client_id")
 dbutils.widgets.text("account_secret_scope", "", "5d. Secret scope holding SP secret")
 dbutils.widgets.text("account_secret_key", "", "5e. Secret key for SP secret")
-dbutils.widgets.text("network_policy_id", "", "6a. Target network_policy_id (blank = generated)")
-dbutils.widgets.dropdown("apply_policy", "false", ["true", "false"], "6b. Apply the policy?")
+dbutils.widgets.dropdown("create_policy", "false", ["true", "false"], "6. Create the policy?")
 
 POLICY_MODE = dbutils.widgets.get("policy_mode")
 NAME_PREFIX = dbutils.widgets.get("name_prefix").strip() or "cbi-helper"
@@ -64,8 +63,7 @@ ACCOUNT_HOST = dbutils.widgets.get("account_host").strip() or "https://accounts.
 ACCOUNT_SP_CLIENT_ID = dbutils.widgets.get("account_sp_client_id").strip()
 ACCOUNT_SECRET_SCOPE = dbutils.widgets.get("account_secret_scope").strip()
 ACCOUNT_SECRET_KEY = dbutils.widgets.get("account_secret_key").strip()
-NETWORK_POLICY_ID = dbutils.widgets.get("network_policy_id").strip()
-APPLY_POLICY = dbutils.widgets.get("apply_policy") == "true"
+CREATE_POLICY = dbutils.widgets.get("create_policy") == "true"
 
 POLICY_MODE_TARGET = {"dry_run": "ingress_dry_run", "enforce": "ingress"}[POLICY_MODE]
 MAX_POLICY_ID_LEN = 30
@@ -186,7 +184,7 @@ else:
 # MAGIC %md
 # MAGIC ## Apply (gated)
 # MAGIC
-# MAGIC Creates/updates the account network policy (via `apply_policy=true`) and, if `auto_assign` is
+# MAGIC Creates/updates the account network policy (via `create_policy=true`) and, if `auto_assign` is
 # MAGIC on, binds **this** workspace to it. Requires an **account-admin** `AccountClient` — set the
 # MAGIC account widgets (5a–5e); an account_id is mandatory.
 # MAGIC
@@ -227,14 +225,14 @@ def _build_egress(kind):
     return NetworkPolicyEgress(network_access=access)
 
 
-RESOLVED_POLICY_ID = NETWORK_POLICY_ID or f"{NAME_PREFIX}-{WORKSPACE_ID}"
+RESOLVED_POLICY_ID = f"{NAME_PREFIX}-{WORKSPACE_ID}"
 if len(RESOLVED_POLICY_ID) > MAX_POLICY_ID_LEN:
     print(f"⚠️  policy name '{RESOLVED_POLICY_ID}' is {len(RESOLVED_POLICY_ID)} chars — network "
           f"policy ids have a length limit (~{MAX_POLICY_ID_LEN}). If create fails with 'Invalid "
-          f"NetworkPolicyId', shorten name_prefix or set network_policy_id (widget 6a) explicitly.")
+          f"NetworkPolicyId', shorten name_prefix.")
 
-if not APPLY_POLICY:
-    print(f"Not applying (mode={POLICY_MODE}). Set apply_policy=true to create the policy"
+if not CREATE_POLICY:
+    print(f"Not creating (mode={POLICY_MODE}). Set create_policy=true to create the policy"
           f"{' and assign this workspace' if AUTO_ASSIGN else ''}.")
 elif not (allow_specs or deny_specs):
     print("Nothing to apply — no IP ACL rules built.")

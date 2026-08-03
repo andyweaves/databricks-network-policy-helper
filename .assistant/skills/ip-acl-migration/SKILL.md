@@ -37,9 +37,9 @@ IP ACL as CBI, or create a network policy from the current ACL without analysing
 - `auto_assign` — bind the current workspace to the new policy (default true).
 - Account auth (`account_id` + optional SP client_id/secret scope+key) — **account admin required**
   to create/assign the policy. See `docs/account-admin-setup.md`.
-- `network_policy_id` (blank = generated `<prefix>-<timestamp>`), `apply_policy` (gate).
+- `create_policy` (gate) — create the policy (named `<prefix>-<workspace-id>`, idempotent).
 
 ## Safety
 
-Nothing is written unless `apply_policy=true`. Default `policy_mode=enforce` will block non-matching
+Nothing is written unless `create_policy=true`. Default `policy_mode=enforce` will block non-matching
 source IPs on the assigned workspace — trial with `dry_run` first if unsure.

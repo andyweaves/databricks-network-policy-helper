@@ -21,12 +21,13 @@
 # MAGIC 7. Builds either **one policy for all workspaces** (`policy_scope=single`) or a **tailored
 # MAGIC    policy per workspace** with recommended assignments (`policy_scope=per_workspace`), and
 # MAGIC    warns + auto-caps to the network-policy limits (50 rules / 2000 CIDRs / 100 identities).
-# MAGIC 8. Optionally writes the result into the account network policy via the Databricks SDK, in
-# MAGIC    **`dry_run`** (log-only) or **`enforce`** (blocking) mode — gated by `apply_policy`.
+# MAGIC 8. Optionally creates the account network policy via the Databricks SDK (`create_policy`), in
+# MAGIC    **`dry_run`** (log-only) or **`enforce`** (blocking) mode, and optionally binds the
+# MAGIC    workspace(s) to it (`auto_assign`).
 # MAGIC
 # MAGIC > ⚠️ **Safety:** every suggestion is advisory. The default `policy_mode` is `dry_run`, which
 # MAGIC > cannot block traffic. **`enforce` CAN lock users out** if the allow-list is incomplete — it
-# MAGIC > only writes when `apply_policy=true`. Validate in `dry_run` and review its logs before
+# MAGIC > only writes when `create_policy=true`. Validate in `dry_run` and review its logs before
 # MAGIC > switching `policy_mode` to `enforce`.
 # MAGIC
 # MAGIC **All decisions are made via the widgets at the top (see "Parameters & decisions").**
@@ -70,7 +71,7 @@ ALL_THREAT_FEEDS = ["spamhaus_drop", "tor_exit", "firehol_level1", "ipsum", "dsh
 dbutils.widgets.text("lookback_days", "30", "1a. Lookback (days)")
 dbutils.widgets.text("min_events", "1", "1b. Min successful events per IP")
 dbutils.widgets.dropdown(
-    "treat_null_status_as_success", "true", ["true", "false"], "1c. NULL status = success?"
+    "treat_null_status_as_success", "false", ["true", "false"], "1c. NULL status = success?"
 )
 dbutils.widgets.dropdown("include_ipv6", "false", ["true", "false"], "1d. Include IPv6?")
 # workspace_id = 0 in the audit log means account-level access. We build workspace network policies,
@@ -147,12 +148,10 @@ dbutils.widgets.text("account_secret_scope", "", "4d. Secret scope holding SP se
 dbutils.widgets.text("account_secret_key", "", "4e. Secret key for SP secret")
 
 # --- Apply (gated) ---
-dbutils.widgets.text("network_policy_id", "", "5a. Target network_policy_id")
-dbutils.widgets.dropdown("apply_policy", "false", ["true", "false"], "5b. Apply the policy?")
-# If the target policy doesn't exist yet, create it (default). Set false to require it to pre-exist.
-dbutils.widgets.dropdown(
-    "create_missing_policy", "true", ["true", "false"], "5c. Create policy if missing?"
-)
+# create_policy is the master switch: create the account network policy (idempotent — reuses the
+# generated <prefix>-... name on re-run). auto_assign then binds the relevant workspace(s) to it.
+dbutils.widgets.dropdown("create_policy", "false", ["true", "false"], "5a. Create the policy?")
+dbutils.widgets.dropdown("auto_assign", "false", ["true", "false"], "5b. Auto-assign to workspace(s)?")
 # Basic egress policy applied only when CREATING a new policy (existing policies keep their egress).
 # allow_all = FULL_ACCESS; dry_run = RESTRICTED_ACCESS + log-only for all products; restricted =
 # RESTRICTED_ACCESS + enforced (configure allowed destinations yourself afterwards).
@@ -215,9 +214,8 @@ ACCOUNT_SP_CLIENT_ID = dbutils.widgets.get("account_sp_client_id").strip()
 ACCOUNT_SECRET_SCOPE = dbutils.widgets.get("account_secret_scope").strip()
 ACCOUNT_SECRET_KEY = dbutils.widgets.get("account_secret_key").strip()
 
-NETWORK_POLICY_ID = dbutils.widgets.get("network_policy_id").strip()
-APPLY_POLICY = dbutils.widgets.get("apply_policy") == "true"
-CREATE_MISSING_POLICY = dbutils.widgets.get("create_missing_policy") == "true"
+CREATE_POLICY = dbutils.widgets.get("create_policy") == "true"
+AUTO_ASSIGN = dbutils.widgets.get("auto_assign") == "true"
 EGRESS_POLICY = dbutils.widgets.get("egress_policy")  # allow_all | dry_run | restricted
 
 
@@ -292,11 +290,10 @@ _decisions = pd.DataFrame([
      "Account-admin service principal client_id for OAuth M2M."),
     ("4d/4e. account secret", f"{ACCOUNT_SECRET_SCOPE}/{ACCOUNT_SECRET_KEY}" if ACCOUNT_SECRET_SCOPE else "(ambient)",
      "Secret scope+key holding the SP's OAuth secret (never hardcode it)."),
-    ("5a. network_policy_id", NETWORK_POLICY_ID or "(unset)", "Target account network policy to update."),
-    ("5b. apply_policy", APPLY_POLICY, "Master switch for the apply step (dry_run is the safe default mode)."),
-    ("5c. create_missing_policy", CREATE_MISSING_POLICY,
-     "If the target policy doesn't exist, create it (default true) vs require it to pre-exist."),
-    ("5d. egress_policy", EGRESS_POLICY,
+    ("5a. create_policy", CREATE_POLICY,
+     "Master switch: create the account network policy (idempotent). dry_run mode is the safeguard."),
+    ("5b. auto_assign", AUTO_ASSIGN, "Bind the relevant workspace(s) to the created policy."),
+    ("5c. egress_policy", EGRESS_POLICY,
      "Egress set on CREATE only: allow_all=FULL_ACCESS; dry_run=restricted+log-only; restricted=enforced."),
 ], columns=["widget", "value", "meaning"])
 # The value column mixes int/bool/str; cast to string so display()'s Arrow conversion doesn't fail
@@ -352,7 +349,7 @@ display(_egress)
 # MAGIC
 # MAGIC | Operation | When it runs | Privilege needed |
 # MAGIC |---|---|---|
-# MAGIC | **Apply a CBI policy** (`network_policies.*_rpc`) | Only in the gated apply cell (`apply_policy=true`) | **Account admin** |
+# MAGIC | **Create/assign a CBI policy** (`network_policies.*` / `workspace_network_configuration`) | Only when `create_policy=true` (and `auto_assign` for binding) | **Account admin** |
 # MAGIC | **Resolve identities** (SCIM `users`/`service_principals` list) | Only when `scoping_mode` includes identity | **Account admin** (reads account identities) |
 # MAGIC
 # MAGIC So the account-admin credential is required if you (a) apply any policy, **or** (b) build an
@@ -1861,30 +1858,21 @@ display(_policy_explainer)
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Apply the proposed policy (gated)
+# MAGIC ## Create the policy (gated)
 # MAGIC
-# MAGIC Writes the proposed rules into the account network policy via the SDK, targeting the block
-# MAGIC chosen by `policy_mode`:
-# MAGIC - **`dry_run`** → `ingress_dry_run.public_access` — **log-only, blocks nothing.**
-# MAGIC - **`enforce`** → `ingress.public_access` — **enforced: non-matching source IPs are blocked.**
+# MAGIC Two independent switches:
+# MAGIC - **`create_policy`** — create/update the account network policy (idempotent; the name is
+# MAGIC   deterministic, so re-runs update in place). Writes the block chosen by `policy_mode`:
+# MAGIC   `dry_run` → `ingress_dry_run.public_access` (log-only, blocks nothing); `enforce` →
+# MAGIC   `ingress.public_access` (blocks non-matching source IPs). Other blocks + `egress` are
+# MAGIC   preserved (update is a full replace).
+# MAGIC - **`auto_assign`** — bind the workspace(s) to the created policy via
+# MAGIC   `update_workspace_network_option_rpc` (single scope binds *this* workspace; per_workspace
+# MAGIC   binds each). Independent of `create_policy` mode — you can create without assigning.
 # MAGIC
-# MAGIC Other blocks (and `egress`) are read and re-sent unchanged (update is a full replace). Runs
-# MAGIC when `apply_policy = true`; the default `policy_mode=dry_run` is the safeguard (it only writes
-# MAGIC the log-only block). Requires an **account-admin** `AccountClient` (see "Account admin
-# MAGIC requirements" near the top; configure via widgets 4a–4e).
-# MAGIC
-# MAGIC By default it **creates the policy if it doesn't exist** (`create_missing_policy=true`,
-# MAGIC widget 5c); set that to false to require the policy to pre-exist.
-# MAGIC
-# MAGIC **Scope behaviour:**
-# MAGIC If `network_policy_id` (widget 5a) is left blank, a name is auto-generated from the
-# MAGIC `name_prefix` widget (`<prefix>-<timestamp>`) so apply just works. Per-workspace policies are
-# MAGIC named `<prefix>-ws-<workspace_id>`.
-# MAGIC - `policy_scope=single` — creates/updates the single policy named in `network_policy_id`.
-# MAGIC - `policy_scope=per_workspace` — treats `network_policy_id` as a **prefix**: for each
-# MAGIC   workspace it creates/updates policy `<prefix>-ws-<workspace_id>` and binds the workspace to
-# MAGIC   it via `update_workspace_network_option_rpc`. Per-workspace failures are reported
-# MAGIC   individually and don't stop the others.
+# MAGIC Requires an **account-admin** `AccountClient` (see "Account admin requirements"; widgets 4a–4e).
+# MAGIC Policy names come from `name_prefix`: `<prefix>` (single) or `<prefix>-ws-<workspace_id>`
+# MAGIC (per_workspace). Per-workspace failures are reported individually and don't stop the others.
 
 # COMMAND ----------
 
@@ -1918,10 +1906,10 @@ def _build_egress(kind):
 
 
 def _apply_to_policy(a, policy_id, allow, deny):
-    """Get-or-create an account network policy `policy_id` and set its target block
-    (ingress|ingress_dry_run) to the proposed allow+deny rules, leaving the other blocks and egress
-    unchanged (update is a full replace). Creates the policy when it doesn't exist and
-    create_missing_policy is on. Returns (action, sent_block_dict) where action is created|updated."""
+    """Create-or-update account network policy `policy_id` (idempotent: the name is deterministic),
+    setting its target block (ingress|ingress_dry_run) to the proposed allow+deny rules and leaving
+    the other blocks + egress unchanged (update is a full replace). Returns
+    (action, effective_id, sent_block_dict)."""
     from databricks.sdk.errors import NotFound
     from databricks.sdk.service.settings import AccountNetworkPolicy
 
@@ -1929,12 +1917,8 @@ def _apply_to_policy(a, policy_id, allow, deny):
         existing = a.network_policies.get_network_policy_rpc(network_policy_id=policy_id)
         action = "updated"
     except NotFound:
-        if not CREATE_MISSING_POLICY:
-            raise ValueError(
-                f"Network policy '{policy_id}' does not exist and create_missing_policy=false. "
-                f"Create it first or set widget 5c (create_missing_policy) to true.")
         # On create there is no egress block to preserve, but the API requires one — build it from
-        # the egress_policy widget (5d).
+        # the egress_policy widget.
         existing = AccountNetworkPolicy(
             account_id=ACCOUNT_ID, network_policy_id=policy_id, egress=_build_egress(EGRESS_POLICY),
         )
@@ -1954,69 +1938,70 @@ def _apply_to_policy(a, policy_id, allow, deny):
     return action, effective_id, sent.as_dict()
 
 
-# A policy name is only a label — if the user didn't set one (widget 5a), generate a sensible
-# default from the name prefix so apply just works rather than bailing. Names have a length limit
-# (empirically ~30 chars; a 16-digit workspace id appended to a long base is rejected).
+# Generated policy names have a length limit (empirically ~30 chars; a 16-digit workspace id on a
+# long base is rejected).
 MAX_POLICY_ID_LEN = 30
-RESOLVED_POLICY_ID = NETWORK_POLICY_ID or f"{NAME_PREFIX}-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}"
 
 
-def _policy_name(base, workspace_id=None):
-    """Build a valid, length-bounded policy id. For per-workspace, keep the full workspace id (the
-    meaningful discriminator) as '<base>-ws-<id>', truncating the base if needed to fit the limit.
-    Otherwise clamp the base itself."""
+def _policy_name(workspace_id=None):
+    """Deterministic policy id from the name prefix. Per-workspace keeps the full workspace id
+    ('<prefix>-ws-<id>', truncating the prefix if needed); single scope is just '<prefix>'."""
     if workspace_id is not None:
         suffix = f"-ws-{workspace_id}"
         room = MAX_POLICY_ID_LEN - len(suffix)
-        return f"{base[:max(room, 1)].rstrip('-')}{suffix}"
-    return base[:MAX_POLICY_ID_LEN]
+        return f"{NAME_PREFIX[:max(room, 1)].rstrip('-')}{suffix}"
+    return NAME_PREFIX[:MAX_POLICY_ID_LEN]
 
-if not APPLY_POLICY:
-    print(f"Not applying (mode={POLICY_MODE}, scope={POLICY_SCOPE}). Set apply_policy=true to apply. "
-          f"policy_mode=dry_run is the safe default (log-only); enforce blocks non-matching IPs.")
+
+def _assign(a, workspace_id, policy_id):
+    from databricks.sdk.service.settings import WorkspaceNetworkOption
+    a.workspace_network_configuration.update_workspace_network_option_rpc(
+        workspace_id=int(workspace_id),
+        workspace_network_option=WorkspaceNetworkOption(
+            workspace_id=int(workspace_id), network_policy_id=policy_id),
+    )
+
+
+if not CREATE_POLICY:
+    print(f"Not creating (mode={POLICY_MODE}, scope={POLICY_SCOPE}). Set create_policy=true to create "
+          f"the policy; auto_assign=true to also bind the workspace(s). policy_mode=dry_run is the "
+          f"safe default (log-only); enforce blocks non-matching IPs.")
 elif not policies:
     print("No allow or deny rule specs to apply — check the suggestions above.")
 else:
     a = _account_client()  # account admin required — see "Account admin requirements" above
-    if not NETWORK_POLICY_ID:
-        print(f"No network_policy_id set (widget 5a) — using generated name '{RESOLVED_POLICY_ID}'.")
 
     if POLICY_SCOPE == "single":
         p = policies.get(ALL_WORKSPACES) or next(iter(policies.values()))
-        single_id = _policy_name(RESOLVED_POLICY_ID)
-        print(f"Applying policy '{single_id}' ({POLICY_MODE_TARGET}, {POLICY_MODE} mode, "
-              f"create_missing={CREATE_MISSING_POLICY})...")
+        single_id = _policy_name()
+        print(f"Creating/updating policy '{single_id}' ({POLICY_MODE_TARGET}, {POLICY_MODE} mode)...")
         action, effective_id, sent = _apply_to_policy(a, single_id, p["allow"], p["deny"])
         print(f"Policy {action}: {effective_id}")
         print(json.dumps({POLICY_MODE_TARGET: sent}, indent=2))
+        if AUTO_ASSIGN:
+            this_ws = WorkspaceClient().get_workspace_id()
+            _assign(a, this_ws, effective_id)
+            print(f"Assigned this workspace ({this_ws}) to '{effective_id}'.")
         print("Done." if POLICY_MODE == "dry_run"
               else "⛔ Done — ENFORCED. Verify you can still reach the workspace.")
     else:
-        # per_workspace: get-or-create one policy per workspace, then bind the workspace to it.
-        from databricks.sdk.service.settings import WorkspaceNetworkOption
-
-        # workspace_id 0 is account-level, not a bindable workspace — never create/bind a
-        # per-workspace policy for it (even if account-level rows were included in analysis).
+        # per_workspace: create/update one policy per workspace; bind each only if auto_assign.
+        # workspace_id 0 is account-level, not a bindable workspace — skip it.
         ws_targets = sorted(t for t in policies if t != ALL_WORKSPACES and int(t) != 0)
-        skipped_ws0 = [t for t in policies if t != ALL_WORKSPACES and int(t) == 0]
-        if skipped_ws0:
+        if [t for t in policies if t != ALL_WORKSPACES and int(t) == 0]:
             print("  (skipping workspace_id=0 — account-level, not a bindable workspace)")
-        print(f"per_workspace apply ({POLICY_MODE} mode, create_missing={CREATE_MISSING_POLICY}): "
-              f"applying + binding {len(ws_targets)} workspace policy(ies).\n")
-        # Per-workspace base: the user's name if set, else the prefix (no timestamp — the workspace
-        # id is the discriminator, and it keeps the name short).
-        ws_base = NETWORK_POLICY_ID or NAME_PREFIX
+        print(f"per_workspace ({POLICY_MODE} mode, auto_assign={AUTO_ASSIGN}): "
+              f"creating {len(ws_targets)} workspace policy(ies).\n")
         for tgt in ws_targets:
-            pid = _policy_name(ws_base, workspace_id=tgt)
+            pid = _policy_name(workspace_id=tgt)
             p = policies[tgt]
             try:
                 action, effective_id, _ = _apply_to_policy(a, pid, p["allow"], p["deny"])
-                a.workspace_network_configuration.update_workspace_network_option_rpc(
-                    workspace_id=int(tgt),
-                    workspace_network_option=WorkspaceNetworkOption(
-                        workspace_id=int(tgt), network_policy_id=effective_id),
-                )
-                print(f"  ✅ workspace {tgt}: {action} '{effective_id}' and bound.")
+                if AUTO_ASSIGN:
+                    _assign(a, tgt, effective_id)
+                    print(f"  ✅ workspace {tgt}: {action} '{effective_id}' and bound.")
+                else:
+                    print(f"  ✅ workspace {tgt}: {action} '{effective_id}' (not bound).")
             except Exception as e:  # noqa: BLE001 - surface per-workspace failures, keep going
                 print(f"  ❌ workspace {tgt}: {e}")
         print("\nDone." if POLICY_MODE == "dry_run"
