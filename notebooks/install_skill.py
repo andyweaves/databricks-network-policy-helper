@@ -1,36 +1,25 @@
 # Databricks notebook source
 # MAGIC %md
-# MAGIC # Install the CBI Helper Genie Code skill
+# MAGIC # Install Genie Code skill(s)
 # MAGIC
-# MAGIC Copies the `cbi-helper` skill from this repo's `.assistant/skills/` into **your user skills
-# MAGIC directory** — `/Users/<you>/.assistant/skills/cbi-helper/` — where Databricks Genie Code
-# MAGIC discovers per-user skills. Run this notebook from the git folder / repo checkout so it can
-# MAGIC read the skill source next to itself.
+# MAGIC Copies skill(s) from this repo's `.assistant/skills/` into **your user skills directory**
+# MAGIC (`/Users/<you>/.assistant/skills/<skill>/`), where Databricks Genie Code discovers per-user
+# MAGIC skills. Run this notebook from the git-folder / repo checkout so it can read the skill sources.
 # MAGIC
-# MAGIC After installing, Genie Code picks up the skill the next time you use it; you can also invoke
-# MAGIC it explicitly by `@cbi-helper` in chat.
+# MAGIC Choose which skills to install with the `skills` widget (`ALL` = every skill in the repo). After
+# MAGIC installing, Genie Code picks them up next time you use it; invoke one explicitly with
+# MAGIC `@<skill-name>` in chat.
 # MAGIC
-# MAGIC > We install into the **user** path, not `Workspace/.assistant/skills/` (which is a shared,
-# MAGIC > admin-scoped location). Set the `target_scope` widget to `workspace` only if you deliberately
-# MAGIC > want the skill available account-wide and have permission to write there.
+# MAGIC > Installs into the **user** path by default, not `Workspace/.assistant/skills/` (a shared,
+# MAGIC > admin-scoped location). Use `target_scope=workspace` only for a deliberate account-wide install.
 
 # COMMAND ----------
 
-# DBTITLE 1,Parameters
-dbutils.widgets.dropdown("target_scope", "user", ["user", "workspace"], "Install scope")
-dbutils.widgets.dropdown("overwrite", "true", ["true", "false"], "Overwrite existing?")
-TARGET_SCOPE = dbutils.widgets.get("target_scope")
-OVERWRITE = dbutils.widgets.get("overwrite") == "true"
-
-# COMMAND ----------
-
-# DBTITLE 1,Locate the skill source and target
+# DBTITLE 1,Discover available skills + parameters
 import os
 import shutil
 
 from databricks.sdk import WorkspaceClient
-
-SKILL_NAME = "cbi-helper"
 
 
 def _fuse(path):
@@ -38,42 +27,62 @@ def _fuse(path):
     return path if path.startswith("/Workspace/") else f"/Workspace{path}"
 
 
-# This notebook lives at <repo>/notebooks/install_skill. The skill is at
-# <repo>/.assistant/skills/cbi-helper/. Resolve the repo root from this notebook's workspace path,
-# then work against the /Workspace FUSE mount as ordinary files (no export/import API needed).
+# This notebook lives at <repo>/notebooks/install_skill; skills are at <repo>/.assistant/skills/*.
 _nb_path = dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get()
-_repo_root = os.path.dirname(os.path.dirname(_nb_path))  # up from /notebooks/install_skill
-SKILL_SRC = _fuse(f"{_repo_root}/.assistant/skills/{SKILL_NAME}")
+_repo_root = os.path.dirname(os.path.dirname(_nb_path))
+SKILLS_ROOT = _fuse(f"{_repo_root}/.assistant/skills")
+
+# A skill is any subdir of .assistant/skills containing a SKILL.md.
+AVAILABLE_SKILLS = sorted(
+    d for d in (os.listdir(SKILLS_ROOT) if os.path.isdir(SKILLS_ROOT) else [])
+    if os.path.isfile(os.path.join(SKILLS_ROOT, d, "SKILL.md"))
+)
+
+# Recreate the skills widget each run so its choices track what's actually in the repo.
+try:
+    dbutils.widgets.remove("skills")
+except Exception:  # noqa: BLE001
+    pass
+dbutils.widgets.multiselect(
+    "skills", "ALL", ["ALL"] + AVAILABLE_SKILLS, "Skills to install (ALL = every skill)"
+)
+dbutils.widgets.dropdown("target_scope", "user", ["user", "workspace"], "Install scope")
+dbutils.widgets.dropdown("overwrite", "true", ["true", "false"], "Overwrite existing?")
+
+_sel = [s.strip() for s in dbutils.widgets.get("skills").split(",") if s.strip()]
+SELECTED_SKILLS = list(AVAILABLE_SKILLS) if (not _sel or "ALL" in _sel) else [s for s in _sel if s in AVAILABLE_SKILLS]
+TARGET_SCOPE = dbutils.widgets.get("target_scope")
+OVERWRITE = dbutils.widgets.get("overwrite") == "true"
 
 _me = WorkspaceClient().current_user.me().user_name
-if TARGET_SCOPE == "user":
-    TARGET_DIR = _fuse(f"/Users/{_me}/.assistant/skills/{SKILL_NAME}")
-else:
-    TARGET_DIR = _fuse(f"/Workspace/.assistant/skills/{SKILL_NAME}")
+TARGET_ROOT = _fuse(f"/Users/{_me}/.assistant/skills") if TARGET_SCOPE == "user" else _fuse("/Workspace/.assistant/skills")
 
-print(f"notebook path : {_nb_path}")
-print(f"skill source  : {SKILL_SRC}")
-print(f"install target: {TARGET_DIR}  (scope={TARGET_SCOPE}, overwrite={OVERWRITE})")
+print(f"repo skills root : {SKILLS_ROOT}")
+print(f"available skills : {AVAILABLE_SKILLS or '(none found)'}")
+print(f"selected         : {SELECTED_SKILLS or '(none)'}")
+print(f"install target   : {TARGET_ROOT}  (scope={TARGET_SCOPE}, overwrite={OVERWRITE})")
 
 # COMMAND ----------
 
-# DBTITLE 1,Copy the skill files
-if not os.path.isdir(SKILL_SRC):
+# DBTITLE 1,Install the selected skill(s)
+if not AVAILABLE_SKILLS:
     raise RuntimeError(
-        f"Skill source not found at {SKILL_SRC}. Run this notebook from the repo / git-folder "
-        f"checkout so the .assistant/skills/{SKILL_NAME} folder sits alongside it.")
+        f"No skills found under {SKILLS_ROOT}. Run this notebook from the repo / git-folder checkout "
+        f"so the .assistant/skills folder sits alongside it.")
+if not SELECTED_SKILLS:
+    raise RuntimeError("No skills selected — pick at least one (or ALL) in the skills widget.")
 
-if os.path.exists(TARGET_DIR):
-    if not OVERWRITE:
-        raise RuntimeError(f"{TARGET_DIR} already exists and overwrite=false. Set overwrite=true.")
-    shutil.rmtree(TARGET_DIR)
+os.makedirs(TARGET_ROOT, exist_ok=True)
+for skill in SELECTED_SKILLS:
+    src = os.path.join(SKILLS_ROOT, skill)
+    dst = os.path.join(TARGET_ROOT, skill)
+    if os.path.exists(dst):
+        if not OVERWRITE:
+            print(f"  ⏭️  {skill}: already exists and overwrite=false — skipped")
+            continue
+        shutil.rmtree(dst)
+    shutil.copytree(src, dst)
+    n = sum(len(fs) for _, _, fs in os.walk(dst))
+    print(f"  ✅ {skill}: installed {n} file(s) -> {dst}")
 
-os.makedirs(os.path.dirname(TARGET_DIR), exist_ok=True)
-shutil.copytree(SKILL_SRC, TARGET_DIR)
-
-copied = [os.path.relpath(os.path.join(dp, f), TARGET_DIR)
-          for dp, _, fs in os.walk(TARGET_DIR) for f in fs]
-print(f"Installed {len(copied)} file(s) to {TARGET_DIR}:")
-for rel in sorted(copied):
-    print(f"  {rel}")
-print("\nGenie Code will pick up the skill next time you use it. Invoke explicitly with @cbi-helper.")
+print("\nGenie Code will pick up the skill(s) next time you use it. Invoke one with @<skill-name>.")
