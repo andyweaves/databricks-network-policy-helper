@@ -561,6 +561,8 @@ display(frequent_public_ips)
 # COMMAND ----------
 
 # DBTITLE 1,Read IP ACL + denied requests
+from databricks.sdk import WorkspaceClient
+
 # Existing workspace IP access lists (workspace-level read; no account admin needed).
 ip_acls = []  # list of {label, list_type, enabled, ip_addresses}
 try:
@@ -584,19 +586,21 @@ else:
     print("No IP access lists configured on this workspace.")
 
 # Currently-denied requests (blocked by the ACL): action_name = 'IpAccessDenied' / HTTP 403.
+# Reads the audit_recent temp view, whose columns are already flattened (normalized_ip, principal,
+# status_code) — not the raw system.access.audit struct columns.
 denied_requests = spark.sql(
-    f"""
+    """
     SELECT
-      try_ip_host(source_ip_address) AS source_ip,
+      normalized_ip AS source_ip,
       COUNT(*) AS denied_events,
-      COUNT(DISTINCT COALESCE(user_identity.email, user_identity.subject_name)) AS principals,
-      sort_array(collect_set(COALESCE(user_identity.email, user_identity.subject_name))) AS principal_list,
+      COUNT(DISTINCT principal) AS principals,
+      sort_array(collect_set(principal)) AS principal_list,
       MIN(event_date) AS first_denied,
       MAX(event_date) AS last_denied
     FROM audit_recent
-    WHERE (action_name = 'IpAccessDenied' OR response.status_code = 403)
-      AND try_ip_host(source_ip_address) IS NOT NULL
-    GROUP BY try_ip_host(source_ip_address)
+    WHERE (action_name = 'IpAccessDenied' OR status_code = 403)
+      AND normalized_ip IS NOT NULL
+    GROUP BY normalized_ip
     ORDER BY denied_events DESC
     """
 )
