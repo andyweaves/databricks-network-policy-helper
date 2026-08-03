@@ -1587,12 +1587,12 @@ def _build_rule(spec):
 
     origin = Origin(included_ip_ranges=IpRanges(ip_ranges=list(spec["cidrs"])))
 
-    destination = None
+    # Every rule needs a destination (the API rejects an empty one). Default to all_destinations.
     if spec["destination"] == "apps_runtime":
         destination = Destination(apps_runtime=AppsDest(all_destinations=True))
     elif spec["destination"] == "lakebase_runtime":
         destination = Destination(lakebase_runtime=LakebaseDest(all_destinations=True))
-    elif spec["destination"] == "all_destinations":
+    else:
         destination = Destination(all_destinations=True)
 
     authentication = None
@@ -1614,14 +1614,17 @@ def _build_rule(spec):
 
 
 def _build_deny_rule(spec):
-    """A deny rule is just an origin (CIDRs) with a label — no destination/identity scoping."""
+    """A deny rule is an origin (CIDRs) with a label. The API requires a destination on every rule,
+    so deny applies to all destinations (block the range from reaching anything)."""
     from databricks.sdk.service.settings import (
         CustomerFacingIngressNetworkPolicyIpRanges as IpRanges,
         CustomerFacingIngressNetworkPolicyPublicIngressRule as Rule,
         CustomerFacingIngressNetworkPolicyPublicRequestOrigin as Origin,
+        CustomerFacingIngressNetworkPolicyRequestDestination as Destination,
     )
     return Rule(label=f"{spec['label']} ({POLICY_MODE_RULE_LABEL})",
-                origin=Origin(included_ip_ranges=IpRanges(ip_ranges=list(spec["cidrs"]))))
+                origin=Origin(included_ip_ranges=IpRanges(ip_ranges=list(spec["cidrs"]))),
+                destination=Destination(all_destinations=True))
 
 
 def _build_ingress_block(specs, deny=None):
