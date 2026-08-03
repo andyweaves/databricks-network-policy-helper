@@ -3,15 +3,16 @@
 # MAGIC # IP Access List → CBI migration (simple)
 # MAGIC
 # MAGIC A minimal companion to `audit_log_cbi.py`. It reads **this workspace's existing IP access
-# MAGIC list** and migrates it as-is into an account **context-based ingress (CBI)** network policy —
-# MAGIC no audit-log analysis, no enrichment. ALLOW lists become allow rules, BLOCK lists become deny
-# MAGIC rules; Databricks' own control-plane IPs are auto-allowed so an enforced policy can't lock the
-# MAGIC platform out.
+# MAGIC list** and migrates it **as-is** into an account **context-based ingress (CBI)** network
+# MAGIC policy — no audit-log analysis, no enrichment, nothing added. ALLOW lists become allow rules,
+# MAGIC BLOCK lists become deny rules. It assumes the customer is happy with their current ACL and
+# MAGIC just wants it recreated as a network policy.
 # MAGIC
-# MAGIC Use `audit_log_cbi.py` instead if you want traffic-based suggestions, threat-intel/cloud
-# MAGIC enrichment, or identity/destination scoping.
+# MAGIC Use `audit_log_cbi.py` instead if you want traffic-based suggestions, threat-intel / cloud
+# MAGIC enrichment, Databricks-IP auto-allow, or identity/destination scoping.
 # MAGIC
-# MAGIC > ⚠️ Default `policy_mode` is `enforce`. Switch to `dry_run` to trial log-only first.
+# MAGIC > ⚠️ Default `policy_mode` is `enforce`. Switch to `dry_run` to trial log-only first. Since
+# MAGIC > this migrates the ACL verbatim, an enforced policy behaves like the ACL it came from.
 
 # COMMAND ----------
 
@@ -74,17 +75,15 @@ MAX_POLICY_ID_LEN = 30
 # MAGIC %md
 # MAGIC ## Read this workspace's IP access list + Databricks-owned ranges
 # MAGIC
-# MAGIC The ACL read is workspace-level (no account admin needed). Databricks' own control-plane /
-# MAGIC serverless IPs come from the official `databricks.com/networking/v1/ip-ranges.json` feed and
-# MAGIC are auto-allowed so an enforced policy can't lock the platform out.
+# MAGIC The ACL read is workspace-level (no account admin needed). This is a **faithful migration** —
+# MAGIC it recreates the existing ACL exactly and adds nothing (it assumes the customer is happy with
+# MAGIC their current ACL). Use `audit_log_cbi.py` if you want enrichment / Databricks-IP auto-allow.
 
 # COMMAND ----------
 
-# DBTITLE 1,Read IP ACL + Databricks ranges
+# DBTITLE 1,Read IP ACL
 import ipaddress
-import json
 from datetime import datetime, timezone
-from urllib.request import Request, urlopen
 
 import pandas as pd
 
@@ -112,38 +111,14 @@ if ip_acls:
 else:
     print("No enabled IP access lists on this workspace — nothing to migrate.")
 
-
-def _databricks_ipv4_cidrs():
-    """IPv4 CIDRs from the official Databricks IP-ranges feed (all clouds), so the platform's own
-    control-plane isn't locked out by an enforced policy."""
-    cidrs = []
-    try:
-        req = Request("https://www.databricks.com/networking/v1/ip-ranges.json",
-                      headers={"User-Agent": "Databricks-CBI-Helper"})
-        with urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        for entry in data.get("prefixes", []):
-            for c in entry.get("ipv4Prefixes", []):
-                try:
-                    if ipaddress.ip_network(c, strict=False).version == 4 and c not in cidrs:
-                        cidrs.append(c)
-                except ValueError:
-                    pass
-    except Exception as e:  # noqa: BLE001
-        print(f"  ! could not fetch Databricks IP ranges: {e}")
-    return cidrs
-
-
-databricks_cidrs = _databricks_ipv4_cidrs()
-print(f"Databricks-owned IPv4 ranges to auto-allow: {len(databricks_cidrs)}")
-
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ## Build the proposed policy
 # MAGIC
-# MAGIC ALLOW lists → allow rules, BLOCK lists → deny rules, plus a Databricks-owned allow rule.
-# MAGIC IPv4 only (CBI is IPv4-only). Builds and prints the exact block; nothing is sent here.
+# MAGIC ALLOW lists → allow rules, BLOCK lists → deny rules — a faithful recreation of the ACL,
+# MAGIC nothing added. IPv4 only (CBI is IPv4-only). Builds and prints the exact block; nothing is
+# MAGIC sent here.
 
 # COMMAND ----------
 
@@ -170,9 +145,6 @@ for a in ip_acls:
         allow_specs.append({"label": label, "cidrs": cidrs})
     elif a["list_type"] == "BLOCK":
         deny_specs.append({"label": label, "cidrs": cidrs})
-
-if databricks_cidrs:
-    allow_specs.append({"label": f"{NAME_PREFIX}-databricks", "cidrs": databricks_cidrs})
 
 
 def _build_ingress_block(allow, deny):
