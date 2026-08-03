@@ -123,6 +123,9 @@ else:
 # COMMAND ----------
 
 # DBTITLE 1,Assemble + preview
+import json
+
+
 def _ipv4(cidrs):
     out = []
     for c in cidrs:
@@ -140,7 +143,7 @@ for a in ip_acls:
     cidrs = _ipv4(a["ip_addresses"])
     if not cidrs:
         continue
-    label = f"{NAME_PREFIX}-acl-{a['label']}"[:250]
+    label = f"{NAME_PREFIX}-ip-acl-{a['label']}"[:250]
     if a["list_type"] == "ALLOW":
         allow_specs.append({"label": label, "cidrs": cidrs})
     elif a["list_type"] == "BLOCK":
@@ -224,7 +227,11 @@ def _build_egress(kind):
     return NetworkPolicyEgress(network_access=access)
 
 
-RESOLVED_POLICY_ID = (NETWORK_POLICY_ID or f"{NAME_PREFIX}-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}")[:MAX_POLICY_ID_LEN]
+RESOLVED_POLICY_ID = NETWORK_POLICY_ID or f"{NAME_PREFIX}-{WORKSPACE_ID}"
+if len(RESOLVED_POLICY_ID) > MAX_POLICY_ID_LEN:
+    print(f"⚠️  policy name '{RESOLVED_POLICY_ID}' is {len(RESOLVED_POLICY_ID)} chars — network "
+          f"policy ids have a length limit (~{MAX_POLICY_ID_LEN}). If create fails with 'Invalid "
+          f"NetworkPolicyId', shorten name_prefix or set network_policy_id (widget 6a) explicitly.")
 
 if not APPLY_POLICY:
     print(f"Not applying (mode={POLICY_MODE}). Set apply_policy=true to create the policy"
