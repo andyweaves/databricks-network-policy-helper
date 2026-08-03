@@ -29,7 +29,7 @@ import base64
 import os
 
 from databricks.sdk import WorkspaceClient
-from databricks.sdk.service.workspace import ImportFormat
+from databricks.sdk.service.workspace import ExportFormat, ImportFormat
 
 SKILL_NAME = "cbi-helper"
 
@@ -82,7 +82,7 @@ for src in src_files:
     rel = src[len(SKILL_SRC):].lstrip("/")
     dst = f"{TARGET_DIR}/{rel}"
     # Read source bytes (export RAW) and write to the target (import RAW).
-    content_b64 = w.workspace.export(path=src, format="RAW").content  # base64 string
+    content_b64 = w.workspace.export(path=src, format=ExportFormat.RAW).content  # base64 string
     parent = os.path.dirname(dst)
     if parent:
         w.workspace.mkdirs(parent)
