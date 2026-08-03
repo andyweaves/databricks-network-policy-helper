@@ -103,8 +103,8 @@ fit — and report how many CIDRs are included vs excluded. (Selection order is 
 
 ## Source repo
 
-This skill wraps the **databricks-cbi-helper** repo
-(`https://github.com/andyweaves/databricks-cbi-helper`). The paths below are relative to that repo
+This skill wraps the **databricks-network-policy-helper** repo
+(`https://github.com/andyweaves/databricks-network-policy-helper`). The paths below are relative to that repo
 root. If this skill was copied out of the repo (e.g. into `/Users/<you>/.assistant/skills/`), find
 those files back in the repo / the git folder it was installed from.
 

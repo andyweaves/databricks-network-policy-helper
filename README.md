@@ -1,4 +1,16 @@
-# Databricks CBI Helper
+# Databricks Network Policy Helper
+
+Tools to build Databricks **account network policies** from real observed traffic. Each tool is a
+self-contained notebook (+ optional Genie Code skill) under a common home.
+
+| Tool | Status | What it does |
+|---|---|---|
+| **CBI Helper** (ingress) — `notebooks/audit_log_cbi.py` | ✅ available | Recommends and applies a **context-based ingress** allow-list from audit-log source IPs. |
+| **Egress Helper** (SEG) | 🔜 planned | Recommend serverless egress (outbound) rules from observed destinations. |
+
+---
+
+## CBI Helper (ingress)
 
 Turn real `system.access.audit` traffic into a proposed **Context-Based Ingress (CBI)** allow-list
 for a Databricks **account network policy** — enriched with open threat-intelligence and
@@ -7,7 +19,7 @@ dry-run-first.
 
 It answers: *who connects to this workspace, from where, and what should the inbound allow-list be?*
 
-## What it does
+### What it does
 
 1. Analyses the last N days of `system.access.audit` — request surfaces, per-principal network
    diversity, and the **public source IPs** carrying successful traffic.
@@ -26,7 +38,7 @@ It answers: *who connects to this workspace, from where, and what should the inb
 5. Optionally writes the result into the network policy via the Databricks SDK, in **`dry_run`**
    (log-only) or **`enforce`** (blocking) mode, gated by `apply_policy`.
 
-## Safety model
+### Safety model
 
 - Default `policy_mode` is **`dry_run`** — writes the log-only `ingress_dry_run` block and **blocks
   nothing**. Validate here first.
@@ -37,7 +49,7 @@ It answers: *who connects to this workspace, from where, and what should the inb
 - The CBI policy schema is **IPv4-only**; IPv6 is analysed but never put in a policy.
 - Nothing is written unless you set `apply_policy=true`.
 
-## Quick start
+### Quick start
 
 1. **Deploy the notebook** into a workspace:
    ```bash
@@ -48,7 +60,7 @@ It answers: *who connects to this workspace, from where, and what should the inb
 3. **Review** the suggestions and the JSON preview.
 4. **Apply** only with intent — start in `dry_run`, review the logs, then re-run in `enforce`.
 
-## Permissions
+### Permissions
 
 - Analysis / enrichment: workspace read on `system.access.audit`.
 - **Applying a policy, or identity scoping: account admin** (recommended: an account-admin service
@@ -83,7 +95,7 @@ copy the `.assistant/skills/cbi-helper` folder there by hand.
 Once installed, Genie Code picks it up next time you use it; invoke it explicitly with
 `@cbi-helper` in chat.
 
-## Genie space
+### Genie space
 
 `genie/genie-space-spec.md` specifies a Genie space over the audit + enrichment tables so operators
 can ask questions in natural language ("which external IPs hit the workspace and are any on a
