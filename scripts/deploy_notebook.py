@@ -7,11 +7,11 @@ This helper imports it via the Databricks CLI so it can be run in the target wor
 Examples
 --------
     # Import into your home dir on a given CLI profile
-    python deploy_notebook.py --profile dogfood
+    python deploy_notebook.py --profile my-workspace
 
     # Import to an explicit path, overwriting any existing copy
-    python deploy_notebook.py --profile prod \
-        --path /Users/me@databricks.com/audit_log_cbi --overwrite
+    python deploy_notebook.py --profile my-workspace \
+        --path /Users/you@example.com/audit_log_cbi --overwrite
 
 Requires the Databricks CLI, authenticated for the chosen --profile. Only imports the notebook;
 it does not run it or touch any network policy.
