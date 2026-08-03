@@ -71,7 +71,10 @@ trial an ingress policy in dry-run before enforcing.
   Audit `workspace_id = 0` is account-level, excluded unless `include_account_level=true`.
 
 On apply, the target policy is **created if it doesn't exist** by default (`create_missing_policy`,
-widget 5d); set it false to require the policy to pre-exist.
+widget 5c); set it false to require the policy to pre-exist. When creating, the basic egress policy
+is set from `egress_policy` (widget 5d): `allow_all` (FULL_ACCESS), `dry_run` (restricted, log-only
+for all products), or `restricted` (enforced — configure allowed destinations yourself afterwards).
+Existing policies keep their egress untouched.
 
 The notebook knows the Databricks network-policy limits and **warns + auto-caps** to keep proposals
 valid: **50 ingress rules, 2000 CIDR blocks, 100 identities per policy; 1000 policies per account**.

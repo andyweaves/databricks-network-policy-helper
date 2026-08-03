@@ -138,6 +138,12 @@ dbutils.widgets.dropdown("apply_policy", "false", ["true", "false"], "5b. Apply 
 dbutils.widgets.dropdown(
     "create_missing_policy", "true", ["true", "false"], "5c. Create policy if missing?"
 )
+# Basic egress policy applied only when CREATING a new policy (existing policies keep their egress).
+# allow_all = FULL_ACCESS; dry_run = RESTRICTED_ACCESS + log-only for all products; restricted =
+# RESTRICTED_ACCESS + enforced (configure allowed destinations yourself afterwards).
+dbutils.widgets.dropdown(
+    "egress_policy", "allow_all", ["allow_all", "dry_run", "restricted"], "5d. Egress (on create)"
+)
 
 # COMMAND ----------
 
@@ -194,6 +200,7 @@ ACCOUNT_SECRET_KEY = dbutils.widgets.get("account_secret_key").strip()
 NETWORK_POLICY_ID = dbutils.widgets.get("network_policy_id").strip()
 APPLY_POLICY = dbutils.widgets.get("apply_policy") == "true"
 CREATE_MISSING_POLICY = dbutils.widgets.get("create_missing_policy") == "true"
+EGRESS_POLICY = dbutils.widgets.get("egress_policy")  # allow_all | dry_run | restricted
 
 
 def _require_account_id(operation):
@@ -265,6 +272,8 @@ _decisions = pd.DataFrame([
     ("5b. apply_policy", APPLY_POLICY, "Master switch for the apply step (dry_run is the safe default mode)."),
     ("5c. create_missing_policy", CREATE_MISSING_POLICY,
      "If the target policy doesn't exist, create it (default true) vs require it to pre-exist."),
+    ("5d. egress_policy", EGRESS_POLICY,
+     "Egress set on CREATE only: allow_all=FULL_ACCESS; dry_run=restricted+log-only; restricted=enforced."),
 ], columns=["widget", "value", "meaning"])
 # The value column mixes int/bool/str; cast to string so display()'s Arrow conversion doesn't fail
 # on the resulting object-dtype column.
@@ -1725,18 +1734,41 @@ display(_policy_explainer)
 # COMMAND ----------
 
 # DBTITLE 1,Apply proposed rules (dry_run or enforce)
+def _build_egress(kind):
+    """Build the basic egress block used ONLY when creating a new policy (widget 5d):
+      allow_all  -> FULL_ACCESS (no egress restriction)
+      dry_run    -> RESTRICTED_ACCESS + enforcement DRY_RUN (log-only for ALL products)
+      restricted -> RESTRICTED_ACCESS + enforcement ENFORCED (no allowed destinations set here;
+                    the user configures allowed destinations themselves afterwards)"""
+    from databricks.sdk.service.settings import (
+        EgressNetworkPolicyNetworkAccessPolicy as EgressAccess,
+        EgressNetworkPolicyNetworkAccessPolicyPolicyEnforcement as Enforcement,
+        EgressNetworkPolicyNetworkAccessPolicyPolicyEnforcementEnforcementMode as EnforcementMode,
+        EgressNetworkPolicyNetworkAccessPolicyRestrictionMode as EgressRestriction,
+        NetworkPolicyEgress,
+    )
+    if kind == "allow_all":
+        access = EgressAccess(restriction_mode=EgressRestriction.FULL_ACCESS)
+    elif kind == "dry_run":
+        access = EgressAccess(
+            restriction_mode=EgressRestriction.RESTRICTED_ACCESS,
+            policy_enforcement=Enforcement(enforcement_mode=EnforcementMode.DRY_RUN),
+        )
+    else:  # restricted
+        access = EgressAccess(
+            restriction_mode=EgressRestriction.RESTRICTED_ACCESS,
+            policy_enforcement=Enforcement(enforcement_mode=EnforcementMode.ENFORCED),
+        )
+    return NetworkPolicyEgress(network_access=access)
+
+
 def _apply_to_policy(a, policy_id, allow, deny):
     """Get-or-create an account network policy `policy_id` and set its target block
     (ingress|ingress_dry_run) to the proposed allow+deny rules, leaving the other blocks and egress
     unchanged (update is a full replace). Creates the policy when it doesn't exist and
     create_missing_policy is on. Returns (action, sent_block_dict) where action is created|updated."""
     from databricks.sdk.errors import NotFound
-    from databricks.sdk.service.settings import (
-        AccountNetworkPolicy,
-        EgressNetworkPolicyNetworkAccessPolicy as EgressAccess,
-        EgressNetworkPolicyNetworkAccessPolicyRestrictionMode as EgressRestriction,
-        NetworkPolicyEgress,
-    )
+    from databricks.sdk.service.settings import AccountNetworkPolicy
 
     try:
         existing = a.network_policies.get_network_policy_rpc(network_policy_id=policy_id)
@@ -1746,12 +1778,10 @@ def _apply_to_policy(a, policy_id, allow, deny):
             raise ValueError(
                 f"Network policy '{policy_id}' does not exist and create_missing_policy=false. "
                 f"Create it first or set widget 5c (create_missing_policy) to true.")
-        # On create there is no egress block to preserve, but the API requires
-        # egress.network_access.restriction_mode. Default to FULL_ACCESS (does not restrict egress).
+        # On create there is no egress block to preserve, but the API requires one — build it from
+        # the egress_policy widget (5d).
         existing = AccountNetworkPolicy(
-            account_id=ACCOUNT_ID, network_policy_id=policy_id,
-            egress=NetworkPolicyEgress(
-                network_access=EgressAccess(restriction_mode=EgressRestriction.FULL_ACCESS)),
+            account_id=ACCOUNT_ID, network_policy_id=policy_id, egress=_build_egress(EGRESS_POLICY),
         )
         action = "created"
 
