@@ -76,6 +76,17 @@ is set from `egress_policy` (widget 5d): `allow_all` (FULL_ACCESS), `dry_run` (r
 for all products), or `restricted` (enforced — configure allowed destinations yourself afterwards).
 Existing policies keep their egress untouched.
 
+## Existing IP access list & denied requests
+
+If the workspace has an **IP access list** (ACL), `ip_acl_handling` (widget 3f) controls it:
+- `migrate_and_enrich` (default) — recreate the ACL as CBI rules **and** add traffic-derived rules.
+- `migrate` — recreate the ACL exactly (ALLOW → allow rules, BLOCK → deny rules), no traffic rules.
+- `ignore` — traffic-derived rules only.
+
+The notebook also surfaces requests **currently being denied** by the ACL (`action_name =
+'IpAccessDenied'` / HTTP 403) as review signal. Set `deny_denied_ips=true` (widget 3g) to also turn
+those source IPs into explicit CBI deny rules.
+
 The notebook knows the Databricks network-policy limits and **warns + auto-caps** to keep proposals
 valid: **50 ingress rules, 2000 CIDR blocks, 100 identities per policy; 1000 policies per account**.
 

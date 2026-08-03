@@ -13,14 +13,16 @@
 # MAGIC 4. Proposes allow-rule CIDR framings per IP group (`minimal` / `optimal` / `maximum`),
 # MAGIC    optionally scoped by **destination** (e.g. Apps-only) and **identity** (specific users /
 # MAGIC    service principals). Flagged (threat/cloud-owned) groups are always excluded.
-# MAGIC 5. Optionally adds **threat-intel deny rules** (one per feed) — either just the ranges that
+# MAGIC 5. Optionally **migrates the workspace's existing IP access list** into the policy
+# MAGIC    (`ip_acl_handling`: migrate / migrate-and-enrich / ignore) and surfaces currently-denied
+# MAGIC    requests (403 / IpAccessDenied), which can optionally become deny rules.
+# MAGIC 6. Optionally adds **threat-intel deny rules** (one per feed) — either just the ranges that
 # MAGIC    matched observed traffic, or entire feeds regardless of matches (`threat_deny_rules`).
-# MAGIC 6. Builds either **one policy for all workspaces** (`policy_scope=single`) or a **tailored
+# MAGIC 7. Builds either **one policy for all workspaces** (`policy_scope=single`) or a **tailored
 # MAGIC    policy per workspace** with recommended assignments (`policy_scope=per_workspace`), and
 # MAGIC    warns + auto-caps to the network-policy limits (50 rules / 2000 CIDRs / 100 identities).
-# MAGIC 7. Optionally writes the result into the account network policy via the Databricks SDK, in
-# MAGIC    **`dry_run`** (log-only) or **`enforce`** (blocking) mode — both gated behind an explicit,
-# MAGIC    mode-specific confirmation.
+# MAGIC 8. Optionally writes the result into the account network policy via the Databricks SDK, in
+# MAGIC    **`dry_run`** (log-only) or **`enforce`** (blocking) mode — gated by `apply_policy`.
 # MAGIC
 # MAGIC > ⚠️ **Safety:** every suggestion is advisory. The default `policy_mode` is `dry_run`, which
 # MAGIC > cannot block traffic. **`enforce` CAN lock users out** if the allow-list is incomplete — it
@@ -123,6 +125,17 @@ dbutils.widgets.dropdown(
 )
 # Prefix for generated policy names and rule labels (e.g. <prefix>-ws-<id>, <prefix>-deny-<feed>).
 dbutils.widgets.text("name_prefix", "cbi-helper", "3e. Name prefix for policies/rules")
+# How to treat an existing workspace IP access list (ACL): migrate_and_enrich = recreate it as CBI
+# rules AND add traffic-derived rules; migrate = recreate the ACL exactly, nothing else;
+# ignore = traffic-derived rules only.
+dbutils.widgets.dropdown(
+    "ip_acl_handling", "migrate_and_enrich",
+    ["migrate_and_enrich", "migrate", "ignore"], "3f. Existing IP ACL",
+)
+# Optionally add explicit deny rules for source IPs seen being blocked (403 / IpAccessDenied).
+dbutils.widgets.dropdown(
+    "deny_denied_ips", "false", ["true", "false"], "3g. Deny currently-denied IPs?"
+)
 
 # --- Account authentication (needed for identity resolution + apply; both are account-level) ---
 dbutils.widgets.text("account_id", "", "4a. Databricks account_id (blank = set manually)")
@@ -181,6 +194,8 @@ POLICY_SCOPE = dbutils.widgets.get("policy_scope")  # single | per_workspace
 POLICY_MODE = dbutils.widgets.get("policy_mode")
 THREAT_DENY_RULES = dbutils.widgets.get("threat_deny_rules")  # off | matched_only | all
 NAME_PREFIX = dbutils.widgets.get("name_prefix").strip() or "cbi-helper"
+IP_ACL_HANDLING = dbutils.widgets.get("ip_acl_handling")  # migrate_and_enrich | migrate | ignore
+DENY_DENIED_IPS = dbutils.widgets.get("deny_denied_ips") == "true"
 
 # Safety cap on total CIDRs placed into threat-intel deny rules, to avoid oversized policies.
 MAX_DENY_CIDRS = 5000
@@ -266,6 +281,10 @@ _decisions = pd.DataFrame([
      "off=none; matched_only=deny threat CIDRs that matched observed IPs; all=deny whole feeds (one rule each)."),
     ("3e. name_prefix", NAME_PREFIX,
      "Prefix for generated policy names + rule labels, e.g. <prefix>-ws-<id>, <prefix>-deny-<feed>."),
+    ("3f. ip_acl_handling", IP_ACL_HANDLING,
+     "Existing IP ACL: migrate_and_enrich (ACL + traffic), migrate (ACL only), ignore (traffic only)."),
+    ("3g. deny_denied_ips", DENY_DENIED_IPS,
+     "Add explicit deny rules for source IPs seen being blocked (403 / IpAccessDenied)."),
     ("4a. account_id", ACCOUNT_ID or "(unset — set manually)",
      "Databricks account_id (needed for SCIM + apply). Not auto-detectable from a workspace runtime."),
     ("4b. account_host", ACCOUNT_HOST, "Account console host. Defaults to AWS; set for Azure/GCP."),
@@ -526,6 +545,69 @@ frequent_public_ips = spark.sql(
 frequent_public_ips.createOrReplaceTempView("frequent_public_ips")
 print(f"candidate public IPs (>= {MIN_EVENTS} events): {frequent_public_ips.count():,}")
 display(frequent_public_ips)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Existing IP access list & currently-denied requests
+# MAGIC
+# MAGIC Reads the workspace's existing **IP access list** (ACL) — the `ip_acl_handling` widget decides
+# MAGIC whether to migrate it into the proposed CBI policy (ALLOW lists → allow rules, BLOCK lists →
+# MAGIC deny rules). Also surfaces requests **currently being denied** by that ACL
+# MAGIC (`action_name = 'IpAccessDenied'`, HTTP 403) — useful review signal for who's being blocked and
+# MAGIC from where. These are shown regardless of the handling mode; they're only turned into deny
+# MAGIC rules if `deny_denied_ips = true`.
+
+# COMMAND ----------
+
+# DBTITLE 1,Read IP ACL + denied requests
+# Existing workspace IP access lists (workspace-level read; no account admin needed).
+ip_acls = []  # list of {label, list_type, enabled, ip_addresses}
+try:
+    for acl in WorkspaceClient().ip_access_lists.list():
+        ip_acls.append({
+            "label": acl.label,
+            "list_type": acl.list_type.value if acl.list_type else None,
+            "enabled": acl.enabled,
+            "ip_addresses": list(acl.ip_addresses or []),
+        })
+except Exception as e:  # noqa: BLE001 - API may be unavailable / not configured
+    print(f"  ! could not read IP access lists: {e}")
+
+if ip_acls:
+    print(f"Found {len(ip_acls)} IP access list(s):")
+    for a in ip_acls:
+        state = "enabled" if a["enabled"] else "disabled"
+        print(f"  [{a['list_type']}] {a['label']} ({state}): {len(a['ip_addresses'])} entr(ies)")
+    display(pd.DataFrame([{**a, "ip_addresses": ", ".join(a["ip_addresses"])} for a in ip_acls]))
+else:
+    print("No IP access lists configured on this workspace.")
+
+# Currently-denied requests (blocked by the ACL): action_name = 'IpAccessDenied' / HTTP 403.
+denied_requests = spark.sql(
+    f"""
+    SELECT
+      try_ip_host(source_ip_address) AS source_ip,
+      COUNT(*) AS denied_events,
+      COUNT(DISTINCT COALESCE(user_identity.email, user_identity.subject_name)) AS principals,
+      sort_array(collect_set(COALESCE(user_identity.email, user_identity.subject_name))) AS principal_list,
+      MIN(event_date) AS first_denied,
+      MAX(event_date) AS last_denied
+    FROM audit_recent
+    WHERE (action_name = 'IpAccessDenied' OR response.status_code = 403)
+      AND try_ip_host(source_ip_address) IS NOT NULL
+    GROUP BY try_ip_host(source_ip_address)
+    ORDER BY denied_events DESC
+    """
+)
+denied_requests.createOrReplaceTempView("denied_requests")
+_n_denied = denied_requests.count()
+if _n_denied:
+    print(f"\n⚠️  {_n_denied} distinct source IP(s) had requests DENIED (403 / IpAccessDenied) in the "
+          f"window — currently blocked by the IP ACL. Review before allow-listing any of them.")
+    display(denied_requests)
+else:
+    print("\nNo denied (403 / IpAccessDenied) requests in the window.")
 
 # COMMAND ----------
 
@@ -1362,7 +1444,10 @@ _framing_col = {"minimal": "minimal_cidrs", "optimal": "optimal_cidrs", "maximum
 target_specs = defaultdict(list)   # policy_target -> [allow spec, ...]
 skipped_ipv6 = 0
 excluded_flagged = 0
-if not suggestions_pdf.empty:
+# 'migrate' = recreate the ACL only; skip traffic-derived allow rules. The other modes
+# (migrate_and_enrich, ignore) include traffic-derived rules.
+_use_traffic_rules = IP_ACL_HANDLING != "migrate"
+if _use_traffic_rules and not suggestions_pdf.empty:
     for _, row in suggestions_pdf.iterrows():
         # Databricks-owned groups are ALWAYS included (auto-allowed) and take precedence — they are
         # the platform reaching in; excluding them would lock the control plane out under an enforced
@@ -1424,6 +1509,60 @@ if SCOPING_MODE == "ip_only":
             "identity_type": "ALL_USERS",
             "identities": [],
         }]
+
+# --- Migrate the existing IP ACL into the proposed rules (unless ignoring it) ---
+# ALLOW lists -> allow rules; BLOCK lists -> deny rules. These apply to the current workspace, so
+# they go into every policy target. Only IPv4 (CBI is IPv4-only).
+acl_allow_specs, acl_deny_specs = [], []
+if IP_ACL_HANDLING != "ignore" and ip_acls:
+    def _acl_ipv4(cidrs):
+        out = []
+        for c in cidrs:
+            v = c if "/" in c else f"{c}/32"
+            try:
+                if ipaddress.ip_network(v, strict=False).version == 4 and v not in out:
+                    out.append(v)
+            except ValueError:
+                pass
+        return out
+
+    for a in ip_acls:
+        if not a["enabled"]:
+            continue
+        cidrs = _acl_ipv4(a["ip_addresses"])
+        if not cidrs:
+            continue
+        label = f"{NAME_PREFIX}-acl-{a['label']}"[:250]
+        if a["list_type"] == "ALLOW":
+            acl_allow_specs.append({"label": label, "cidrs": cidrs, "destination": "all_destinations",
+                                    "identity_type": "ALL_USERS", "identities": []})
+        elif a["list_type"] == "BLOCK":
+            acl_deny_specs.append({"label": label, "cidrs": cidrs})
+
+# --- Optional deny rules for source IPs currently being denied (403 / IpAccessDenied) ---
+denied_deny_specs = []
+if DENY_DENIED_IPS:
+    denied_cidrs = []
+    for r in denied_requests.toPandas().to_dict(orient="records"):
+        ip = r["source_ip"]
+        try:
+            if ipaddress.ip_address(ip).version == 4:
+                c = f"{ip}/32"
+                if c not in denied_cidrs:
+                    denied_cidrs.append(c)
+        except ValueError:
+            pass
+    if denied_cidrs:
+        denied_deny_specs.append({"label": f"{NAME_PREFIX}-deny-currently-denied"[:250],
+                                  "cidrs": denied_cidrs})
+
+# Inject ACL allow rules into every target (seed a single account-wide target if there are none,
+# e.g. migrate mode with no traffic-derived rules).
+if acl_allow_specs:
+    if not target_specs:
+        target_specs[ALL_WORKSPACES] = []
+    for tgt in target_specs:
+        target_specs[tgt].extend(acl_allow_specs)
 
 
 def _enforce_limits(specs, deny, target):
@@ -1549,6 +1688,12 @@ if THREAT_DENY_RULES != "off":
               f"{sum(len(s['cidrs']) for s in deny_specs):,} CIDR(s) total:")
         for spec in deny_specs:
             print(f"  DENY {spec['label']}: {len(spec['cidrs'])} CIDR(s)")
+
+# Fold in ACL BLOCK-list deny rules and (optionally) denied-IP deny rules — same shape, applied to
+# every policy target alongside any threat-intel deny rules.
+for spec in acl_deny_specs + denied_deny_specs:
+    deny_specs.append(spec)
+    print(f"  DENY {spec['label']}: {len(spec['cidrs'])} CIDR(s)")
 
 # Finalise per-target policies: attach the (shared) deny rules to each target and enforce limits.
 # `policies` maps policy_target -> {"allow": [...], "deny": [...]}. Deny rules apply to every target.
