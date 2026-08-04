@@ -113,6 +113,10 @@ confidence-1 entries (drop confidence-2), put `attacker_subnet` ranges first, th
 fit — and report how many CIDRs are included vs excluded. (Selection order is preserved so the hard
 2000-CIDR-per-policy limit also trims the lowest-priority entries first.)
 
+CBI `RESTRICTED_ACCESS` is **default-deny** (deny rules are exceptions to allow rules). If a policy
+would end up with deny rules but **no** allow rules, a catch-all allow (all public IPs) is added
+automatically so non-denied traffic is still permitted — otherwise everything would be blocked.
+
 ## Source repo
 
 This skill wraps the **databricks-network-policy-helper** repo

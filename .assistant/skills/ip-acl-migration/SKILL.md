@@ -21,7 +21,9 @@ IP ACL as CBI, or create a network policy from the current ACL without analysing
 
 1. Reads this workspace's enabled IP access lists (`w.ip_access_lists.list()`, workspace-level).
 2. Maps **ALLOW lists → allow rules**, **BLOCK lists → deny rules** (IPv4 only; CBI is IPv4-only) —
-   a verbatim recreation, nothing added.
+   a verbatim recreation. The one thing it adds: if the ACL has **only BLOCK lists**, a catch-all
+   allow (all public IPs) is added, because CBI RESTRICTED_ACCESS is default-deny — without it a
+   deny-only policy would block everything, flipping the ACL's default-allow-except-blocked meaning.
 3. Creates/updates the account network policy and, if `auto_assign` is on (default), binds the
    current workspace to it.
 

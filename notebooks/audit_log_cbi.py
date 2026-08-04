@@ -1747,7 +1747,9 @@ def _build_rule(spec):
         CustomerFacingIngressNetworkPolicyRequestDestination as Destination,
     )
 
-    origin = Origin(included_ip_ranges=IpRanges(ip_ranges=list(spec["cidrs"])))
+    # A catch-all spec ({"catch_all": True}) maps to an all-public-IPs origin, not a CIDR list.
+    origin = (Origin(all_ip_ranges=True) if spec.get("catch_all")
+              else Origin(included_ip_ranges=IpRanges(ip_ranges=list(spec["cidrs"]))))
 
     # Every rule needs a destination (the API rejects an empty one). Default to all_destinations.
     if spec["destination"] == "apps_runtime":
@@ -1797,9 +1799,19 @@ def _build_ingress_block(specs, deny=None):
         CustomerFacingIngressNetworkPolicyPublicAccess as PublicAccess,
         CustomerFacingIngressNetworkPolicyPublicAccessRestrictionMode as RestrictionMode,
     )
+    # CBI RESTRICTED_ACCESS is default-DENY (deny rules are exceptions to allow rules). If a policy
+    # ends up with deny rules but no allow rules, everything would be blocked — preserve the intended
+    # "block these, allow the rest" behaviour with a catch-all allow (all public IPs).
+    allow = list(specs)
+    if (deny or []) and not allow:
+        allow = [{"label": f"{NAME_PREFIX}-allow-all", "catch_all": True,
+                  "destination": "all_destinations", "identity_type": "ALL_USERS", "identities": []}]
+        print("  ℹ️  Policy has deny rules but no allow rules — added a catch-all allow (all public "
+              "IPs) so non-denied traffic is still permitted (default-allow-except-blocked).")
+
     public = PublicAccess(
         restriction_mode=RestrictionMode.RESTRICTED_ACCESS,
-        allow_rules=[_build_rule(s) for s in specs],
+        allow_rules=[_build_rule(s) for s in allow],
         deny_rules=[_build_deny_rule(s) for s in (deny or [])] or None,
     )
     return IngressPolicy(public_access=public)

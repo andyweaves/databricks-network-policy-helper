@@ -162,9 +162,21 @@ def _build_ingress_block(allow, deny):
     )
 
     def rule(spec):
-        return Rule(label=f"{spec['label']} ({POLICY_MODE})",
-                    origin=Origin(included_ip_ranges=IpRanges(ip_ranges=list(spec["cidrs"]))),
+        # A catch-all spec ({"catch_all": True}) maps to an all-public-IPs origin, not a CIDR list.
+        origin = (Origin(all_ip_ranges=True) if spec.get("catch_all")
+                  else Origin(included_ip_ranges=IpRanges(ip_ranges=list(spec["cidrs"]))))
+        return Rule(label=f"{spec['label']} ({POLICY_MODE})", origin=origin,
                     destination=Destination(all_destinations=True))
+
+    # CBI RESTRICTED_ACCESS is default-DENY (deny rules are exceptions to allow rules). A workspace
+    # IP ACL with only BLOCK lists is default-ALLOW, so migrating deny rules alone would block
+    # everything. Preserve the ACL's meaning by adding a catch-all allow (all public IPs) when there
+    # are deny rules but no allow rules.
+    allow = list(allow)
+    if deny and not allow:
+        allow = [{"label": f"{NAME_PREFIX}-allow-all", "catch_all": True}]
+        print("  ℹ️  Only BLOCK/deny rules present — added a catch-all allow (all public IPs) so the "
+              "policy matches the ACL's default-allow-except-blocked behaviour.")
 
     return IngressPolicy(public_access=PublicAccess(
         restriction_mode=RestrictionMode.RESTRICTED_ACCESS,
