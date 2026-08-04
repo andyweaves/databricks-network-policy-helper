@@ -38,13 +38,15 @@
 # MAGIC ## Install a current Databricks SDK
 # MAGIC
 # MAGIC The CBI policy dataclasses (`CustomerFacingIngressNetworkPolicy*`) require a newer
-# MAGIC `databricks-sdk` than the one bundled with serverless / some DBRs. Pin and restart Python
-# MAGIC **before** any SDK import so every environment runs the same version.
+# MAGIC `databricks-sdk` than the one bundled with serverless / some DBRs. Install from the repo's
+# MAGIC `requirements.txt` and restart Python **before** any SDK import so every environment runs the
+# MAGIC same version. (Run from the git-folder checkout so `../requirements.txt` resolves; otherwise
+# MAGIC `%pip install --quiet "databricks-sdk>=0.113.0"` directly.)
 
 # COMMAND ----------
 
-# DBTITLE 1,Install & pin databricks-sdk
-# MAGIC %pip install --quiet "databricks-sdk>=0.113.0"
+# DBTITLE 1,Install dependencies from requirements.txt
+# MAGIC %pip install --quiet -r ../requirements.txt
 
 # COMMAND ----------
 

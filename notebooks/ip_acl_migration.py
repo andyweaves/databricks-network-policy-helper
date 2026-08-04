@@ -19,13 +19,15 @@
 # MAGIC %md
 # MAGIC ## Install a current Databricks SDK
 # MAGIC
-# MAGIC The CBI policy dataclasses require a newer `databricks-sdk` than some runtimes bundle. Pin and
-# MAGIC restart before importing the SDK.
+# MAGIC The CBI policy dataclasses require a newer `databricks-sdk` than some runtimes bundle. Install
+# MAGIC from the repo's `requirements.txt` and restart before importing the SDK. (Run from the
+# MAGIC git-folder checkout so `../requirements.txt` resolves; otherwise
+# MAGIC `%pip install --quiet "databricks-sdk>=0.113.0"` directly.)
 
 # COMMAND ----------
 
-# DBTITLE 1,Install & pin databricks-sdk
-# MAGIC %pip install --quiet "databricks-sdk>=0.113.0"
+# DBTITLE 1,Install dependencies from requirements.txt
+# MAGIC %pip install --quiet -r ../requirements.txt
 
 # COMMAND ----------
 

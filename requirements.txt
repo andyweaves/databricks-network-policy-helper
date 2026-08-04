@@ -1,0 +1,5 @@
+# Python dependencies for the databricks-network-policy-helper notebooks.
+# databricks-sdk >= 0.113.0 is required for the Context-Based Ingress (CBI) policy dataclasses
+# (CustomerFacingIngressNetworkPolicy*), which some serverless / older DBRs bundle an earlier
+# version of. The notebooks %pip install from this file and restart Python before importing the SDK.
+databricks-sdk>=0.113.0

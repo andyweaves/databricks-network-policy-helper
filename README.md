@@ -75,6 +75,7 @@ It answers: *who connects to this workspace, from where, and what should the inb
 | `notebooks/audit_log_cbi.py` | The analysis + proposal + apply notebook (the CBI Helper engine). |
 | `notebooks/ip_acl_migration.py` | Simple: migrate this workspace's IP access list into a CBI policy. |
 | `notebooks/install_skill.py` | Installs the Genie Code skill(s) into your user skills directory. |
+| `requirements.txt` | Python deps (databricks-sdk); the notebooks `%pip install -r` it. |
 | `scripts/deploy_notebook.py` | Import/update the notebook into a workspace via the CLI. |
 | `docs/threat-intel-feeds.md` | The enrichment feeds, what each represents, licensing. |
 | `docs/cbi-sdk-schema.md` | The verified `AccountNetworkPolicy` SDK object model. |
