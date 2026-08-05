@@ -30,7 +30,9 @@
 # COMMAND ----------
 
 # DBTITLE 1,Restart Python
-dbutils.library.restartPython()
+# Skip when running under the combiner (full_policy_helper), which installs + restarts once itself.
+if not globals().get("_COMBINED_RUN", False):
+    dbutils.library.restartPython()
 
 # COMMAND ----------
 
@@ -52,6 +54,9 @@ dbutils.widgets.dropdown("enable_rdap", "true", ["true", "false"], "2a. RDAP own
 # --- Policy shape ---
 dbutils.widgets.text("name_prefix", "cbi-helper", "3a. Name prefix for policy/rules")
 dbutils.widgets.dropdown("policy_mode", "dry_run", ["dry_run", "enforce"], "3b. Egress policy mode")
+# single = one egress policy from all observed traffic; per_workspace = a tailored policy per
+# workspace_id seen in the logs.
+dbutils.widgets.dropdown("policy_scope", "single", ["single", "per_workspace"], "3b2. Policy scope")
 # Threat-intel domain blocking: off | matched_only (block observed FQDNs that hit a feed) |
 # all (block the whole suspicious-domain feed). Independent of the allow-list.
 dbutils.widgets.dropdown(
@@ -75,6 +80,7 @@ SOURCE_TYPE_FILTER = dbutils.widgets.get("source_type_filter").strip()
 ENABLE_RDAP = dbutils.widgets.get("enable_rdap") == "true"
 NAME_PREFIX = dbutils.widgets.get("name_prefix").strip() or "cbi-helper"
 POLICY_MODE = dbutils.widgets.get("policy_mode")
+POLICY_SCOPE = dbutils.widgets.get("policy_scope")  # single | per_workspace
 BLOCK_THREAT_DOMAINS = dbutils.widgets.get("block_threat_domains")  # off | matched_only | all
 ACCOUNT_ID = dbutils.widgets.get("account_id").strip()
 ACCOUNT_HOST = dbutils.widgets.get("account_host").strip() or "https://accounts.cloud.databricks.com"
@@ -90,7 +96,7 @@ MAX_STORAGE_DESTINATIONS = 100      # storage destinations per policy
 MAX_POLICY_ID_LEN = 30
 
 print(f"lookback_days={LOOKBACK_DAYS} min_events={MIN_EVENTS} source_filter={SOURCE_TYPE_FILTER or '(all)'} "
-      f"| policy_mode={POLICY_MODE} block_threat_domains={BLOCK_THREAT_DOMAINS}")
+      f"| policy_scope={POLICY_SCOPE} policy_mode={POLICY_MODE} block_threat_domains={BLOCK_THREAT_DOMAINS}")
 
 # COMMAND ----------
 
@@ -118,6 +124,7 @@ observed_egress = spark.sql(
       COUNT(DISTINCT access_type) AS distinct_access_types,
       sort_array(collect_set(access_type)) AS access_types,
       sort_array(collect_set(network_source_type)) AS source_types,
+      sort_array(collect_set(workspace_id)) AS workspace_ids,
       MIN(event_time) AS first_seen,
       MAX(event_time) AS last_seen
     FROM system.access.outbound_network
@@ -179,24 +186,60 @@ def _classify(host):
     return "internet", {"fqdn": h}
 
 
-rows = observed_egress.toPandas().to_dict(orient="records")
-s3_dests, gcs_dests, azure_dests, internet_fqdns = {}, {}, {}, {}
+import numpy as np
+from collections import defaultdict
+
+ALL_WORKSPACES = "__ALL__"  # policy_target sentinel for a single all-workspaces policy
+
+
+def _as_list(v):
+    """Coerce a Spark array<> column (numpy array after toPandas) to a clean Python list."""
+    if v is None:
+        return []
+    if hasattr(v, "tolist"):
+        v = v.tolist()
+    elif not isinstance(v, (list, tuple)):
+        v = [v]
+    return [x for x in v if x is not None and x != ""]
+
+
+def _new_target():
+    return {"s3": {}, "gcs": {}, "azure": {}, "internet": {}}
+
+
+# Bucket classified destinations per policy target. single -> one ALL_WORKSPACES target; per_workspace
+# -> each destination fans out to the workspace_ids it was observed in.
+targets = defaultdict(_new_target)
 skipped_bare_s3 = 0
-for r in rows:
+for r in observed_egress.toPandas().to_dict(orient="records"):
     kind, info = _classify(r["destination"])
+    events = int(r["events"])
     if kind == "s3" and info.get("region"):
-        s3_dests[(info["bucket"], info["region"])] = r["events"]
+        key, bucketname = ("s3", (info["bucket"], info["region"]))
     elif kind == "gcs":
-        gcs_dests[info["bucket"]] = r["events"]
+        key, bucketname = ("gcs", info["bucket"])
     elif kind == "azure":
-        azure_dests[(info["account"], info["service"])] = r["events"]
+        key, bucketname = ("azure", (info["account"], info["service"]))
     elif kind == "internet":
-        internet_fqdns[info["fqdn"]] = internet_fqdns.get(info["fqdn"], 0) + r["events"]
+        key, bucketname = ("internet", info["fqdn"])
     else:
         skipped_bare_s3 += 1
+        continue
+    if POLICY_SCOPE == "per_workspace":
+        tgts = [int(w) for w in _as_list(r.get("workspace_ids"))] or [ALL_WORKSPACES]
+    else:
+        tgts = [ALL_WORKSPACES]
+    for t in tgts:
+        d = targets[t][key]
+        d[bucketname] = d.get(bucketname, 0) + events
 
-print(f"classified: {len(s3_dests)} S3, {len(gcs_dests)} GCS, {len(azure_dests)} Azure storage; "
-      f"{len(internet_fqdns)} internet FQDNs; skipped {skipped_bare_s3} bare/path-style S3 endpoint(s).")
+if not targets:
+    targets[ALL_WORKSPACES] = _new_target()
+
+_tot = lambda k: sum(len(targets[t][k]) for t in targets)  # noqa: E731 - compact roll-up for logging
+print(f"policy_scope={POLICY_SCOPE}: {len(targets)} policy target(s). Across all: "
+      f"{_tot('s3')} S3, {_tot('gcs')} GCS, {_tot('azure')} Azure storage, {_tot('internet')} internet FQDNs; "
+      f"skipped {skipped_bare_s3} bare/path-style S3 endpoint(s).")
 
 # COMMAND ----------
 
@@ -243,12 +286,23 @@ def _rdap_domain_owner(fqdn):
     return None
 
 
+def _union(key):
+    """Merge a destination dict (s3/gcs/azure/internet) across all policy targets, summing events."""
+    merged = {}
+    for t in targets:
+        for k, n in targets[t][key].items():
+            merged[k] = merged.get(k, 0) + n
+    return merged
+
+
+all_internet_fqdns = _union("internet")
+
 rdap_owner = {}
-if ENABLE_RDAP and internet_fqdns:
-    for fqdn in internet_fqdns:
+if ENABLE_RDAP and all_internet_fqdns:
+    for fqdn in all_internet_fqdns:  # one lookup per distinct FQDN across all targets
         rdap_owner[fqdn] = _rdap_domain_owner(fqdn)
         time.sleep(0.1)
-    print(f"RDAP: resolved owner for {sum(1 for v in rdap_owner.values() if v)} of {len(internet_fqdns)} FQDN(s).")
+    print(f"RDAP: resolved owner for {sum(1 for v in rdap_owner.values() if v)} of {len(all_internet_fqdns)} FQDN(s).")
 else:
     print("RDAP lookup off or no FQDNs.")
 
@@ -263,22 +317,26 @@ else:
 # COMMAND ----------
 
 # DBTITLE 1,Review tables
+# Review shows the combined picture across all targets. In per_workspace scope the per-target
+# breakdown is printed in the build step below.
+_u_s3, _u_gcs, _u_azure = _union("s3"), _union("gcs"), _union("azure")
 internet_pdf = pd.DataFrame(
     [{"fqdn": f, "events": n, "rdap_owner": rdap_owner.get(f)} for f, n in sorted(
-        internet_fqdns.items(), key=lambda kv: kv[1], reverse=True)]
+        all_internet_fqdns.items(), key=lambda kv: kv[1], reverse=True)]
 )
 s3_pdf = pd.DataFrame(
     [{"bucket": b, "region": reg, "events": n} for (b, reg), n in sorted(
-        s3_dests.items(), key=lambda kv: kv[1], reverse=True)]
+        _u_s3.items(), key=lambda kv: kv[1], reverse=True)]
 )
 gcs_pdf = pd.DataFrame([{"bucket": b, "events": n} for b, n in sorted(
-    gcs_dests.items(), key=lambda kv: kv[1], reverse=True)])
+    _u_gcs.items(), key=lambda kv: kv[1], reverse=True)])
 azure_pdf = pd.DataFrame(
     [{"account": acct, "service": svc, "events": n} for (acct, svc), n in sorted(
-        azure_dests.items(), key=lambda kv: kv[1], reverse=True)]
+        _u_azure.items(), key=lambda kv: kv[1], reverse=True)]
 )
 
-print(f"Internet FQDNs: {len(internet_pdf)} | S3: {len(s3_pdf)} | GCS: {len(gcs_pdf)} | Azure: {len(azure_pdf)}")
+print(f"Internet FQDNs: {len(internet_pdf)} | S3: {len(s3_pdf)} | GCS: {len(gcs_pdf)} | Azure: {len(azure_pdf)}"
+      f"  (combined across {len(targets)} target(s))")
 for name, pdf in [("Internet FQDNs", internet_pdf), ("AWS S3", s3_pdf),
                   ("GCS", gcs_pdf), ("Azure storage", azure_pdf)]:
     if not pdf.empty:
@@ -337,7 +395,7 @@ if BLOCK_THREAT_DOMAINS != "off":
     feed = _load_threat_domains()
     print(f"threat-domain feed: {len(feed):,} distinct hostnames")
     if BLOCK_THREAT_DOMAINS == "matched_only":
-        blocked_domains = sorted(f for f in internet_fqdns if f in feed)
+        blocked_domains = sorted(f for f in all_internet_fqdns if f in feed)
         print(f"observed FQDNs matching the feed: {len(blocked_domains)}")
     else:  # all
         blocked_domains = sorted(feed)
@@ -360,8 +418,10 @@ else:
 
 # COMMAND ----------
 
-# DBTITLE 1,Build egress block + preview
-def _build_egress_block():
+# DBTITLE 1,Build egress block(s) + preview
+def _build_egress_block(t):
+    """Build the egress block for one policy target dict t = {s3, gcs, azure, internet}. Blocked
+    domains (threat intel) are applied to every target. Caps to the per-policy limits."""
     from databricks.sdk.service.settings import (
         EgressNetworkPolicyNetworkAccessPolicy as EA,
         EgressNetworkPolicyNetworkAccessPolicyInternetDestination as InetDest,
@@ -376,24 +436,21 @@ def _build_egress_block():
 
     allowed_internet = [
         InetDest(destination=f, internet_destination_type=InetType.DNS_NAME)
-        for f in list(internet_fqdns)[:MAX_INTERNET_DESTINATIONS]
+        for f in list(t["internet"])[:MAX_INTERNET_DESTINATIONS]
     ]
     blocked_internet = [
         InetDest(destination=d, internet_destination_type=InetType.DNS_NAME) for d in blocked_domains
     ] or None
 
     storage = []
-    for (bucket, region) in s3_dests:
+    for (bucket, region) in t["s3"]:
         storage.append(StorDest(bucket_name=bucket, region=region, storage_destination_type=StorType.AWS_S3))
-    for bucket in gcs_dests:
+    for bucket in t["gcs"]:
         storage.append(StorDest(bucket_name=bucket, storage_destination_type=StorType.GOOGLE_CLOUD_STORAGE))
-    for (acct, svc) in azure_dests:
+    for (acct, svc) in t["azure"]:
         storage.append(StorDest(azure_storage_account=acct, azure_storage_service=svc,
                                 storage_destination_type=StorType.AZURE_STORAGE))
-    if len(storage) > MAX_STORAGE_DESTINATIONS:
-        print(f"⚠️  {len(storage)} storage destinations > {MAX_STORAGE_DESTINATIONS} limit — "
-              f"keeping the first {MAX_STORAGE_DESTINATIONS}.")
-        storage = storage[:MAX_STORAGE_DESTINATIONS]
+    storage = storage[:MAX_STORAGE_DESTINATIONS]
 
     enforcement_mode = EnforcementMode.DRY_RUN if POLICY_MODE == "dry_run" else EnforcementMode.ENFORCED
     return NetworkPolicyEgress(network_access=EA(
@@ -405,36 +462,51 @@ def _build_egress_block():
     ))
 
 
-if not (internet_fqdns or s3_dests or gcs_dests or azure_dests or blocked_domains):
+def _target_has_content(t):
+    return bool(t["s3"] or t["gcs"] or t["azure"] or t["internet"] or blocked_domains)
+
+
+# Build one egress block per target that has content.
+egress_blocks = {tgt: _build_egress_block(t) for tgt, t in targets.items() if _target_has_content(t)}
+
+if not egress_blocks:
     print("Nothing to propose — no classified destinations. Check the observed-egress table above.")
-    _egress_block = None
 else:
-    _egress_block = _build_egress_block()
-    print(f"Proposed egress ({POLICY_MODE} mode): "
-          f"{min(len(internet_fqdns), MAX_INTERNET_DESTINATIONS)} internet allow, "
-          f"{min(len(s3_dests)+len(gcs_dests)+len(azure_dests), MAX_STORAGE_DESTINATIONS)} storage allow, "
-          f"{len(blocked_domains)} blocked:\n")
-    print(json.dumps({"egress": _egress_block.as_dict()}, indent=2))
+    for tgt in sorted(egress_blocks, key=str):
+        t = targets[tgt]
+        label = "single (all workspaces)" if tgt == ALL_WORKSPACES else f"workspace {tgt}"
+        n_store = min(len(t["s3"]) + len(t["gcs"]) + len(t["azure"]), MAX_STORAGE_DESTINATIONS)
+        print(f"\n=== {label}: egress ({POLICY_MODE} mode) — "
+              f"{min(len(t['internet']), MAX_INTERNET_DESTINATIONS)} internet allow, "
+              f"{n_store} storage allow, {len(blocked_domains)} blocked ===")
+        print(json.dumps({"egress": egress_blocks[tgt].as_dict()}, indent=2))
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ## Create the egress policy (gated)
 # MAGIC
-# MAGIC Creates/updates the account network policy's **egress** block (ingress left untouched), gated by
-# MAGIC `create_policy`. `auto_assign` binds this workspace. Requires an **account-admin** AccountClient
-# MAGIC (widgets 4a–4e). Idempotent: reuses the `<name_prefix>-<workspace_id>` policy name.
+# MAGIC Creates/updates each proposed policy's **egress** block (ingress left untouched), gated by
+# MAGIC `create_policy`. `auto_assign` binds the workspace(s). Requires an **account-admin**
+# MAGIC AccountClient (widgets 4a–4e). Idempotent (deterministic names).
+# MAGIC - `policy_scope=single` — one policy `<name_prefix>`; auto_assign binds **this** workspace.
+# MAGIC - `policy_scope=per_workspace` — policy `<name_prefix>-ws-<id>` per workspace; auto_assign binds each.
 
 # COMMAND ----------
 
 # DBTITLE 1,Create + assign
 from databricks.sdk import WorkspaceClient
 
-WORKSPACE_ID = WorkspaceClient().get_workspace_id()
-RESOLVED_POLICY_ID = f"{NAME_PREFIX}-{WORKSPACE_ID}"
-if len(RESOLVED_POLICY_ID) > MAX_POLICY_ID_LEN:
-    print(f"⚠️  policy name '{RESOLVED_POLICY_ID}' is {len(RESOLVED_POLICY_ID)} chars (limit "
-          f"~{MAX_POLICY_ID_LEN}). Shorten name_prefix if create fails with 'Invalid NetworkPolicyId'.")
+THIS_WORKSPACE_ID = WorkspaceClient().get_workspace_id()
+
+
+def _policy_name(target):
+    """Deterministic policy id. single -> <prefix>; per_workspace -> <prefix>-ws-<id> (keep the full
+    workspace id, truncate the prefix if needed to fit the length limit)."""
+    if target == ALL_WORKSPACES:
+        return NAME_PREFIX[:MAX_POLICY_ID_LEN]
+    suffix = f"-ws-{target}"
+    return f"{NAME_PREFIX[:max(MAX_POLICY_ID_LEN - len(suffix), 1)].rstrip('-')}{suffix}"
 
 
 def _account_client():
@@ -448,40 +520,48 @@ def _account_client():
     return AccountClient(host=ACCOUNT_HOST, account_id=ACCOUNT_ID)
 
 
-if not CREATE_POLICY:
-    print(f"Not creating (mode={POLICY_MODE}). Set create_policy=true to create the egress policy"
-          f"{' and assign this workspace' if AUTO_ASSIGN else ''}.")
-elif _egress_block is None:
+if globals().get("_COMBINED_RUN", False):
+    # Running under the combiner (full_policy_helper) — it does the merged create. Skip this cell so
+    # the built `egress_blocks` dict is left intact for merging.
+    print("Combined run — skipping egress create; the combiner will create the merged policy.")
+elif not CREATE_POLICY:
+    print(f"Not creating (mode={POLICY_MODE}, scope={POLICY_SCOPE}). Set create_policy=true to create "
+          f"the egress policy(ies)" + (" and assign the workspace(s)." if AUTO_ASSIGN else "."))
+elif not egress_blocks:
     print("Nothing to create — no proposed egress destinations.")
 else:
     from databricks.sdk.errors import NotFound
     from databricks.sdk.service.settings import AccountNetworkPolicy, WorkspaceNetworkOption
 
     a = _account_client()
-    try:
-        existing = a.network_policies.get_network_policy_rpc(network_policy_id=RESOLVED_POLICY_ID)
-        action = "updated"
-    except NotFound:
-        existing = AccountNetworkPolicy(account_id=ACCOUNT_ID, network_policy_id=RESOLVED_POLICY_ID)
-        action = "created"
-
-    existing.egress = _egress_block  # replace egress; leave ingress/ingress_dry_run untouched
-    if action == "created":
-        result = a.network_policies.create_network_policy_rpc(network_policy=existing)
-        effective_id = result.network_policy_id or RESOLVED_POLICY_ID
-    else:
-        a.network_policies.update_network_policy_rpc(network_policy_id=RESOLVED_POLICY_ID, network_policy=existing)
-        effective_id = RESOLVED_POLICY_ID
-    print(f"Policy {action}: {effective_id} (egress, {POLICY_MODE} mode)")
-
-    if AUTO_ASSIGN:
-        a.workspace_network_configuration.update_workspace_network_option_rpc(
-            workspace_id=WORKSPACE_ID,
-            workspace_network_option=WorkspaceNetworkOption(
-                workspace_id=WORKSPACE_ID, network_policy_id=effective_id),
-        )
-        print(f"Assigned workspace {WORKSPACE_ID} to {effective_id}.")
-        if POLICY_MODE == "enforce":
-            print("⛔ ENFORCED — egress not on the allow-list is now blocked. Verify workloads still reach what they need.")
-    else:
-        print(f"Not assigned (auto_assign=false). Bind workspace {WORKSPACE_ID} to '{effective_id}' when ready.")
+    for tgt in sorted(egress_blocks, key=str):
+        pid = _policy_name(tgt)
+        # In single scope with auto_assign, bind THIS workspace; in per_workspace, bind that target.
+        bind_ws = THIS_WORKSPACE_ID if tgt == ALL_WORKSPACES else int(tgt)
+        try:
+            try:
+                existing = a.network_policies.get_network_policy_rpc(network_policy_id=pid)
+                action = "updated"
+            except NotFound:
+                existing = AccountNetworkPolicy(account_id=ACCOUNT_ID, network_policy_id=pid)
+                action = "created"
+            existing.egress = egress_blocks[tgt]  # replace egress; leave ingress blocks untouched
+            if action == "created":
+                result = a.network_policies.create_network_policy_rpc(network_policy=existing)
+                effective_id = result.network_policy_id or pid
+            else:
+                a.network_policies.update_network_policy_rpc(network_policy_id=pid, network_policy=existing)
+                effective_id = pid
+            msg = f"  ✅ {action} '{effective_id}' (egress, {POLICY_MODE})"
+            if AUTO_ASSIGN:
+                a.workspace_network_configuration.update_workspace_network_option_rpc(
+                    workspace_id=bind_ws,
+                    workspace_network_option=WorkspaceNetworkOption(
+                        workspace_id=bind_ws, network_policy_id=effective_id),
+                )
+                msg += f" and bound workspace {bind_ws}"
+            print(msg)
+        except Exception as e:  # noqa: BLE001 - surface per-target failures, keep going
+            print(f"  ❌ target {tgt}: {e}")
+    if POLICY_MODE == "enforce" and AUTO_ASSIGN:
+        print("⛔ ENFORCED — egress not on the allow-list is now blocked. Verify workloads still reach what they need.")

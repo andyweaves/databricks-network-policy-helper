@@ -51,7 +51,11 @@
 # COMMAND ----------
 
 # DBTITLE 1,Restart Python to load the pinned SDK
-dbutils.library.restartPython()
+# Skip the restart when running under the combiner (full_policy_helper), which has already installed
+# + restarted once — restarting here would wipe the shared namespace and the combiner couldn't read
+# this notebook's results. `_COMBINED_RUN` is set by the combiner before %run.
+if not globals().get("_COMBINED_RUN", False):
+    dbutils.library.restartPython()
 
 # COMMAND ----------
 
@@ -1976,7 +1980,11 @@ def _assign(a, workspace_id, policy_id):
     )
 
 
-if not CREATE_POLICY:
+if globals().get("_COMBINED_RUN", False):
+    # Running under the combiner (full_policy_helper) — it does the merged create. Skip this cell so
+    # the built `policies` dict is left intact for merging.
+    print("Combined run — skipping ingress create; the combiner will create the merged policy.")
+elif not CREATE_POLICY:
     print(f"Not creating (mode={POLICY_MODE}, scope={POLICY_SCOPE}). Set create_policy=true to create "
           f"the policy; auto_assign=true to also bind the workspace(s). policy_mode=dry_run is the "
           f"safe default (log-only); enforce blocks non-matching IPs.")

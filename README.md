@@ -8,7 +8,7 @@ self-contained notebook (+ optional Genie Code skill) under a common home.
 | **CBI Helper** (ingress) — `notebooks/audit_log_cbi.py` | ✅ available | Recommends and applies a **context-based ingress** allow-list from audit-log source IPs. |
 | **IP ACL Migration** — `notebooks/ip_acl_migration.py` | ✅ available | Simple: migrate this workspace's existing **IP access list** as-is into a CBI policy and assign it. |
 | **Egress Helper** (SEG) — `notebooks/egress_policy_helper.py` | ✅ available | Recommends serverless **egress** (outbound) rules from observed `outbound_network` destinations; optional threat-intel domain blocking. |
-| **Full Policy Helper** (ingress + egress) | 🔜 planned | Combine both into one account network policy. |
+| **Full Policy Helper** (ingress + egress) — `notebooks/full_policy_helper.py` | ✅ available | Combine both into one account network policy (runs the two helpers, merges, creates). |
 
 ---
 
@@ -76,6 +76,7 @@ It answers: *who connects to this workspace, from where, and what should the inb
 | `notebooks/audit_log_cbi.py` | The analysis + proposal + apply notebook (the CBI Helper engine). |
 | `notebooks/ip_acl_migration.py` | Simple: migrate this workspace's IP access list into a CBI policy. |
 | `notebooks/egress_policy_helper.py` | Propose a serverless egress allow-list from observed outbound traffic. |
+| `notebooks/full_policy_helper.py` | Combine ingress + egress into one policy (runs both helpers, merges). |
 | `notebooks/install_skill.py` | Installs the Genie Code skill(s) into your user skills directory. |
 | `requirements.txt` | Python deps (databricks-sdk); the notebooks `%pip install -r` it. |
 | `scripts/deploy_notebook.py` | Import/update the notebook into a workspace via the CLI. |

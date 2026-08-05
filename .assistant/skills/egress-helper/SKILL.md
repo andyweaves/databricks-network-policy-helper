@@ -43,7 +43,7 @@ If the table is empty, no egress policy is logging yet — start with step 1.
 
 - `lookback_days`, `min_events`, `source_type_filter`
 - `enable_rdap`
-- `name_prefix`, `policy_mode` (**dry_run** default / enforce), `block_threat_domains`
+- `name_prefix`, `policy_mode` (**dry_run** default / enforce), `policy_scope` (single / per_workspace), `block_threat_domains`
 - Account auth (`account_id` + optional SP client_id / secret scope+key) — **account admin required**
   to create/assign. See `docs/account-admin-setup.md`.
 - `create_policy` (gate), `auto_assign`
