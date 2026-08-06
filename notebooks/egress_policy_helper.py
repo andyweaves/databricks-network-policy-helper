@@ -62,6 +62,12 @@ dbutils.widgets.dropdown("policy_scope", "single", ["single", "per_workspace"], 
 dbutils.widgets.dropdown(
     "block_threat_domains", "off", ["off", "matched_only", "all"], "3c. Block threat-intel domains"
 )
+# Which threat-domain feed to use (all free, no key): threatfox = abuse.ch ThreatFox (~49k;
+# C2/botnet/phishing/distribution); urlhaus = abuse.ch URLhaus online (~500; distribution only,
+# very high-signal); hagezi_tif = HaGeZi TIF medium (~370k; broadest, higher false-positive risk).
+dbutils.widgets.dropdown(
+    "threat_feed", "threatfox", ["threatfox", "urlhaus", "hagezi_tif"], "3d. Threat-domain feed"
+)
 
 # --- Account authentication (account-level; needed to create the policy) ---
 dbutils.widgets.text("account_id", "", "4a. Databricks account_id")
@@ -82,6 +88,7 @@ NAME_PREFIX = dbutils.widgets.get("name_prefix").strip() or "cbi-helper"
 POLICY_MODE = dbutils.widgets.get("policy_mode")
 POLICY_SCOPE = dbutils.widgets.get("policy_scope")  # single | per_workspace
 BLOCK_THREAT_DOMAINS = dbutils.widgets.get("block_threat_domains")  # off | matched_only | all
+THREAT_FEED = dbutils.widgets.get("threat_feed")  # threatfox | urlhaus | hagezi_tif
 ACCOUNT_ID = dbutils.widgets.get("account_id").strip()
 ACCOUNT_HOST = dbutils.widgets.get("account_host").strip() or "https://accounts.cloud.databricks.com"
 ACCOUNT_SP_CLIENT_ID = dbutils.widgets.get("account_sp_client_id").strip()
@@ -96,7 +103,8 @@ MAX_STORAGE_DESTINATIONS = 100      # storage destinations per policy
 MAX_POLICY_ID_LEN = 30
 
 print(f"lookback_days={LOOKBACK_DAYS} min_events={MIN_EVENTS} source_filter={SOURCE_TYPE_FILTER or '(all)'} "
-      f"| policy_scope={POLICY_SCOPE} policy_mode={POLICY_MODE} block_threat_domains={BLOCK_THREAT_DOMAINS}")
+      f"| policy_scope={POLICY_SCOPE} policy_mode={POLICY_MODE} "
+      f"block_threat_domains={BLOCK_THREAT_DOMAINS} threat_feed={THREAT_FEED}")
 
 # COMMAND ----------
 
@@ -375,49 +383,68 @@ for name, pdf in [("Internet FQDNs", internet_pdf), ("AWS S3", s3_pdf),
 # MAGIC `block_threat_domains` (widget `3c`): `off` (none); `matched_only` (block observed FQDNs that
 # MAGIC appear on a suspicious-domain feed); `all` (block the whole feed, capped). Blocked destinations
 # MAGIC are enforced in any mode and take precedence over allows — a lightweight way to block known-bad
-# MAGIC domains. Feed: malware-filter urlhaus-filter (abuse.ch URLhaus, deduped to FQDNs) — free,
-# MAGIC no key, ~29k malicious domains.
+# MAGIC domains. The feed is chosen by widget `3d` (`threat_feed`); all are free and need no API key.
 
 # COMMAND ----------
 
 # DBTITLE 1,Build blocked domains
-# malware-filter's "online malicious domains" list: URLhaus (abuse.ch) malicious URLs deduped to
-# one host per line — free, no key, '#'-commented header, refreshed ~12h (AGPL-3.0; attribution:
-# "URLhaus abuse.ch + malware-filter project"). This plain-domain variant is used (not the base
-# urlhaus-filter.txt, which is Adblock-syntax, nor the raw URLhaus feed, which is mostly bare IPs).
-# It still contains some bare-IP lines, which are dropped below (blocks are FQDN-only). To swap
-# feeds, change this URL + the per-line parse.
-THREAT_DOMAINS_URL = "https://malware-filter.gitlab.io/malware-filter/urlhaus-filter-domains-online.txt"
+# Threat-domain feed registry — each entry is (url, line->host parser). All free, no key.
+#  - threatfox   : abuse.ch ThreatFox hostfile (~49k; C2/botnet/phishing/distribution). '0.0.0.0 host'.
+#  - urlhaus     : malware-filter URLhaus online domains (~500; distribution only, very high-signal).
+#  - hagezi_tif  : HaGeZi TIF medium (~370k; broadest — malware+scam+spam, higher false-positive risk).
+#    Adblock syntax: '||host^'.
+def _host_plain(line):
+    return line.strip().lower()
 
 
-def _load_threat_domains():
-    """Distinct malicious FQDNs from the malware-filter urlhaus-filter feed. Plaintext, one domain
-    per line ('#'/'!' comments). IP literals are dropped (blocked destinations are FQDN-only).
-    Best-effort — returns an empty set on any fetch failure."""
+def _host_hostfile(line):  # '0.0.0.0 host' / '127.0.0.1 host'
+    parts = line.split()
+    return parts[1].lower() if len(parts) == 2 else ""
+
+
+def _host_adblock(line):  # '||host^'
+    m = re.match(r'^\|\|([^/^]+)\^', line.strip())
+    return m.group(1).lower() if m else ""
+
+
+THREAT_FEEDS = {
+    "threatfox": ("https://threatfox.abuse.ch/downloads/hostfile/", _host_hostfile),
+    "urlhaus": ("https://malware-filter.gitlab.io/malware-filter/urlhaus-filter-domains-online.txt", _host_plain),
+    "hagezi_tif": ("https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/tif.medium.txt", _host_adblock),
+}
+
+
+def _load_threat_domains(feed_key):
+    """Distinct malicious FQDNs from the selected feed. IP literals and non-hosts are dropped
+    (blocked destinations are FQDN-only). Best-effort — empty set on any fetch failure."""
     import ipaddress as _ip
+    url, parse = THREAT_FEEDS[feed_key]
     domains = set()
     try:
-        req = Request(THREAT_DOMAINS_URL, headers={"User-Agent": _UA})
-        with urlopen(req, timeout=30) as resp:
+        req = Request(url, headers={"User-Agent": _UA})
+        with urlopen(req, timeout=45) as resp:
             text = resp.read().decode("utf-8", errors="replace")
         for line in text.splitlines():
-            host = line.strip().lower()
-            if not host or host.startswith(("#", "!")) or "." not in host:
+            s = line.strip()
+            if not s or s.startswith(("#", "!", "[")):
+                continue
+            host = parse(s)
+            if not host or "." not in host:
                 continue
             try:
-                _ip.ip_address(host)  # an IP literal — not a valid FQDN block target
+                _ip.ip_address(host)  # IP literal — not a valid FQDN block target
                 continue
             except ValueError:
                 pass
             domains.add(host)
     except Exception as e:  # noqa: BLE001
-        print(f"  ! could not fetch threat-domain feed: {e}")
+        print(f"  ! could not fetch threat-domain feed '{feed_key}': {e}")
     return domains
 
 blocked_domains = []
 if BLOCK_THREAT_DOMAINS != "off":
-    feed = _load_threat_domains()
-    print(f"threat-domain feed: {len(feed):,} distinct hostnames")
+    feed = _load_threat_domains(THREAT_FEED)
+    print(f"threat-domain feed '{THREAT_FEED}': {len(feed):,} distinct FQDNs")
     if BLOCK_THREAT_DOMAINS == "matched_only":
         blocked_domains = sorted(f for f in all_internet_fqdns if f in feed)
         print(f"observed FQDNs matching the feed: {len(blocked_domains)}")

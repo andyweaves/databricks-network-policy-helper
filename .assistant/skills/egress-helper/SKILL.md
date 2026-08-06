@@ -35,9 +35,10 @@ If the table is empty, no egress policy is logging yet — start with step 1.
 4. **Review tables** (internet + per-cloud storage) — confirm before creating.
 5. Optional **threat-intel domain blocking** (`block_threat_domains`: off / matched_only / all) →
    `blocked_internet_destinations` (FQDN-only, enforced in any mode, takes precedence over allows).
-   Feed: malware-filter "online malicious domains" (abuse.ch URLhaus, deduped to FQDNs; free, no
-   key). `matched_only` (block observed FQDNs on the feed) is the sensible default given the
-   100-FQDN cap.
+   Feed chosen by `threat_feed` (all free, no key): `threatfox` (abuse.ch ThreatFox, ~49k,
+   C2/botnet/phishing/distribution — default), `urlhaus` (~500, distribution only, very high-signal),
+   or `hagezi_tif` (~370k, broadest, higher false-positive risk). `matched_only` (block observed
+   FQDNs on the feed) is the sensible default given the 100-FQDN cap.
 6. Gated create: `create_policy` creates/updates the egress block; `auto_assign` binds this workspace.
 
 ## Options (widgets)
