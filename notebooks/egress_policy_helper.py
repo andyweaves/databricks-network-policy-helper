@@ -11,7 +11,7 @@
 # MAGIC    is: put an egress policy in **dry_run** (restricted, log-only), let it observe, then run this
 # MAGIC    to turn the observed destinations into a real allow-list.
 # MAGIC 2. Classifies each distinct destination: **storage** (S3 / GCS / Azure) vs **internet FQDN**.
-# MAGIC 3. Enriches internet FQDNs with RDAP owner (optional).
+# MAGIC 3. Enriches internet FQDNs with their hosting owner (resolve IP → RDAP the IP; optional).
 # MAGIC 4. Shows what it would allow (review tables) — you confirm.
 # MAGIC 5. Optionally creates the egress policy via the SDK, and can add **threat-intel domain blocks**.
 # MAGIC
@@ -49,7 +49,7 @@ dbutils.widgets.text("min_events", "1", "1b. Min events per destination")
 dbutils.widgets.text("source_type_filter", "", "1c. network_source_type filter (blank=all)")
 
 # --- Enrichment ---
-dbutils.widgets.dropdown("enable_rdap", "true", ["true", "false"], "2a. RDAP owner lookup (FQDNs)?")
+dbutils.widgets.dropdown("enable_rdap", "true", ["true", "false"], "2a. Hosting-owner lookup (FQDNs)?")
 
 # --- Policy shape ---
 dbutils.widgets.text("name_prefix", "cbi-helper", "3a. Name prefix for policy/rules")
@@ -125,6 +125,8 @@ observed_egress = spark.sql(
       sort_array(collect_set(access_type)) AS access_types,
       sort_array(collect_set(network_source_type)) AS source_types,
       sort_array(collect_set(workspace_id)) AS workspace_ids,
+      -- resolved IPs already recorded in the DNS event (flatten the per-row rdata arrays)
+      sort_array(array_distinct(flatten(collect_list(dns_event.rdata)))) AS resolved_ips,
       MIN(event_time) AS first_seen,
       MAX(event_time) AS last_seen
     FROM system.access.outbound_network
@@ -210,6 +212,7 @@ def _new_target():
 # Bucket classified destinations per policy target. single -> one ALL_WORKSPACES target; per_workspace
 # -> each destination fans out to the workspace_ids it was observed in.
 targets = defaultdict(_new_target)
+fqdn_resolved_ips = {}  # fqdn -> [resolved IPs from dns_event.rdata] (used to skip a DNS lookup later)
 skipped_bare_s3 = 0
 for r in observed_egress.toPandas().to_dict(orient="records"):
     kind, info = _classify(r["destination"])
@@ -222,6 +225,10 @@ for r in observed_egress.toPandas().to_dict(orient="records"):
         key, bucketname = ("azure", (info["account"], info["service"]))
     elif kind == "internet":
         key, bucketname = ("internet", info["fqdn"])
+        ips = fqdn_resolved_ips.setdefault(info["fqdn"], [])
+        for ip in _as_list(r.get("resolved_ips")):
+            if ip not in ips:
+                ips.append(ip)
     else:
         skipped_bare_s3 += 1
         continue
@@ -244,15 +251,19 @@ print(f"policy_scope={POLICY_SCOPE}: {len(targets)} policy target(s). Across all
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## RDAP owner lookup for internet FQDNs (optional)
+# MAGIC ## Hosting-owner lookup for internet FQDNs (optional)
 # MAGIC
-# MAGIC For context on the review table — who owns each domain. One lookup per distinct FQDN via
-# MAGIC `rdap.org` (widget `2a`).
+# MAGIC For review context — **who hosts each domain** (e.g. GitHub, Fastly, Amazon). We resolve the
+# MAGIC FQDN to an IP, then RDAP the IP for the owning org. RDAP-on-domain is avoided: it only yields
+# MAGIC the registrar (e.g. MarkMonitor) and the registrant is usually GDPR-redacted. The resolved IP
+# MAGIC often comes free from the audit log (`dns_event.rdata`) — we only DNS-resolve when it doesn't.
+# MAGIC One lookup per distinct FQDN (widget `2a`).
 
 # COMMAND ----------
 
-# DBTITLE 1,RDAP domain lookup
+# DBTITLE 1,Resolve FQDN -> IP -> hosting owner (RDAP)
 import json
+import socket
 import time
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -260,29 +271,33 @@ from urllib.request import Request, urlopen
 _RDAP_TIMEOUT, _RDAP_RETRIES, _UA = 8, 2, "Databricks-CBI-Helper"
 
 
-def _rdap_domain_owner(fqdn):
-    """Best-effort registrant/owner for a domain via rdap.org. Returns None on any failure."""
-    # RDAP domain queries use the registrable domain; try the FQDN then its last two labels.
-    candidates = [fqdn]
-    parts = fqdn.split(".")
-    if len(parts) > 2:
-        candidates.append(".".join(parts[-2:]))
-    for name in candidates:
-        url = f"https://rdap.org/domain/{name}"
-        for attempt in range(1, _RDAP_RETRIES + 1):
-            try:
-                req = Request(url, headers={"Accept": "application/rdap+json", "User-Agent": _UA})
-                with urlopen(req, timeout=_RDAP_TIMEOUT) as resp:
-                    payload = json.loads(resp.read().decode("utf-8"))
-                for entity in payload.get("entities", []) or []:
-                    vcard = entity.get("vcardArray")
-                    if isinstance(vcard, list) and len(vcard) > 1:
-                        for fld in vcard[1]:
-                            if len(fld) >= 4 and fld[0] == "fn" and fld[3]:
-                                return fld[3]
-                return payload.get("handle")
-            except (HTTPError, URLError, TimeoutError, ValueError):
-                break  # try next candidate
+def _resolve_ip(fqdn):
+    """First IP for an FQDN — prefer the one already in the audit log (dns_event.rdata), else DNS."""
+    for ip in fqdn_resolved_ips.get(fqdn, []):
+        return ip
+    try:
+        return socket.gethostbyname(fqdn)
+    except OSError:
+        return None
+
+
+def _rdap_ip_owner(ip):
+    """Owning org for an IP via rdap.org (follows the redirect to the RIR). None on failure."""
+    for _ in range(_RDAP_RETRIES):
+        try:
+            req = Request(f"https://rdap.org/ip/{ip}",
+                          headers={"Accept": "application/rdap+json", "User-Agent": _UA})
+            with urlopen(req, timeout=_RDAP_TIMEOUT) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+            for entity in payload.get("entities", []) or []:
+                vcard = entity.get("vcardArray")
+                if isinstance(vcard, list) and len(vcard) > 1:
+                    for fld in vcard[1]:
+                        if len(fld) >= 4 and fld[0] == "fn" and fld[3]:
+                            return payload.get("name") or fld[3]
+            return payload.get("name") or payload.get("handle")
+        except (HTTPError, URLError, TimeoutError, ValueError):
+            time.sleep(0.5)
     return None
 
 
@@ -297,14 +312,23 @@ def _union(key):
 
 all_internet_fqdns = _union("internet")
 
-rdap_owner = {}
+fqdn_ip = {}       # fqdn -> resolved IP
+fqdn_owner = {}    # fqdn -> hosting org (from IP RDAP)
 if ENABLE_RDAP and all_internet_fqdns:
-    for fqdn in all_internet_fqdns:  # one lookup per distinct FQDN across all targets
-        rdap_owner[fqdn] = _rdap_domain_owner(fqdn)
-        time.sleep(0.1)
-    print(f"RDAP: resolved owner for {sum(1 for v in rdap_owner.values() if v)} of {len(all_internet_fqdns)} FQDN(s).")
+    _ip_owner_cache = {}
+    for fqdn in all_internet_fqdns:
+        ip = _resolve_ip(fqdn)
+        fqdn_ip[fqdn] = ip
+        if ip:
+            if ip not in _ip_owner_cache:
+                _ip_owner_cache[ip] = _rdap_ip_owner(ip)
+                time.sleep(0.1)
+            fqdn_owner[fqdn] = _ip_owner_cache[ip]
+    print(f"Hosting owner resolved for {sum(1 for v in fqdn_owner.values() if v)} of "
+          f"{len(all_internet_fqdns)} FQDN(s) "
+          f"({sum(1 for f in all_internet_fqdns if fqdn_resolved_ips.get(f))} had IPs from the audit log).")
 else:
-    print("RDAP lookup off or no FQDNs.")
+    print("Owner lookup off or no FQDNs.")
 
 # COMMAND ----------
 
@@ -321,8 +345,8 @@ else:
 # breakdown is printed in the build step below.
 _u_s3, _u_gcs, _u_azure = _union("s3"), _union("gcs"), _union("azure")
 internet_pdf = pd.DataFrame(
-    [{"fqdn": f, "events": n, "rdap_owner": rdap_owner.get(f)} for f, n in sorted(
-        all_internet_fqdns.items(), key=lambda kv: kv[1], reverse=True)]
+    [{"fqdn": f, "events": n, "resolved_ip": fqdn_ip.get(f), "hosting_owner": fqdn_owner.get(f)}
+     for f, n in sorted(all_internet_fqdns.items(), key=lambda kv: kv[1], reverse=True)]
 )
 s3_pdf = pd.DataFrame(
     [{"bucket": b, "region": reg, "events": n} for (b, reg), n in sorted(

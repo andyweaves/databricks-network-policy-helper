@@ -30,7 +30,8 @@ If the table is empty, no egress policy is logging yet — start with step 1.
    - **Azure** `<account>.<blob|dfs|file>.core.windows.net` → storage rule (account + service).
    - Bare `s3.<region>.amazonaws.com` (no bucket) → **skipped** (too broad to be a useful rule).
    - Everything else → **internet FQDN** allow rule.
-3. Optional RDAP owner lookup on internet FQDNs (context).
+3. Optional hosting-owner lookup on internet FQDNs (resolve IP → RDAP the IP for the owning org,
+   e.g. GitHub/Fastly/Amazon; uses the audit log's resolved IPs when present). Context only.
 4. **Review tables** (internet + per-cloud storage) — confirm before creating.
 5. Optional **threat-intel domain blocking** (`block_threat_domains`: off / matched_only / all) →
    `blocked_internet_destinations` (FQDN-only, enforced in any mode, takes precedence over allows).
