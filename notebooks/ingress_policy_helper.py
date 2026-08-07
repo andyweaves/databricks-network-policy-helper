@@ -21,9 +21,11 @@
 # MAGIC 7. Builds either **one policy for all workspaces** (`policy_scope=single`) or a **tailored
 # MAGIC    policy per workspace** with recommended assignments (`policy_scope=per_workspace`), and
 # MAGIC    warns + auto-caps to the network-policy limits (50 rules / 2000 CIDRs / 100 identities).
-# MAGIC 8. Optionally creates the account network policy via the Databricks SDK (`create_policy`), in
-# MAGIC    **`dry_run`** (log-only) or **`enforce`** (blocking) mode, and optionally binds the
-# MAGIC    workspace(s) to it (`auto_assign`).
+# MAGIC 8. Optionally writes the account network policy via the Databricks SDK (`create_policy`), in
+# MAGIC    **`dry_run`** (log-only) or **`enforce`** (blocking) mode — either as a **new** policy or by
+# MAGIC    **adding the ingress rules to an existing** one (`policy_action`), leaving its egress intact
+# MAGIC    — and optionally binds the workspace(s) to it (`auto_assign`). Run this and the egress helper
+# MAGIC    one after the other, pointed at the same policy, for a combined ingress + egress policy.
 # MAGIC
 # MAGIC > ⚠️ **Safety:** every suggestion is advisory. The default `policy_mode` is `dry_run`, which
 # MAGIC > cannot block traffic. **`enforce` CAN lock users out** if the allow-list is incomplete — it
@@ -51,11 +53,7 @@
 # COMMAND ----------
 
 # DBTITLE 1,Restart Python to load the pinned SDK
-# Skip the restart when running under the combiner (full_policy_helper), which has already installed
-# + restarted once — restarting here would wipe the shared namespace and the combiner couldn't read
-# this notebook's results. `_COMBINED_RUN` is set by the combiner before %run.
-if not globals().get("_COMBINED_RUN", False):
-    dbutils.library.restartPython()
+dbutils.library.restartPython()
 
 # COMMAND ----------
 
@@ -154,17 +152,27 @@ dbutils.widgets.text("account_secret_scope", "", "4d. Secret scope holding SP se
 dbutils.widgets.text("account_secret_key", "", "4e. Secret key for SP secret")
 
 # --- Apply (gated) ---
-# create_policy is the master switch: create the account network policy (idempotent — reuses the
-# generated <prefix>-... name on re-run). auto_assign then binds the relevant workspace(s) to it.
-dbutils.widgets.dropdown("create_policy", "false", ["true", "false"], "5a. Create the policy?")
-dbutils.widgets.dropdown("auto_assign", "false", ["true", "false"], "5b. Auto-assign to workspace(s)?")
-# Safety gate: set true (after reviewing the proposed rules) before the create cell will run.
-dbutils.widgets.dropdown("reviewed_rules", "false", ["true", "false"], "5c. I've reviewed the rules")
-# Basic egress policy applied only when CREATING a new policy (existing policies keep their egress).
-# allow_all = FULL_ACCESS; dry_run = RESTRICTED_ACCESS + log-only for all products; restricted =
-# RESTRICTED_ACCESS + enforced (configure allowed destinations yourself afterwards).
+# create_policy is the master switch: nothing is written unless it's true.
+dbutils.widgets.dropdown("create_policy", "false", ["true", "false"], "5a. Write the policy?")
+# policy_action chooses WHERE the ingress rules go:
+#   create_new      -> create a fresh policy named from name_prefix (<prefix> / <prefix>-ws-<id>).
+#   add_to_existing -> update the EXISTING policy whose id is in existing_policy_id (5c), replacing
+#                      only its ingress block and leaving egress + everything else intact. This is
+#                      how you layer ingress onto a policy the egress helper already created (run one
+#                      helper, note its policy id, then run the other with add_to_existing). Requires
+#                      policy_scope=single (one target id).
 dbutils.widgets.dropdown(
-    "egress_policy", "allow_all", ["allow_all", "dry_run", "restricted"], "5d. Egress (on create)"
+    "policy_action", "create_new", ["create_new", "add_to_existing"], "5b. Create new or add to existing?"
+)
+dbutils.widgets.text("existing_policy_id", "", "5c. Existing policy id (add_to_existing)")
+dbutils.widgets.dropdown("auto_assign", "false", ["true", "false"], "5d. Auto-assign to workspace(s)?")
+# Safety gate: set true (after reviewing the proposed rules) before the create cell will run.
+dbutils.widgets.dropdown("reviewed_rules", "false", ["true", "false"], "5e. I've reviewed the rules")
+# Basic egress policy applied only when CREATING a new policy (add_to_existing keeps the target's
+# egress). allow_all = FULL_ACCESS; dry_run = RESTRICTED_ACCESS + log-only for all products;
+# restricted = RESTRICTED_ACCESS + enforced (configure allowed destinations yourself afterwards).
+dbutils.widgets.dropdown(
+    "egress_policy", "allow_all", ["allow_all", "dry_run", "restricted"], "5f. Egress (on create_new)"
 )
 
 # COMMAND ----------
@@ -223,9 +231,26 @@ ACCOUNT_SECRET_SCOPE = dbutils.widgets.get("account_secret_scope").strip()
 ACCOUNT_SECRET_KEY = dbutils.widgets.get("account_secret_key").strip()
 
 CREATE_POLICY = dbutils.widgets.get("create_policy") == "true"
+POLICY_ACTION = dbutils.widgets.get("policy_action")  # create_new | add_to_existing
+EXISTING_POLICY_ID = dbutils.widgets.get("existing_policy_id").strip()
 AUTO_ASSIGN = dbutils.widgets.get("auto_assign") == "true"
 REVIEWED_RULES = dbutils.widgets.get("reviewed_rules") == "true"
 EGRESS_POLICY = dbutils.widgets.get("egress_policy")  # allow_all | dry_run | restricted
+
+# add_to_existing targets a single supplied policy id, so it's incompatible with per_workspace (which
+# fans out to many policies). Validate early with a clear message rather than failing mid-apply.
+if CREATE_POLICY and POLICY_ACTION == "add_to_existing":
+    if not EXISTING_POLICY_ID:
+        raise ValueError(
+            "policy_action=add_to_existing requires an existing policy id in widget "
+            "'5c. Existing policy id'. Set it (e.g. the id the egress helper created) and re-run."
+        )
+    if POLICY_SCOPE != "single":
+        raise ValueError(
+            "policy_action=add_to_existing updates one supplied policy id, so it needs "
+            "policy_scope=single (widget 3b). Switch policy_scope to single, or use create_new for "
+            "per_workspace."
+        )
 
 
 def _require_account_id(operation):
@@ -300,11 +325,15 @@ _decisions = pd.DataFrame([
     ("4d/4e. account secret", f"{ACCOUNT_SECRET_SCOPE}/{ACCOUNT_SECRET_KEY}" if ACCOUNT_SECRET_SCOPE else "(ambient)",
      "Secret scope+key holding the SP's OAuth secret (never hardcode it)."),
     ("5a. create_policy", CREATE_POLICY,
-     "Master switch: create the account network policy (idempotent). dry_run mode is the safeguard."),
-    ("5b. auto_assign", AUTO_ASSIGN, "Bind the relevant workspace(s) to the created policy."),
-    ("5c. reviewed_rules", REVIEWED_RULES, "Must be true (after reviewing the proposed rules) before create runs."),
-    ("5c. egress_policy", EGRESS_POLICY,
-     "Egress set on CREATE only: allow_all=FULL_ACCESS; dry_run=restricted+log-only; restricted=enforced."),
+     "Master switch: write the account network policy. Nothing is written unless true. dry_run mode is the safeguard."),
+    ("5b. policy_action", POLICY_ACTION,
+     "create_new = fresh policy from name_prefix; add_to_existing = update existing_policy_id's ingress block only."),
+    ("5c. existing_policy_id", EXISTING_POLICY_ID or "(create_new)",
+     "The policy id to add ingress to when add_to_existing (e.g. one the egress helper created). Needs policy_scope=single."),
+    ("5d. auto_assign", AUTO_ASSIGN, "Bind the relevant workspace(s) to the policy."),
+    ("5e. reviewed_rules", REVIEWED_RULES, "Must be true (after reviewing the proposed rules) before create runs."),
+    ("5f. egress_policy", EGRESS_POLICY,
+     "Egress set on create_new ONLY: allow_all=FULL_ACCESS; dry_run=restricted+log-only; restricted=enforced."),
 ], columns=["widget", "value", "meaning"])
 # The value column mixes int/bool/str; cast to string so display()'s Arrow conversion doesn't fail
 # on the resulting object-dtype column.
@@ -1889,12 +1918,11 @@ display(_policy_explainer)
 # COMMAND ----------
 
 # DBTITLE 1,Review gate — must confirm before create
-# Only gates an actual create attempt. Propose-only runs (create_policy=false) and combined runs
-# (the combiner does its own review/gate) pass through.
-if CREATE_POLICY and not globals().get("_COMBINED_RUN", False) and not REVIEWED_RULES:
+# Only gates an actual create attempt. Propose-only runs (create_policy=false) pass through.
+if CREATE_POLICY and not REVIEWED_RULES:
     raise Exception(
         "STOP — review the proposed ingress rules above (allow-list CIDRs, scoping, threat matches, "
-        "JSON preview) before creating the policy. When satisfied, set widget '5c. I've reviewed the "
+        "JSON preview) before creating the policy. When satisfied, set widget '5e. I've reviewed the "
         "rules' to true and re-run. (This gate only triggers when create_policy=true.)"
     )
 print("Review gate passed." if (CREATE_POLICY and REVIEWED_RULES) else
@@ -1905,25 +1933,30 @@ print("Review gate passed." if (CREATE_POLICY and REVIEWED_RULES) else
 # MAGIC %md
 # MAGIC ## Create the policy (gated)
 # MAGIC
-# MAGIC Two independent switches:
-# MAGIC - **`create_policy`** — create/update the account network policy (idempotent; the name is
-# MAGIC   deterministic, so re-runs update in place). Writes the block chosen by `policy_mode`:
-# MAGIC   `dry_run` → `ingress_dry_run.public_access` (log-only, blocks nothing); `enforce` →
-# MAGIC   `ingress.public_access` (blocks non-matching source IPs). Other blocks + `egress` are
-# MAGIC   preserved (update is a full replace).
-# MAGIC - **`auto_assign`** — bind the workspace(s) to the created policy via
-# MAGIC   `update_workspace_network_option_rpc` (single scope binds *this* workspace; per_workspace
-# MAGIC   binds each). Independent of `create_policy` mode — you can create without assigning.
+# MAGIC The switches:
+# MAGIC - **`create_policy`** — the master switch. Nothing is written unless it's `true`. Writes the
+# MAGIC   block chosen by `policy_mode`: `dry_run` → `ingress_dry_run.public_access` (log-only, blocks
+# MAGIC   nothing); `enforce` → `ingress.public_access` (blocks non-matching source IPs). The other
+# MAGIC   ingress block **and `egress`** are preserved (update is a full replace of the whole policy).
+# MAGIC - **`policy_action`** — where the rules land:
+# MAGIC   - `create_new` — create a fresh policy named from `name_prefix` (`<prefix>` single,
+# MAGIC     `<prefix>-ws-<id>` per_workspace). A basic `egress` block (widget `5f`) is set on create.
+# MAGIC   - `add_to_existing` — update the **existing** policy in `existing_policy_id` (`5c`), replacing
+# MAGIC     only its ingress block and leaving its egress + everything else intact. Requires
+# MAGIC     `policy_scope=single`. This is how you layer ingress onto a policy the **egress helper**
+# MAGIC     already created: run one helper with `create_new`, note the policy id it prints, then run
+# MAGIC     the other with `add_to_existing` pointed at that id → one combined ingress + egress policy.
+# MAGIC - **`auto_assign`** — bind the workspace(s) to the policy via
+# MAGIC   `update_workspace_network_option_rpc` (single binds *this* workspace; per_workspace binds each).
 # MAGIC
 # MAGIC Requires an **account-admin** `AccountClient` (see "Account admin requirements"; widgets 4a–4e).
-# MAGIC Policy names come from `name_prefix`: `<prefix>` (single) or `<prefix>-ws-<workspace_id>`
-# MAGIC (per_workspace). Per-workspace failures are reported individually and don't stop the others.
+# MAGIC Per-workspace failures are reported individually and don't stop the others.
 
 # COMMAND ----------
 
 # DBTITLE 1,Apply proposed rules (dry_run or enforce)
 def _build_egress(kind):
-    """Build the basic egress block used ONLY when creating a new policy (widget 5d):
+    """Build the basic egress block used ONLY when creating a new policy (widget 5f):
       allow_all  -> FULL_ACCESS (no egress restriction)
       dry_run    -> RESTRICTED_ACCESS + enforcement DRY_RUN (log-only for ALL products)
       restricted -> RESTRICTED_ACCESS + enforcement ENFORCED (no allowed destinations set here;
@@ -1950,10 +1983,11 @@ def _build_egress(kind):
     return NetworkPolicyEgress(network_access=access)
 
 
-def _apply_to_policy(a, policy_id, allow, deny):
-    """Create-or-update account network policy `policy_id` (idempotent: the name is deterministic),
-    setting its target block (ingress|ingress_dry_run) to the proposed allow+deny rules and leaving
-    the other blocks + egress unchanged (update is a full replace). Returns
+def _apply_to_policy(a, policy_id, allow, deny, must_exist=False):
+    """Create-or-update account network policy `policy_id`, setting its target block
+    (ingress|ingress_dry_run) to the proposed allow+deny rules and leaving the other blocks + egress
+    unchanged (update is a full replace). When `must_exist` (add_to_existing), the policy MUST already
+    exist — a missing id raises rather than silently creating a new one. Returns
     (action, effective_id, sent_block_dict)."""
     from databricks.sdk.errors import NotFound
     from databricks.sdk.service.settings import AccountNetworkPolicy
@@ -1962,6 +1996,11 @@ def _apply_to_policy(a, policy_id, allow, deny):
         existing = a.network_policies.get_network_policy_rpc(network_policy_id=policy_id)
         action = "updated"
     except NotFound:
+        if must_exist:
+            raise ValueError(
+                f"policy_action=add_to_existing but no network policy '{policy_id}' was found. Check "
+                "the id in widget '5c. Existing policy id' (create it first, or use create_new)."
+            )
         # On create there is no egress block to preserve, but the API requires one — build it from
         # the egress_policy widget.
         existing = AccountNetworkPolicy(
@@ -2007,11 +2046,7 @@ def _assign(a, workspace_id, policy_id):
     )
 
 
-if globals().get("_COMBINED_RUN", False):
-    # Running under the combiner (full_policy_helper) — it does the merged create. Skip this cell so
-    # the built `policies` dict is left intact for merging.
-    print("Combined run — skipping ingress create; the combiner will create the merged policy.")
-elif not CREATE_POLICY:
+if not CREATE_POLICY:
     print(f"Not creating (mode={POLICY_MODE}, scope={POLICY_SCOPE}). Set create_policy=true to create "
           f"the policy; auto_assign=true to also bind the workspace(s). policy_mode=dry_run is the "
           f"safe default (log-only); enforce blocks non-matching IPs.")
@@ -2022,9 +2057,14 @@ else:
 
     if POLICY_SCOPE == "single":
         p = policies.get(ALL_WORKSPACES) or next(iter(policies.values()))
-        single_id = _policy_name()
-        print(f"Creating/updating policy '{single_id}' ({POLICY_MODE_TARGET}, {POLICY_MODE} mode)...")
-        action, effective_id, sent = _apply_to_policy(a, single_id, p["allow"], p["deny"])
+        # add_to_existing -> the supplied id (must already exist; egress preserved). create_new -> the
+        # deterministic <prefix> name.
+        add_to_existing = POLICY_ACTION == "add_to_existing"
+        single_id = EXISTING_POLICY_ID if add_to_existing else _policy_name()
+        verb = "Adding ingress to existing" if add_to_existing else "Creating/updating"
+        print(f"{verb} policy '{single_id}' ({POLICY_MODE_TARGET}, {POLICY_MODE} mode)...")
+        action, effective_id, sent = _apply_to_policy(
+            a, single_id, p["allow"], p["deny"], must_exist=add_to_existing)
         print(f"Policy {action}: {effective_id}")
         print(json.dumps({POLICY_MODE_TARGET: sent}, indent=2))
         if AUTO_ASSIGN:

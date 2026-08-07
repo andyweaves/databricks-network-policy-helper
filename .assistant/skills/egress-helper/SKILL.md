@@ -8,8 +8,9 @@ description: Propose and apply a Databricks serverless egress (SEG) network-poli
 Builds a Databricks **account network policy egress** allow-list from observed outbound traffic. The
 engine is `notebooks/egress_policy_helper.py` in the databricks-network-policy-helper repo.
 
-For **ingress** (source-IP allow-lists) use `ingress-helper`; to build a full ingress+egress policy in
-one go, use `full-policy-helper` (if present).
+For **ingress** (source-IP allow-lists) use `ingress-helper`. To end up with a combined ingress +
+egress policy, run one helper with `policy_action=create_new`, then the other with
+`policy_action=add_to_existing` pointed at the policy id the first one created.
 
 ## The dry-run-observe loop (important)
 
@@ -49,7 +50,8 @@ If the table is empty, no egress policy is logging yet — start with step 1.
    > any destination *not* on the allow-list is blocked, including the attacker's. The threat-intel
    > domain block list is a **secondary** layer — it catches known-bad hosts explicitly, but the
    > allow-list is the control that matters. Don't rely on the block feed as your primary defence.
-6. Gated create: `create_policy` creates/updates the egress block; `auto_assign` binds this workspace.
+6. Gated create: `create_policy` writes the egress block; `policy_action` chooses a new policy or an
+   existing one; `auto_assign` binds the workspace.
 
 ## Options (widgets)
 
@@ -58,7 +60,10 @@ If the table is empty, no egress policy is logging yet — start with step 1.
 - `name_prefix`, `policy_mode` (**dry_run** default / enforce), `policy_scope` (single / per_workspace), `block_threat_domains`
 - Account auth (`account_id` + optional SP client_id / secret scope+key) — **account admin required**
   to create/assign. See `docs/account-admin-setup.md`.
-- `create_policy` (gate), `auto_assign`
+- `create_policy` (gate), `policy_action` (`create_new` / `add_to_existing`), `existing_policy_id`,
+  `auto_assign`. `add_to_existing` updates only the egress block of the supplied policy id (leaving
+  its ingress intact) and requires `policy_scope=single` — this is how you combine with the ingress
+  helper: run one with `create_new`, then the other with `add_to_existing` on the same policy id.
 
 ## Limits & safety
 

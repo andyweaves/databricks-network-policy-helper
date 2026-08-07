@@ -13,8 +13,9 @@ The engine is the notebook `notebooks/ingress_policy_helper.py` at the repo root
 deploy it, run it with sensible parameters, and review/apply a policy responsibly. Paths below are
 relative to this skill folder (`.assistant/skills/ingress-helper/`).
 
-For **egress** (outbound allow-lists) use `egress-helper`; to review how a *running* ingress policy
-is performing (what it's denying, rules to add), use `ingress-checker`.
+For **egress** (outbound allow-lists) use `egress-helper`. To end up with a combined ingress + egress
+policy, run one helper with `policy_action=create_new`, then the other with
+`policy_action=add_to_existing` pointed at the policy id the first one created.
 
 ## When to use
 
@@ -74,11 +75,15 @@ trial an ingress policy in dry-run before enforcing.
   table. Policies are named `<name_prefix>-ws-<id>`; single scope is just `<name_prefix>`.
   Audit `workspace_id = 0` is account-level, excluded unless `include_account_level=true`.
 
-Creating is two independent switches: **`create_policy`** creates/updates the policy (idempotent —
-the name is deterministic), and **`auto_assign`** binds the workspace(s) to it. When creating, the
-basic egress policy is set from `egress_policy`: `allow_all` (FULL_ACCESS), `dry_run` (restricted,
-log-only for all products), or `restricted` (enforced — configure allowed destinations yourself
-afterwards). Existing policies keep their egress untouched.
+Applying is governed by a few widgets: **`create_policy`** is the master switch (nothing is written
+unless true); **`policy_action`** chooses `create_new` (a fresh policy named from `name_prefix`) or
+`add_to_existing` (update the policy in **`existing_policy_id`**, replacing only its ingress block and
+leaving its egress + everything else intact — requires `policy_scope=single`); **`auto_assign`** binds
+the workspace(s). `add_to_existing` is how you layer ingress onto a policy the egress helper already
+created (and vice-versa) for a combined policy. On `create_new` the basic egress block is set from
+`egress_policy`: `allow_all` (FULL_ACCESS), `dry_run` (restricted, log-only for all products), or
+`restricted` (enforced — configure allowed destinations yourself afterwards); `add_to_existing` keeps
+the target's egress untouched.
 
 ## Existing IP access list & denied requests
 

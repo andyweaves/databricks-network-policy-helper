@@ -5,12 +5,11 @@ The engine notebooks live in `notebooks/` next to this script:
 
     ingress_policy_helper   ingress (CBI) proposal + apply engine
     egress_policy_helper    serverless egress (SEG) proposal + apply engine
-    full_policy_helper      combines ingress + egress into one policy
-    ingress_policy_checker  review a running ingress policy (read-only)
-    egress_policy_checker   review a running egress policy (read-only)
-    full_policy_checker     combined ingress + egress review (read-only)
     ip_acl_migration        migrate this workspace's IP ACL into a CBI policy
     install_skill           install the Genie Code skill(s)
+
+(Each helper can create a new policy or add its rules to an existing one, so running the ingress and
+egress helpers one after the other against the same policy yields a combined ingress + egress policy.)
 
 This helper imports the chosen notebook via the Databricks CLI so it can be run in the target
 workspace. It only imports the notebook; it does not run it or touch any network policy.

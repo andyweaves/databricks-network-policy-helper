@@ -14,7 +14,10 @@
 # MAGIC 3. Enriches internet FQDNs with their cloud owner — resolve IP, match offline against the
 # MAGIC    AWS/GCP/Azure/Databricks published ranges (no per-IP RDAP; optional).
 # MAGIC 4. Shows what it would allow (review tables) — you confirm.
-# MAGIC 5. Optionally creates the egress policy via the SDK, and can add **threat-intel domain blocks**.
+# MAGIC 5. Optionally writes the egress policy via the SDK — either a **new** policy or by **adding the
+# MAGIC    egress rules to an existing** one (`policy_action`), leaving its ingress intact — and can add
+# MAGIC    **threat-intel domain blocks**. Run this and the ingress helper one after the other, pointed
+# MAGIC    at the same policy, for a combined ingress + egress policy.
 # MAGIC
 # MAGIC > **What actually protects against data exfiltration (e.g. the LiteLLM-style hack, where an
 # MAGIC > attacker POSTs stolen creds/data to a server they control):** the **`RESTRICTED_ACCESS`
@@ -39,9 +42,7 @@
 # COMMAND ----------
 
 # DBTITLE 1,Restart Python
-# Skip when running under the combiner (full_policy_helper), which installs + restarts once itself.
-if not globals().get("_COMBINED_RUN", False):
-    dbutils.library.restartPython()
+dbutils.library.restartPython()
 
 # COMMAND ----------
 
@@ -89,11 +90,23 @@ dbutils.widgets.text("account_secret_scope", "", "4d. Secret scope holding SP se
 dbutils.widgets.text("account_secret_key", "", "4e. Secret key for SP secret")
 
 # --- Create (gated) ---
-dbutils.widgets.dropdown("create_policy", "false", ["true", "false"], "5a. Create the policy?")
-dbutils.widgets.dropdown("auto_assign", "false", ["true", "false"], "5b. Auto-assign to this workspace?")
+# create_policy is the master switch: nothing is written unless it's true.
+dbutils.widgets.dropdown("create_policy", "false", ["true", "false"], "5a. Write the policy?")
+# policy_action chooses WHERE the egress rules go:
+#   create_new      -> create a fresh policy named from name_prefix (<prefix> / <prefix>-ws-<id>).
+#   add_to_existing -> update the EXISTING policy whose id is in existing_policy_id (5c), replacing
+#                      only its egress block and leaving ingress + everything else intact. This is how
+#                      you layer egress onto a policy the ingress helper already created (run one
+#                      helper, note its policy id, then run the other with add_to_existing). Requires
+#                      policy_scope=single (one target id).
+dbutils.widgets.dropdown(
+    "policy_action", "create_new", ["create_new", "add_to_existing"], "5b. Create new or add to existing?"
+)
+dbutils.widgets.text("existing_policy_id", "", "5c. Existing policy id (add_to_existing)")
+dbutils.widgets.dropdown("auto_assign", "false", ["true", "false"], "5d. Auto-assign to this workspace?")
 # Safety gate: you must set this to true (after reviewing the proposed rules) before the create cell
 # will run. Forces a look at what would be allowed/blocked.
-dbutils.widgets.dropdown("reviewed_rules", "false", ["true", "false"], "5c. I've reviewed the rules")
+dbutils.widgets.dropdown("reviewed_rules", "false", ["true", "false"], "5e. I've reviewed the rules")
 
 LOOKBACK_DAYS = int(dbutils.widgets.get("lookback_days"))
 MIN_EVENTS = int(dbutils.widgets.get("min_events"))
@@ -110,8 +123,25 @@ ACCOUNT_SP_CLIENT_ID = dbutils.widgets.get("account_sp_client_id").strip()
 ACCOUNT_SECRET_SCOPE = dbutils.widgets.get("account_secret_scope").strip()
 ACCOUNT_SECRET_KEY = dbutils.widgets.get("account_secret_key").strip()
 CREATE_POLICY = dbutils.widgets.get("create_policy") == "true"
+POLICY_ACTION = dbutils.widgets.get("policy_action")  # create_new | add_to_existing
+EXISTING_POLICY_ID = dbutils.widgets.get("existing_policy_id").strip()
 AUTO_ASSIGN = dbutils.widgets.get("auto_assign") == "true"
 REVIEWED_RULES = dbutils.widgets.get("reviewed_rules") == "true"
+
+# add_to_existing targets a single supplied policy id, so it's incompatible with per_workspace (which
+# fans out to many policies). Validate early with a clear message rather than failing mid-apply.
+if CREATE_POLICY and POLICY_ACTION == "add_to_existing":
+    if not EXISTING_POLICY_ID:
+        raise ValueError(
+            "policy_action=add_to_existing requires an existing policy id in widget "
+            "'5c. Existing policy id'. Set it (e.g. the id the ingress helper created) and re-run."
+        )
+    if POLICY_SCOPE != "single":
+        raise ValueError(
+            "policy_action=add_to_existing updates one supplied policy id, so it needs "
+            "policy_scope=single (widget 3b2). Switch policy_scope to single, or use create_new for "
+            "per_workspace."
+        )
 
 # Databricks egress policy limits (warn + cap so proposals stay valid).
 MAX_INTERNET_DESTINATIONS = 100     # FQDNs (allow or block) per policy
@@ -602,17 +632,16 @@ else:
 # MAGIC
 # MAGIC **Stop and review the proposed egress rules above** (allowed internet/storage destinations and
 # MAGIC any blocked domains) before creating anything. When you're satisfied, set the
-# MAGIC **`reviewed_rules`** widget (`5c`) to `true` — the create cell will refuse to run until you do.
+# MAGIC **`reviewed_rules`** widget (`5e`) to `true` — the create cell will refuse to run until you do.
 
 # COMMAND ----------
 
 # DBTITLE 1,Review gate — must confirm before create
-# Only gates an actual create attempt: if you're creating (not under the combiner) you must have
-# reviewed. Propose-only runs (create_policy=false) pass through freely.
-if CREATE_POLICY and not globals().get("_COMBINED_RUN", False) and not REVIEWED_RULES:
+# Only gates an actual create attempt. Propose-only runs (create_policy=false) pass through freely.
+if CREATE_POLICY and not REVIEWED_RULES:
     raise Exception(
         "STOP — review the proposed egress rules above (internet + storage allows, blocked domains) "
-        "before creating the policy. When satisfied, set widget '5c. I've reviewed the rules' to "
+        "before creating the policy. When satisfied, set widget '5e. I've reviewed the rules' to "
         "true and re-run. (This gate only triggers when create_policy=true.)"
     )
 print("Review gate passed." if (CREATE_POLICY and REVIEWED_RULES) else
@@ -623,11 +652,16 @@ print("Review gate passed." if (CREATE_POLICY and REVIEWED_RULES) else
 # MAGIC %md
 # MAGIC ## Create the egress policy (gated)
 # MAGIC
-# MAGIC Creates/updates each proposed policy's **egress** block (ingress left untouched), gated by
-# MAGIC `create_policy`. `auto_assign` binds the workspace(s). Requires an **account-admin**
-# MAGIC AccountClient (widgets 4a–4e). Idempotent (deterministic names).
-# MAGIC - `policy_scope=single` — one policy `<name_prefix>`; auto_assign binds **this** workspace.
-# MAGIC - `policy_scope=per_workspace` — policy `<name_prefix>-ws-<id>` per workspace; auto_assign binds each.
+# MAGIC Writes each proposed policy's **egress** block (ingress left untouched), gated by
+# MAGIC `create_policy`. Requires an **account-admin** AccountClient (widgets 4a–4e).
+# MAGIC - **`policy_action=create_new`** — create a fresh policy: `<name_prefix>` (single) or
+# MAGIC   `<name_prefix>-ws-<id>` (per_workspace).
+# MAGIC - **`policy_action=add_to_existing`** — update the existing policy in `existing_policy_id`
+# MAGIC   (`5c`), replacing only its egress block and leaving its **ingress** intact. Requires
+# MAGIC   `policy_scope=single`. This is how you layer egress onto a policy the **ingress helper**
+# MAGIC   already created: run one helper with `create_new`, note the id it prints, then run the other
+# MAGIC   with `add_to_existing` pointed at that id → one combined ingress + egress policy.
+# MAGIC - **`auto_assign`** binds the workspace(s) (single → **this** workspace; per_workspace → each).
 
 # COMMAND ----------
 
@@ -657,11 +691,7 @@ def _account_client():
     return AccountClient(host=ACCOUNT_HOST, account_id=ACCOUNT_ID)
 
 
-if globals().get("_COMBINED_RUN", False):
-    # Running under the combiner (full_policy_helper) — it does the merged create. Skip this cell so
-    # the built `egress_blocks` dict is left intact for merging.
-    print("Combined run — skipping egress create; the combiner will create the merged policy.")
-elif not CREATE_POLICY:
+if not CREATE_POLICY:
     print(f"Not creating (mode={POLICY_MODE}, scope={POLICY_SCOPE}). Set create_policy=true to create "
           f"the egress policy(ies)" + (" and assign the workspace(s)." if AUTO_ASSIGN else "."))
 elif not egress_blocks:
@@ -671,8 +701,10 @@ else:
     from databricks.sdk.service.settings import AccountNetworkPolicy, WorkspaceNetworkOption
 
     a = _account_client()
+    add_to_existing = POLICY_ACTION == "add_to_existing"
     for tgt in sorted(egress_blocks, key=str):
-        pid = _policy_name(tgt)
+        # add_to_existing -> the supplied id (must already exist). create_new -> deterministic name.
+        pid = EXISTING_POLICY_ID if add_to_existing else _policy_name(tgt)
         # In single scope with auto_assign, bind THIS workspace; in per_workspace, bind that target.
         bind_ws = THIS_WORKSPACE_ID if tgt == ALL_WORKSPACES else int(tgt)
         try:
@@ -680,6 +712,12 @@ else:
                 existing = a.network_policies.get_network_policy_rpc(network_policy_id=pid)
                 action = "updated"
             except NotFound:
+                if add_to_existing:
+                    raise ValueError(
+                        f"policy_action=add_to_existing but no network policy '{pid}' was found. "
+                        "Check the id in widget '5c. Existing policy id' (create it first, or use "
+                        "create_new)."
+                    )
                 existing = AccountNetworkPolicy(account_id=ACCOUNT_ID, network_policy_id=pid)
                 action = "created"
             existing.egress = egress_blocks[tgt]  # replace egress; leave ingress blocks untouched
