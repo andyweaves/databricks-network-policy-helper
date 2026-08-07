@@ -37,10 +37,17 @@ If the table is empty, no egress policy is logging yet — start with step 1.
 4. **Review tables** (internet + per-cloud storage) — confirm before creating.
 5. Optional **threat-intel domain blocking** (`block_threat_domains`: off / matched_only / all) →
    `blocked_internet_destinations` (FQDN-only, enforced in any mode, takes precedence over allows).
-   Feed chosen by `threat_feed` (all free, no key): `threatfox` (abuse.ch ThreatFox, ~49k,
-   C2/botnet/phishing/distribution — default), `urlhaus` (~500, distribution only, very high-signal),
-   or `hagezi_tif` (~370k, broadest, higher false-positive risk). `matched_only` (block observed
-   FQDNs on the feed) is the sensible default given the 100-FQDN cap.
+   Feed chosen by `threat_feed` (all free, no key): `threatfox` (abuse.ch ThreatFox botnet-C2 IOCs
+   — the best fit for the exfil use case, since these are attacker-controlled command-and-control
+   hosts — default) or `urlhaus` (abuse.ch URLhaus malware-download hosts — distribution infra, a
+   weaker signal for exfil). `matched_only` (block only observed FQDNs that appear on the feed) is
+   the sensible default given the 100-FQDN cap.
+
+   > **What actually stops data exfiltration** (e.g. a LiteLLM-style credential/data leak to an
+   > attacker server) is the RESTRICTED_ACCESS allow-list itself: with egress enforced, traffic to
+   > any destination *not* on the allow-list is blocked, including the attacker's. The threat-intel
+   > domain block list is a **secondary** layer — it catches known-bad hosts explicitly, but the
+   > allow-list is the control that matters. Don't rely on the block feed as your primary defence.
 6. Gated create: `create_policy` creates/updates the egress block; `auto_assign` binds this workspace.
 
 ## Options (widgets)

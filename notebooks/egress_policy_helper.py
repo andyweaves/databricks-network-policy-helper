@@ -16,6 +16,14 @@
 # MAGIC 4. Shows what it would allow (review tables) — you confirm.
 # MAGIC 5. Optionally creates the egress policy via the SDK, and can add **threat-intel domain blocks**.
 # MAGIC
+# MAGIC > **What actually protects against data exfiltration (e.g. the LiteLLM-style hack, where an
+# MAGIC > attacker POSTs stolen creds/data to a server they control):** the **`RESTRICTED_ACCESS`
+# MAGIC > allow-list itself**. Default-deny means the attacker's destination isn't on the list and the
+# MAGIC > connection is blocked — and that works even though a brand-new exfil server appears on no
+# MAGIC > threat feed. The **threat-intel domain block list is a secondary layer** for known-bad C2
+# MAGIC > domains (won't catch a novel exfil target). So the allow-list is the control; blocking is a
+# MAGIC > bonus.
+# MAGIC
 # MAGIC > ⚠️ Nothing is written unless `create_policy=true`. `policy_mode=dry_run` (default) is log-only.
 
 # COMMAND ----------
@@ -63,11 +71,13 @@ dbutils.widgets.dropdown("policy_scope", "single", ["single", "per_workspace"], 
 dbutils.widgets.dropdown(
     "block_threat_domains", "off", ["off", "matched_only", "all"], "3c. Block threat-intel domains"
 )
-# Which threat-domain feed to use (all free, no key): threatfox = abuse.ch ThreatFox (~49k;
-# C2/botnet/phishing/distribution); urlhaus = abuse.ch URLhaus online (~500; distribution only,
-# very high-signal); hagezi_tif = HaGeZi TIF medium (~370k; broadest, higher false-positive risk).
+# Which threat-domain feed to use (all free, no key). For the data-exfiltration use case, the
+# allow-list is the real control (see the overview) — a block feed is a bonus that only catches
+# KNOWN bad domains. threatfox = abuse.ch ThreatFox (~49k, botnet **C2** IOCs — the closest match:
+# servers compromised hosts talk to). urlhaus = abuse.ch URLhaus online (~500, malware **download**
+# hosts — where malware is fetched from, not exfil targets; weaker signal for this use case).
 dbutils.widgets.dropdown(
-    "threat_feed", "threatfox", ["threatfox", "urlhaus", "hagezi_tif"], "3d. Threat-domain feed"
+    "threat_feed", "threatfox", ["threatfox", "urlhaus"], "3d. Threat-domain feed"
 )
 
 # --- Account authentication (account-level; needed to create the policy) ---
@@ -92,7 +102,7 @@ NAME_PREFIX = dbutils.widgets.get("name_prefix").strip() or "np-helper"
 POLICY_MODE = dbutils.widgets.get("policy_mode")
 POLICY_SCOPE = dbutils.widgets.get("policy_scope")  # single | per_workspace
 BLOCK_THREAT_DOMAINS = dbutils.widgets.get("block_threat_domains")  # off | matched_only | all
-THREAT_FEED = dbutils.widgets.get("threat_feed")  # threatfox | urlhaus | hagezi_tif
+THREAT_FEED = dbutils.widgets.get("threat_feed")  # threatfox (botnet C2) | urlhaus (malware dl)
 ACCOUNT_ID = dbutils.widgets.get("account_id").strip()
 ACCOUNT_HOST = dbutils.widgets.get("account_host").strip() or "https://accounts.cloud.databricks.com"
 ACCOUNT_SP_CLIENT_ID = dbutils.widgets.get("account_sp_client_id").strip()
@@ -441,11 +451,13 @@ for name, pdf in [("Internet FQDNs", internet_pdf), ("AWS S3", s3_pdf),
 # COMMAND ----------
 
 # DBTITLE 1,Build blocked domains
-# Threat-domain feed registry — each entry is (url, line->host parser). All free, no key.
-#  - threatfox   : abuse.ch ThreatFox hostfile (~49k; C2/botnet/phishing/distribution). '0.0.0.0 host'.
-#  - urlhaus     : malware-filter URLhaus online domains (~500; distribution only, very high-signal).
-#  - hagezi_tif  : HaGeZi TIF medium (~370k; broadest — malware+scam+spam, higher false-positive risk).
-#    Adblock syntax: '||host^'.
+# Threat-domain feed registry — each entry is (url, line->host parser). All free, no key. Both are
+# abuse.ch feeds; neither is an ad-blocking list (those are the wrong tool for exfil/C2 blocking).
+#  - threatfox : ThreatFox hostfile (~49k). Entries are IOCs tagged botnet_cc — i.e. malware
+#    command-and-control / exfil infrastructure. Best match for the data-exfil use case.
+#  - urlhaus   : malware-filter URLhaus online domains (~500). Malware *download* hosts (threat=
+#    malware_download) — where malware is fetched from, not where data is exfiltrated to. Weaker
+#    signal for this use case, but still worth flagging if a node egresses to one.
 def _host_plain(line):
     return line.strip().lower()
 
@@ -455,15 +467,9 @@ def _host_hostfile(line):  # '0.0.0.0 host' / '127.0.0.1 host'
     return parts[1].lower() if len(parts) == 2 else ""
 
 
-def _host_adblock(line):  # '||host^'
-    m = re.match(r'^\|\|([^/^]+)\^', line.strip())
-    return m.group(1).lower() if m else ""
-
-
 THREAT_FEEDS = {
     "threatfox": ("https://threatfox.abuse.ch/downloads/hostfile/", _host_hostfile),
     "urlhaus": ("https://malware-filter.gitlab.io/malware-filter/urlhaus-filter-domains-online.txt", _host_plain),
-    "hagezi_tif": ("https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/tif.medium.txt", _host_adblock),
 }
 
 
