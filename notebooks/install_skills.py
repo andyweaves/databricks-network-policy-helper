@@ -27,7 +27,7 @@ def _fuse(path):
     return path if path.startswith("/Workspace/") else f"/Workspace{path}"
 
 
-# This notebook lives at <repo>/notebooks/install_skill; skills are at <repo>/.assistant/skills/*.
+# This notebook lives at <repo>/notebooks/install_skills; skills are at <repo>/.assistant/skills/*.
 _nb_path = dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get()
 _repo_root = os.path.dirname(os.path.dirname(_nb_path))
 SKILLS_ROOT = _fuse(f"{_repo_root}/.assistant/skills")

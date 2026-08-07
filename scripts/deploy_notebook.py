@@ -6,7 +6,7 @@ The engine notebooks live in `notebooks/` next to this script:
     ingress_policy_helper   ingress (CBI) proposal + apply engine
     egress_policy_helper    serverless egress (SEG) proposal + apply engine
     ip_acl_migration        migrate this workspace's IP ACL into a CBI policy
-    install_skill           install the Genie Code skill(s)
+    install_skills          install the Genie Code skill(s)
 
 (Each helper can create a new policy or add its rules to an existing one, so running the ingress and
 egress helpers one after the other against the same policy yields a combined ingress + egress policy.)

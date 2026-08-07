@@ -103,7 +103,7 @@ dbutils.widgets.dropdown("enable_rdap", "true", ["true", "false"], "2e. RDAP own
 
 # --- Policy shape ---
 dbutils.widgets.dropdown(
-    "policy_framing", "optimal", ["minimal", "optimal", "maximum"], "3a. CIDR framing"
+    "policy_framing", "minimal", ["minimal", "optimal", "maximum"], "3a. CIDR framing"
 )
 dbutils.widgets.dropdown(
     "scoping_mode", "ip_only",
