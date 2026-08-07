@@ -30,8 +30,10 @@ If the table is empty, no egress policy is logging yet — start with step 1.
    - **Azure** `<account>.<blob|dfs|file>.core.windows.net` → storage rule (account + service).
    - Bare `s3.<region>.amazonaws.com` (no bucket) → **skipped** (too broad to be a useful rule).
    - Everything else → **internet FQDN** allow rule.
-3. Optional hosting-owner lookup on internet FQDNs (resolve IP → RDAP the IP for the owning org,
-   e.g. GitHub/Fastly/Amazon; uses the audit log's resolved IPs when present). Context only.
+3. Optional cloud-owner lookup on internet FQDNs — resolve the IP (audit-log `rdata` first, else
+   DNS) and match it **offline** against the AWS/GCP/Azure/Databricks published ranges (no per-IP
+   RDAP, which is unreliable from an egress-restricted cluster). Shows `resolved_ip` + `hosting_owner`
+   (the cloud, or "non-cloud / unknown", or "DNS resolution failed - check egress control"). Context only.
 4. **Review tables** (internet + per-cloud storage) — confirm before creating.
 5. Optional **threat-intel domain blocking** (`block_threat_domains`: off / matched_only / all) →
    `blocked_internet_destinations` (FQDN-only, enforced in any mode, takes precedence over allows).

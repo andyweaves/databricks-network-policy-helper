@@ -11,7 +11,8 @@
 # MAGIC    is: put an egress policy in **dry_run** (restricted, log-only), let it observe, then run this
 # MAGIC    to turn the observed destinations into a real allow-list.
 # MAGIC 2. Classifies each distinct destination: **storage** (S3 / GCS / Azure) vs **internet FQDN**.
-# MAGIC 3. Enriches internet FQDNs with their hosting owner (resolve IP → RDAP the IP; optional).
+# MAGIC 3. Enriches internet FQDNs with their cloud owner — resolve IP, match offline against the
+# MAGIC    AWS/GCP/Azure/Databricks published ranges (no per-IP RDAP; optional).
 # MAGIC 4. Shows what it would allow (review tables) — you confirm.
 # MAGIC 5. Optionally creates the egress policy via the SDK, and can add **threat-intel domain blocks**.
 # MAGIC
@@ -49,10 +50,10 @@ dbutils.widgets.text("min_events", "1", "1b. Min events per destination")
 dbutils.widgets.text("source_type_filter", "", "1c. network_source_type filter (blank=all)")
 
 # --- Enrichment ---
-dbutils.widgets.dropdown("enable_rdap", "true", ["true", "false"], "2a. Hosting-owner lookup (FQDNs)?")
+dbutils.widgets.dropdown("enable_rdap", "true", ["true", "false"], "2a. Cloud-owner lookup (FQDNs)?")
 
 # --- Policy shape ---
-dbutils.widgets.text("name_prefix", "cbi-helper", "3a. Name prefix for policy/rules")
+dbutils.widgets.text("name_prefix", "np-helper", "3a. Name prefix for policy/rules")
 dbutils.widgets.dropdown("policy_mode", "dry_run", ["dry_run", "enforce"], "3b. Egress policy mode")
 # single = one egress policy from all observed traffic; per_workspace = a tailored policy per
 # workspace_id seen in the logs.
@@ -84,7 +85,7 @@ LOOKBACK_DAYS = int(dbutils.widgets.get("lookback_days"))
 MIN_EVENTS = int(dbutils.widgets.get("min_events"))
 SOURCE_TYPE_FILTER = dbutils.widgets.get("source_type_filter").strip()
 ENABLE_RDAP = dbutils.widgets.get("enable_rdap") == "true"
-NAME_PREFIX = dbutils.widgets.get("name_prefix").strip() or "cbi-helper"
+NAME_PREFIX = dbutils.widgets.get("name_prefix").strip() or "np-helper"
 POLICY_MODE = dbutils.widgets.get("policy_mode")
 POLICY_SCOPE = dbutils.widgets.get("policy_scope")  # single | per_workspace
 BLOCK_THREAT_DOMAINS = dbutils.widgets.get("block_threat_domains")  # off | matched_only | all
@@ -261,52 +262,80 @@ print(f"policy_scope={POLICY_SCOPE}: {len(targets)} policy target(s). Across all
 # MAGIC %md
 # MAGIC ## Hosting-owner lookup for internet FQDNs (optional)
 # MAGIC
-# MAGIC For review context — **who hosts each domain** (e.g. GitHub, Fastly, Amazon). We resolve the
-# MAGIC FQDN to an IP, then RDAP the IP for the owning org. RDAP-on-domain is avoided: it only yields
-# MAGIC the registrar (e.g. MarkMonitor) and the registrant is usually GDPR-redacted. The resolved IP
-# MAGIC often comes free from the audit log (`dns_event.rdata`) — we only DNS-resolve when it doesn't.
-# MAGIC One lookup per distinct FQDN (widget `2a`).
+# MAGIC For review context — **which cloud hosts each domain**. This is done **offline**: we resolve
+# MAGIC the FQDN to an IP (preferring the IP already in the audit log's `dns_event.rdata`, else a DNS
+# MAGIC lookup) and match it against the official **AWS / GCP / Azure / Databricks** published IP-range
+# MAGIC feeds — no per-IP RDAP/RIR calls, which are unreliable from an egress-restricted cluster.
+# MAGIC
+# MAGIC - `resolved_ip` is shown whenever we have one (from the log or DNS).
+# MAGIC - `hosting_owner` = the matched cloud (or "non-cloud / unknown" if it matches no feed).
+# MAGIC - If DNS resolution fails (common on a locked-down cluster), the owner column says
+# MAGIC   **"DNS resolution failed - check egress control"** so the reason is explicit.
 
 # COMMAND ----------
 
-# DBTITLE 1,Resolve FQDN -> IP -> hosting owner (RDAP)
+# DBTITLE 1,Resolve FQDN -> IP -> cloud owner (offline range match)
+import ipaddress as _ip
 import json
 import socket
-import time
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-_RDAP_TIMEOUT, _RDAP_RETRIES, _UA = 8, 2, "Databricks-CBI-Helper"
+_UA = "Databricks-Network-Policy-Helper"
 
 
-def _resolve_ip(fqdn):
-    """First IP for an FQDN — prefer the one already in the audit log (dns_event.rdata), else DNS."""
-    for ip in fqdn_resolved_ips.get(fqdn, []):
-        return ip
+def _http_json(url):
     try:
-        return socket.gethostbyname(fqdn)
-    except OSError:
+        with urlopen(Request(url, headers={"User-Agent": _UA}), timeout=30) as resp:
+            return json.loads(resp.read().decode("utf-8", errors="replace"))
+    except (HTTPError, URLError, TimeoutError, ValueError) as e:
+        print(f"  ! could not fetch {url}: {e}")
         return None
 
 
-def _rdap_ip_owner(ip):
-    """Owning org for an IP via rdap.org (follows the redirect to the RIR). None on failure."""
-    for _ in range(_RDAP_RETRIES):
+def _load_cloud_networks():
+    """Parse the official AWS/GCP/Azure/Databricks IP-range feeds into [(network, owner)] for offline
+    IP membership tests. Best-effort per feed — a feed that fails just contributes nothing."""
+    nets = []
+
+    def add(cidr, owner):
         try:
-            req = Request(f"https://rdap.org/ip/{ip}",
-                          headers={"Accept": "application/rdap+json", "User-Agent": _UA})
-            with urlopen(req, timeout=_RDAP_TIMEOUT) as resp:
-                payload = json.loads(resp.read().decode("utf-8"))
-            for entity in payload.get("entities", []) or []:
-                vcard = entity.get("vcardArray")
-                if isinstance(vcard, list) and len(vcard) > 1:
-                    for fld in vcard[1]:
-                        if len(fld) >= 4 and fld[0] == "fn" and fld[3]:
-                            return payload.get("name") or fld[3]
-            return payload.get("name") or payload.get("handle")
-        except (HTTPError, URLError, TimeoutError, ValueError):
-            time.sleep(0.5)
-    return None
+            nets.append((_ip.ip_network(cidr, strict=False), owner))
+        except ValueError:
+            pass
+
+    aws = _http_json("https://ip-ranges.amazonaws.com/ip-ranges.json")
+    if aws:
+        for p in aws.get("prefixes", []):
+            add(p.get("ip_prefix", ""), "AWS")
+        for p in aws.get("ipv6_prefixes", []):
+            add(p.get("ipv6_prefix", ""), "AWS")
+    gcp = _http_json("https://www.gstatic.com/ipranges/cloud.json")
+    if gcp:
+        for p in gcp.get("prefixes", []):
+            add(p.get("ipv4Prefix") or p.get("ipv6Prefix") or "", "GCP")
+    dbx = _http_json("https://www.databricks.com/networking/v1/ip-ranges.json")
+    if dbx:
+        for e in dbx.get("prefixes", []):
+            for c in (e.get("ipv4Prefixes", []) + e.get("ipv6Prefixes", [])):
+                add(c, "Databricks")
+    # Azure Service Tags — dated JSON discovered from the official download page.
+    conf = None
+    try:
+        with urlopen(Request("https://www.microsoft.com/en-us/download/details.aspx?id=56519",
+                             headers={"User-Agent": _UA}), timeout=30) as resp:
+            conf = resp.read().decode("utf-8", errors="replace")
+    except (HTTPError, URLError, TimeoutError):
+        pass
+    if conf:
+        import re as _re
+        m = _re.findall(r"https://download\.microsoft\.com/download/[^\"']*ServiceTags_Public_\d+\.json", conf)
+        az = _http_json(sorted(set(m))[-1]) if m else None
+        if az:
+            for v in az.get("values", []):
+                for c in v.get("properties", {}).get("addressPrefixes", []):
+                    add(c, "Azure")
+    return nets
 
 
 def _union(key):
@@ -320,21 +349,41 @@ def _union(key):
 
 all_internet_fqdns = _union("internet")
 
-fqdn_ip = {}       # fqdn -> resolved IP
-fqdn_owner = {}    # fqdn -> hosting org (from IP RDAP)
+fqdn_ip = {}       # fqdn -> resolved IP (or None)
+fqdn_owner = {}    # fqdn -> cloud owner / status string
 if ENABLE_RDAP and all_internet_fqdns:
-    _ip_owner_cache = {}
+    cloud_nets = _load_cloud_networks()
+    print(f"loaded {len(cloud_nets):,} cloud/Databricks IP ranges for offline owner matching")
+
+    def _owner_for_ip(ip):
+        try:
+            addr = _ip.ip_address(ip)
+        except ValueError:
+            return None
+        if addr.is_private:
+            return "private/internal IP"
+        for net, owner in cloud_nets:
+            if addr.version == net.version and addr in net:
+                return owner
+        return "non-cloud / unknown"
+
+    _dns_fail = 0
     for fqdn in all_internet_fqdns:
-        ip = _resolve_ip(fqdn)
+        ip = next(iter(fqdn_resolved_ips.get(fqdn, [])), None)  # audit-log IP first
+        if ip is None:
+            try:
+                ip = socket.gethostbyname(fqdn)
+            except OSError:
+                ip = None
         fqdn_ip[fqdn] = ip
-        if ip:
-            if ip not in _ip_owner_cache:
-                _ip_owner_cache[ip] = _rdap_ip_owner(ip)
-                time.sleep(0.1)
-            fqdn_owner[fqdn] = _ip_owner_cache[ip]
-    print(f"Hosting owner resolved for {sum(1 for v in fqdn_owner.values() if v)} of "
-          f"{len(all_internet_fqdns)} FQDN(s) "
-          f"({sum(1 for f in all_internet_fqdns if fqdn_resolved_ips.get(f))} had IPs from the audit log).")
+        if ip is None:
+            fqdn_owner[fqdn] = "DNS resolution failed - check egress control"
+            _dns_fail += 1
+        else:
+            fqdn_owner[fqdn] = _owner_for_ip(ip)
+    _cloud_hits = sum(1 for v in fqdn_owner.values() if v in ("AWS", "GCP", "Azure", "Databricks"))
+    print(f"owner matched for {_cloud_hits} of {len(all_internet_fqdns)} FQDN(s) to a cloud; "
+          f"{_dns_fail} had no resolvable IP (DNS/egress).")
 else:
     print("Owner lookup off or no FQDNs.")
 

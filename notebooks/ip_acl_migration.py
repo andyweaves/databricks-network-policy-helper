@@ -43,7 +43,7 @@ dbutils.library.restartPython()
 
 # DBTITLE 1,Widgets
 dbutils.widgets.dropdown("policy_mode", "enforce", ["enforce", "dry_run"], "1. Policy mode")
-dbutils.widgets.text("name_prefix", "cbi-helper", "2. Name prefix")
+dbutils.widgets.text("name_prefix", "np-helper", "2. Name prefix")
 dbutils.widgets.dropdown(
     "egress_policy", "allow_all", ["allow_all", "dry_run", "restricted"], "3. Egress (on create)"
 )
@@ -57,7 +57,7 @@ dbutils.widgets.text("account_secret_key", "", "5e. Secret key for SP secret")
 dbutils.widgets.dropdown("create_policy", "false", ["true", "false"], "6. Create the policy?")
 
 POLICY_MODE = dbutils.widgets.get("policy_mode")
-NAME_PREFIX = dbutils.widgets.get("name_prefix").strip() or "cbi-helper"
+NAME_PREFIX = dbutils.widgets.get("name_prefix").strip() or "np-helper"
 EGRESS_POLICY = dbutils.widgets.get("egress_policy")
 AUTO_ASSIGN = dbutils.widgets.get("auto_assign") == "true"
 ACCOUNT_ID = dbutils.widgets.get("account_id").strip()

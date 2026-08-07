@@ -131,7 +131,7 @@ dbutils.widgets.dropdown(
     "threat_deny_rules", "off", ["off", "matched_only", "all"], "3d. Threat-intel deny rules"
 )
 # Prefix for generated policy names and rule labels (e.g. <prefix>-ws-<id>, <prefix>-deny-<feed>).
-dbutils.widgets.text("name_prefix", "cbi-helper", "3e. Name prefix for policies/rules")
+dbutils.widgets.text("name_prefix", "np-helper", "3e. Name prefix for policies/rules")
 # How to treat an existing workspace IP access list (ACL): migrate_and_enrich = recreate it as CBI
 # rules AND add traffic-derived rules; migrate = recreate the ACL exactly, nothing else;
 # ignore = traffic-derived rules only.
@@ -198,7 +198,7 @@ SCOPING_MODE = dbutils.widgets.get("scoping_mode")
 POLICY_SCOPE = dbutils.widgets.get("policy_scope")  # single | per_workspace
 POLICY_MODE = dbutils.widgets.get("policy_mode")
 THREAT_DENY_RULES = dbutils.widgets.get("threat_deny_rules")  # off | matched_only | all
-NAME_PREFIX = dbutils.widgets.get("name_prefix").strip() or "cbi-helper"
+NAME_PREFIX = dbutils.widgets.get("name_prefix").strip() or "np-helper"
 IP_ACL_HANDLING = dbutils.widgets.get("ip_acl_handling")  # migrate_and_enrich | migrate | ignore
 DENY_DENIED_IPS = dbutils.widgets.get("deny_denied_ips") == "true"
 
