@@ -168,12 +168,6 @@ dbutils.widgets.text("existing_policy_id", "", "5c. Existing policy id (add_to_e
 dbutils.widgets.dropdown("auto_assign", "false", ["true", "false"], "5d. Auto-assign to workspace(s)?")
 # Safety gate: set true (after reviewing the proposed rules) before the create cell will run.
 dbutils.widgets.dropdown("reviewed_rules", "false", ["true", "false"], "5e. I've reviewed the rules")
-# Basic egress policy applied only when CREATING a new policy (add_to_existing keeps the target's
-# egress). allow_all = FULL_ACCESS; dry_run = RESTRICTED_ACCESS + log-only for all products;
-# restricted = RESTRICTED_ACCESS + enforced (configure allowed destinations yourself afterwards).
-dbutils.widgets.dropdown(
-    "egress_policy", "allow_all", ["allow_all", "dry_run", "restricted"], "5f. Egress (on create_new)"
-)
 
 # COMMAND ----------
 
@@ -235,7 +229,6 @@ POLICY_ACTION = dbutils.widgets.get("policy_action")  # create_new | add_to_exis
 EXISTING_POLICY_ID = dbutils.widgets.get("existing_policy_id").strip()
 AUTO_ASSIGN = dbutils.widgets.get("auto_assign") == "true"
 REVIEWED_RULES = dbutils.widgets.get("reviewed_rules") == "true"
-EGRESS_POLICY = dbutils.widgets.get("egress_policy")  # allow_all | dry_run | restricted
 
 # add_to_existing targets a single supplied policy id, so it's incompatible with per_workspace (which
 # fans out to many policies). Validate early with a clear message rather than failing mid-apply.
@@ -332,8 +325,6 @@ _decisions = pd.DataFrame([
      "The policy id to add ingress to when add_to_existing (e.g. one the egress helper created). Needs policy_scope=single."),
     ("5d. auto_assign", AUTO_ASSIGN, "Bind the relevant workspace(s) to the policy."),
     ("5e. reviewed_rules", REVIEWED_RULES, "Must be true (after reviewing the proposed rules) before create runs."),
-    ("5f. egress_policy", EGRESS_POLICY,
-     "Egress set on create_new ONLY: allow_all=FULL_ACCESS; dry_run=restricted+log-only; restricted=enforced."),
 ], columns=["widget", "value", "meaning"])
 # The value column mixes int/bool/str; cast to string so display()'s Arrow conversion doesn't fail
 # on the resulting object-dtype column.
@@ -1940,7 +1931,8 @@ print("Review gate passed." if (CREATE_POLICY and REVIEWED_RULES) else
 # MAGIC   ingress block **and `egress`** are preserved (update is a full replace of the whole policy).
 # MAGIC - **`policy_action`** — where the rules land:
 # MAGIC   - `create_new` — create a fresh policy named from `name_prefix` (`<prefix>` single,
-# MAGIC     `<prefix>-ws-<id>` per_workspace). A basic `egress` block (widget `5f`) is set on create.
+# MAGIC     `<prefix>-ws-<id>` per_workspace). Egress is left unrestricted (FULL_ACCESS) — add egress
+# MAGIC     rules afterwards with the egress helper (`policy_action=add_to_existing`).
 # MAGIC   - `add_to_existing` — update the **existing** policy in `existing_policy_id` (`5c`), replacing
 # MAGIC     only its ingress block and leaving its egress + everything else intact. Requires
 # MAGIC     `policy_scope=single`. This is how you layer ingress onto a policy the **egress helper**
@@ -1955,32 +1947,18 @@ print("Review gate passed." if (CREATE_POLICY and REVIEWED_RULES) else
 # COMMAND ----------
 
 # DBTITLE 1,Apply proposed rules (dry_run or enforce)
-def _build_egress(kind):
-    """Build the basic egress block used ONLY when creating a new policy (widget 5f):
-      allow_all  -> FULL_ACCESS (no egress restriction)
-      dry_run    -> RESTRICTED_ACCESS + enforcement DRY_RUN (log-only for ALL products)
-      restricted -> RESTRICTED_ACCESS + enforcement ENFORCED (no allowed destinations set here;
-                    the user configures allowed destinations themselves afterwards)"""
+def _build_egress():
+    """The egress block set when CREATING a new policy. This is an ingress helper, so it leaves egress
+    unrestricted (FULL_ACCESS) — the API requires an egress block on create, and an ingress-only
+    policy shouldn't start restricting outbound. Use the egress helper to add egress rules to the
+    policy afterwards (policy_action=add_to_existing)."""
     from databricks.sdk.service.settings import (
         EgressNetworkPolicyNetworkAccessPolicy as EgressAccess,
-        EgressNetworkPolicyNetworkAccessPolicyPolicyEnforcement as Enforcement,
-        EgressNetworkPolicyNetworkAccessPolicyPolicyEnforcementEnforcementMode as EnforcementMode,
         EgressNetworkPolicyNetworkAccessPolicyRestrictionMode as EgressRestriction,
         NetworkPolicyEgress,
     )
-    if kind == "allow_all":
-        access = EgressAccess(restriction_mode=EgressRestriction.FULL_ACCESS)
-    elif kind == "dry_run":
-        access = EgressAccess(
-            restriction_mode=EgressRestriction.RESTRICTED_ACCESS,
-            policy_enforcement=Enforcement(enforcement_mode=EnforcementMode.DRY_RUN),
-        )
-    else:  # restricted
-        access = EgressAccess(
-            restriction_mode=EgressRestriction.RESTRICTED_ACCESS,
-            policy_enforcement=Enforcement(enforcement_mode=EnforcementMode.ENFORCED),
-        )
-    return NetworkPolicyEgress(network_access=access)
+    return NetworkPolicyEgress(
+        network_access=EgressAccess(restriction_mode=EgressRestriction.FULL_ACCESS))
 
 
 def _apply_to_policy(a, policy_id, allow, deny, must_exist=False):
@@ -2001,10 +1979,10 @@ def _apply_to_policy(a, policy_id, allow, deny, must_exist=False):
                 f"policy_action=add_to_existing but no network policy '{policy_id}' was found. Check "
                 "the id in widget '5c. Existing policy id' (create it first, or use create_new)."
             )
-        # On create there is no egress block to preserve, but the API requires one — build it from
-        # the egress_policy widget.
+        # On create there is no egress block to preserve, but the API requires one — set a permissive
+        # (FULL_ACCESS) egress so this ingress-only policy doesn't restrict outbound.
         existing = AccountNetworkPolicy(
-            account_id=ACCOUNT_ID, network_policy_id=policy_id, egress=_build_egress(EGRESS_POLICY),
+            account_id=ACCOUNT_ID, network_policy_id=policy_id, egress=_build_egress(),
         )
         action = "created"
 

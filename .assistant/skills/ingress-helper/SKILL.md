@@ -9,7 +9,7 @@ Turn real `system.access.audit` traffic into a proposed **Context-Based Ingress 
 for a Databricks **account network policy**, with threat-intel + cloud-range enrichment, optional
 destination/identity scoping, and a safe dry-run-first apply path.
 
-The engine is the notebook `notebooks/ingress_policy_helper.py` at the repo root. This skill helps
+The engine is the notebook `notebooks/ingress_helper.py` at the repo root. This skill helps
 deploy it, run it with sensible parameters, and review/apply a policy responsibly. Paths below are
 relative to this skill folder (`.assistant/skills/ingress-helper/`).
 
@@ -40,7 +40,7 @@ trial an ingress policy in dry-run before enforcing.
    principal via OAuth M2M with its secret in a secret scope. See `docs/account-admin-setup.md`.
 2. **Deploy the notebook** into the workspace:
    `python scripts/deploy_notebook.py --profile <cli-profile> --overwrite`
-   (imports `notebooks/ingress_policy_helper.py`; pass `--path` to choose the destination).
+   (imports `notebooks/ingress_helper.py`; pass `--path` to choose the destination).
 3. **Set parameters** — every decision is a widget at the top of the notebook (see its
    "Parameters & decisions" table). Key ones: `lookback_days`, `min_events`, `threat_feeds`,
    `scoping_mode`, `policy_framing`, `policy_mode`, and the account-auth group (auto-detected when
@@ -80,10 +80,9 @@ unless true); **`policy_action`** chooses `create_new` (a fresh policy named fro
 `add_to_existing` (update the policy in **`existing_policy_id`**, replacing only its ingress block and
 leaving its egress + everything else intact — requires `policy_scope=single`); **`auto_assign`** binds
 the workspace(s). `add_to_existing` is how you layer ingress onto a policy the egress helper already
-created (and vice-versa) for a combined policy. On `create_new` the basic egress block is set from
-`egress_policy`: `allow_all` (FULL_ACCESS), `dry_run` (restricted, log-only for all products), or
-`restricted` (enforced — configure allowed destinations yourself afterwards); `add_to_existing` keeps
-the target's egress untouched.
+created (and vice-versa) for a combined policy. On `create_new` egress is left unrestricted
+(FULL_ACCESS) — add egress rules afterwards with the egress helper; `add_to_existing` keeps the
+target's egress untouched.
 
 ## Existing IP access list & denied requests
 
@@ -140,5 +139,5 @@ those files back in the repo / the git folder it was installed from.
 
 ## Engine & helper (repo root)
 
-- `notebooks/ingress_policy_helper.py` — the analysis + proposal + apply notebook (source of truth).
+- `notebooks/ingress_helper.py` — the analysis + proposal + apply notebook (source of truth).
 - `scripts/deploy_notebook.py` — import/update the notebook into a workspace via the CLI.

@@ -2,13 +2,13 @@
 # MAGIC %md
 # MAGIC # IP Access List → CBI migration (simple)
 # MAGIC
-# MAGIC A minimal companion to `ingress_policy_helper.py`. It reads **this workspace's existing IP access
+# MAGIC A minimal companion to `ingress_helper.py`. It reads **this workspace's existing IP access
 # MAGIC list** and migrates it **as-is** into an account **context-based ingress (CBI)** network
 # MAGIC policy — no audit-log analysis, no enrichment, nothing added. ALLOW lists become allow rules,
 # MAGIC BLOCK lists become deny rules. It assumes the customer is happy with their current ACL and
 # MAGIC just wants it recreated as a network policy.
 # MAGIC
-# MAGIC Use `ingress_policy_helper.py` instead if you want traffic-based suggestions, threat-intel / cloud
+# MAGIC Use `ingress_helper.py` instead if you want traffic-based suggestions, threat-intel / cloud
 # MAGIC enrichment, Databricks-IP auto-allow, or identity/destination scoping.
 # MAGIC
 # MAGIC > ⚠️ Default `policy_mode` is `enforce`. Switch to `dry_run` to trial log-only first. Since
@@ -77,7 +77,7 @@ MAX_POLICY_ID_LEN = 30
 # MAGIC
 # MAGIC The ACL read is workspace-level (no account admin needed). This is a **faithful migration** —
 # MAGIC it recreates the existing ACL exactly and adds nothing (it assumes the customer is happy with
-# MAGIC their current ACL). Use `ingress_policy_helper.py` if you want enrichment / Databricks-IP auto-allow.
+# MAGIC their current ACL). Use `ingress_helper.py` if you want enrichment / Databricks-IP auto-allow.
 
 # COMMAND ----------
 

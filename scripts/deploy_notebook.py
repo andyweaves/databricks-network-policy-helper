@@ -3,8 +3,8 @@
 
 The engine notebooks live in `notebooks/` next to this script:
 
-    ingress_policy_helper   ingress (CBI) proposal + apply engine
-    egress_policy_helper    serverless egress (SEG) proposal + apply engine
+    ingress_helper   ingress (CBI) proposal + apply engine
+    egress_helper    serverless egress (SEG) proposal + apply engine
     ip_acl_migration        migrate this workspace's IP ACL into a CBI policy
     install_skills          install the Genie Code skill(s)
 
@@ -20,8 +20,8 @@ Examples
     python deploy_notebook.py --profile my-workspace
 
     # Import a specific notebook to an explicit path, overwriting any existing copy
-    python deploy_notebook.py --profile my-workspace --notebook egress_policy_helper \
-        --path /Users/you@example.com/egress_policy_helper --overwrite
+    python deploy_notebook.py --profile my-workspace --notebook egress_helper \
+        --path /Users/you@example.com/egress_helper --overwrite
 
     # Import every engine notebook into your home dir
     python deploy_notebook.py --profile my-workspace --notebook all --overwrite
@@ -34,7 +34,7 @@ import sys
 from pathlib import Path
 
 NOTEBOOKS_DIR = Path(__file__).resolve().parent.parent / "notebooks"
-DEFAULT_NOTEBOOK = "ingress_policy_helper"
+DEFAULT_NOTEBOOK = "ingress_helper"
 
 
 def _available():

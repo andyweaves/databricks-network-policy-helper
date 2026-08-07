@@ -9,7 +9,7 @@ A minimal tool that migrates **this workspace's existing IP access list** into a
 ingress (CBI) account network policy, **as-is** — no audit-log analysis, no enrichment, nothing
 added. The engine is `notebooks/ip_acl_migration.py` in the databricks-network-policy-helper repo.
 
-Use the fuller **ingress-helper** skill / `ingress_policy_helper.py` instead when the user wants
+Use the fuller **ingress-helper** skill / `ingress_helper.py` instead when the user wants
 traffic-based suggestions, threat-intel / cloud enrichment, or identity/destination scoping.
 
 ## When to use
@@ -35,7 +35,7 @@ IP ACL as CBI, or create a network policy from the current ACL without analysing
 
 - `policy_mode` — **`enforce`** (default) or `dry_run` (log-only trial).
 - `name_prefix` — prefix for the generated policy name / rule labels (default `np-helper`).
-- `egress_policy` — egress set on create: `allow_all` / `dry_run` / `restricted` (same as ingress-helper).
+- `egress_policy` — egress set on create: `allow_all` / `dry_run` / `restricted`.
 - `auto_assign` — bind the current workspace to the new policy (default true).
 - Account auth (`account_id` + optional SP client_id/secret scope+key) — **account admin required**
   to create/assign the policy. See `docs/account-admin-setup.md`.

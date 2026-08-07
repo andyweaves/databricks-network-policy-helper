@@ -79,7 +79,7 @@ dbutils.widgets.dropdown(
 # added later; URLhaus was dropped — it's malware-*download* hosts (payload delivery) with almost no
 # usable FQDNs for exfil, the wrong direction for this threat model.
 dbutils.widgets.dropdown(
-    "threat_feed", "threatfox", ["threatfox"], "3d. Threat-domain feed"
+    "threat_feed", "threatfox", ["threatfox"], "3d. Threat intel feed"
 )
 
 # --- Account authentication (account-level; needed to create the policy) ---
@@ -488,7 +488,7 @@ for name, pdf in [("Internet FQDNs", internet_pdf), ("AWS S3", s3_pdf),
 # COMMAND ----------
 
 # DBTITLE 1,Build blocked domains
-# Threat-domain feed registry — each entry is (url, line->host parser). Free, no key. Not an
+# Threat-intel feed registry — each entry is (url, line->host parser). Free, no key. Not an
 # ad-blocking list (those are the wrong tool for exfil/C2 blocking).
 #  - threatfox : abuse.ch ThreatFox hostfile (~49k). Entries are IOCs tagged botnet_cc — i.e. malware
 #    command-and-control / exfil infrastructure. Best match for the data-exfil use case.

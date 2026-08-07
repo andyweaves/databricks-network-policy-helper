@@ -21,16 +21,16 @@ Each tool's full detail — what it does, every widget, its safety notes — liv
 
 | Tool | Notebook | Skill / reference | What it does |
 |---|---|---|---|
-| 📥 **Ingress Helper** (CBI) | [`ingress_policy_helper.py`](notebooks/ingress_policy_helper.py) | [ingress-helper](.assistant/skills/ingress-helper/SKILL.md) | Proposes & applies a CBI allow-list from `system.access.audit` source IPs — enriched with open threat-intel, cloud-provider and Databricks-owned IP ranges + RDAP, optionally scoped by destination/identity. |
-| 📤 **Egress Helper** (SEG) | [`egress_policy_helper.py`](notebooks/egress_policy_helper.py) | [egress-helper](.assistant/skills/egress-helper/SKILL.md) | Proposes & applies a SEG allow-list from `system.access.outbound_network` destinations (S3 / GCS / Azure storage + internet FQDNs), with optional threat-intel domain blocking. |
+| 📥 **Ingress Helper** (CBI) | [`ingress_helper.py`](notebooks/ingress_helper.py) | [ingress-helper](.assistant/skills/ingress-helper/SKILL.md) | Proposes & applies a CBI allow-list from `system.access.audit` source IPs — enriched with open threat-intel, cloud-provider and Databricks-owned IP ranges + RDAP, optionally scoped by destination/identity. |
+| 📤 **Egress Helper** (SEG) | [`egress_helper.py`](notebooks/egress_helper.py) | [egress-helper](.assistant/skills/egress-helper/SKILL.md) | Proposes & applies a SEG allow-list from `system.access.outbound_network` destinations (S3 / GCS / Azure storage + internet FQDNs), with optional threat-intel domain blocking. |
 | 🔁 **IP ACL Migration** | [`ip_acl_migration.py`](notebooks/ip_acl_migration.py) | [ip-acl-migration](.assistant/skills/ip-acl-migration/SKILL.md) | Recreates this workspace's existing IP access list as a CBI policy, verbatim — no traffic analysis, no enrichment. |
 
 ## 🚀 Quick start
 
 1. 📦 **Deploy a notebook** into a workspace with the Databricks CLI:
    ```bash
-   # one notebook (default: ingress_policy_helper)
-   python scripts/deploy_notebook.py --profile <cli-profile> --notebook egress_policy_helper --overwrite
+   # one notebook (default: ingress_helper)
+   python scripts/deploy_notebook.py --profile <cli-profile> --notebook egress_helper --overwrite
    # or all of them
    python scripts/deploy_notebook.py --profile <cli-profile> --notebook all --overwrite
    ```
@@ -100,8 +100,8 @@ account-wide install). Or copy the `.assistant/skills/<skill>` folder(s) there b
 
 | Path | What |
 |---|---|
-| `notebooks/ingress_policy_helper.py` | 📥 Build/apply an ingress (CBI) policy from audit-log source IPs. |
-| `notebooks/egress_policy_helper.py` | 📤 Build/apply an egress (SEG) policy from observed outbound destinations. |
+| `notebooks/ingress_helper.py` | 📥 Build/apply an ingress (CBI) policy from audit-log source IPs. |
+| `notebooks/egress_helper.py` | 📤 Build/apply an egress (SEG) policy from observed outbound destinations. |
 | `notebooks/ip_acl_migration.py` | 🔁 Migrate this workspace's IP access list into a CBI policy. |
 | `notebooks/install_skills.py` | 🤖 Install the Genie Code skill(s) into your user skills directory. |
 | `.assistant/skills/<tool>/SKILL.md` | 📚 Per-tool reference doc + Genie Code skill (one per tool). |
