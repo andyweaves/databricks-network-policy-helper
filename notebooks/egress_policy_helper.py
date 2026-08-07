@@ -71,13 +71,14 @@ dbutils.widgets.dropdown("policy_scope", "single", ["single", "per_workspace"], 
 dbutils.widgets.dropdown(
     "block_threat_domains", "off", ["off", "matched_only", "all"], "3c. Block threat-intel domains"
 )
-# Which threat-domain feed to use (all free, no key). For the data-exfiltration use case, the
-# allow-list is the real control (see the overview) — a block feed is a bonus that only catches
-# KNOWN bad domains. threatfox = abuse.ch ThreatFox (~49k, botnet **C2** IOCs — the closest match:
-# servers compromised hosts talk to). urlhaus = abuse.ch URLhaus online (~500, malware **download**
-# hosts — where malware is fetched from, not exfil targets; weaker signal for this use case).
+# Which threat-domain feed to use (free, no key). For the data-exfiltration use case, the allow-list
+# is the real control (see the overview) — a block feed is a bonus that only catches KNOWN bad
+# domains. threatfox = abuse.ch ThreatFox (~49k, botnet **C2** IOCs — the closest match: the servers
+# compromised hosts talk to / exfiltrate to). Kept as a single-option dropdown so more feeds can be
+# added later; URLhaus was dropped — it's malware-*download* hosts (payload delivery) with almost no
+# usable FQDNs for exfil, the wrong direction for this threat model.
 dbutils.widgets.dropdown(
-    "threat_feed", "threatfox", ["threatfox", "urlhaus"], "3d. Threat-domain feed"
+    "threat_feed", "threatfox", ["threatfox"], "3d. Threat-domain feed"
 )
 
 # --- Account authentication (account-level; needed to create the policy) ---
@@ -102,7 +103,7 @@ NAME_PREFIX = dbutils.widgets.get("name_prefix").strip() or "np-helper"
 POLICY_MODE = dbutils.widgets.get("policy_mode")
 POLICY_SCOPE = dbutils.widgets.get("policy_scope")  # single | per_workspace
 BLOCK_THREAT_DOMAINS = dbutils.widgets.get("block_threat_domains")  # off | matched_only | all
-THREAT_FEED = dbutils.widgets.get("threat_feed")  # threatfox (botnet C2) | urlhaus (malware dl)
+THREAT_FEED = dbutils.widgets.get("threat_feed")  # threatfox (abuse.ch botnet C2 IOCs)
 ACCOUNT_ID = dbutils.widgets.get("account_id").strip()
 ACCOUNT_HOST = dbutils.widgets.get("account_host").strip() or "https://accounts.cloud.databricks.com"
 ACCOUNT_SP_CLIENT_ID = dbutils.widgets.get("account_sp_client_id").strip()
@@ -446,22 +447,20 @@ for name, pdf in [("Internet FQDNs", internet_pdf), ("AWS S3", s3_pdf),
 # MAGIC `block_threat_domains` (widget `3c`): `off` (none); `matched_only` (block observed FQDNs that
 # MAGIC appear on a suspicious-domain feed); `all` (block the whole feed, capped). Blocked destinations
 # MAGIC are enforced in any mode and take precedence over allows — a lightweight way to block known-bad
-# MAGIC domains. The feed is chosen by widget `3d` (`threat_feed`); all are free and need no API key.
+# MAGIC domains. The feed (widget `3d`, `threat_feed`) is abuse.ch **ThreatFox** botnet-C2 IOCs — free,
+# MAGIC no API key, and the closest fit for exfil (the C2 hosts compromised nodes talk to).
 
 # COMMAND ----------
 
 # DBTITLE 1,Build blocked domains
-# Threat-domain feed registry — each entry is (url, line->host parser). All free, no key. Both are
-# abuse.ch feeds; neither is an ad-blocking list (those are the wrong tool for exfil/C2 blocking).
-#  - threatfox : ThreatFox hostfile (~49k). Entries are IOCs tagged botnet_cc — i.e. malware
+# Threat-domain feed registry — each entry is (url, line->host parser). Free, no key. Not an
+# ad-blocking list (those are the wrong tool for exfil/C2 blocking).
+#  - threatfox : abuse.ch ThreatFox hostfile (~49k). Entries are IOCs tagged botnet_cc — i.e. malware
 #    command-and-control / exfil infrastructure. Best match for the data-exfil use case.
-#  - urlhaus   : malware-filter URLhaus online domains (~500). Malware *download* hosts (threat=
-#    malware_download) — where malware is fetched from, not where data is exfiltrated to. Weaker
-#    signal for this use case, but still worth flagging if a node egresses to one.
-def _host_plain(line):
-    return line.strip().lower()
-
-
+# (URLhaus was evaluated and dropped: its threat type is 100% malware_download — payload-delivery
+# hosts, not exfil targets — and its C2-tagged slice is almost entirely IP literals, leaving ~a dozen
+# FQDNs, which is all a FQDN-only block list could ever use. Add more feeds here if a better fit
+# emerges; keep them FQDN-oriented and exfil/C2-relevant.)
 def _host_hostfile(line):  # '0.0.0.0 host' / '127.0.0.1 host'
     parts = line.split()
     return parts[1].lower() if len(parts) == 2 else ""
@@ -469,7 +468,6 @@ def _host_hostfile(line):  # '0.0.0.0 host' / '127.0.0.1 host'
 
 THREAT_FEEDS = {
     "threatfox": ("https://threatfox.abuse.ch/downloads/hostfile/", _host_hostfile),
-    "urlhaus": ("https://malware-filter.gitlab.io/malware-filter/urlhaus-filter-domains-online.txt", _host_plain),
 }
 
 

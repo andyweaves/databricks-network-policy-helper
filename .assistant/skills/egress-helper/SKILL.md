@@ -37,11 +37,12 @@ If the table is empty, no egress policy is logging yet — start with step 1.
 4. **Review tables** (internet + per-cloud storage) — confirm before creating.
 5. Optional **threat-intel domain blocking** (`block_threat_domains`: off / matched_only / all) →
    `blocked_internet_destinations` (FQDN-only, enforced in any mode, takes precedence over allows).
-   Feed chosen by `threat_feed` (all free, no key): `threatfox` (abuse.ch ThreatFox botnet-C2 IOCs
-   — the best fit for the exfil use case, since these are attacker-controlled command-and-control
-   hosts — default) or `urlhaus` (abuse.ch URLhaus malware-download hosts — distribution infra, a
-   weaker signal for exfil). `matched_only` (block only observed FQDNs that appear on the feed) is
-   the sensible default given the 100-FQDN cap.
+   Feed (`threat_feed`, free/no key): `threatfox` — abuse.ch ThreatFox botnet-C2 IOCs, the best fit
+   for the exfil use case since these are attacker-controlled command-and-control hosts. (URLhaus was
+   dropped: its entries are 100% malware-*download* hosts — payload delivery, the wrong direction —
+   and its C2-tagged slice is almost all IP literals, leaving ~a dozen FQDNs a FQDN-only block list
+   could use.) `matched_only` (block only observed FQDNs that appear on the feed) is the sensible
+   default given the 100-FQDN cap.
 
    > **What actually stops data exfiltration** (e.g. a LiteLLM-style credential/data leak to an
    > attacker server) is the RESTRICTED_ACCESS allow-list itself: with egress enforced, traffic to
