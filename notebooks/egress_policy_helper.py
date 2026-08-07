@@ -80,6 +80,9 @@ dbutils.widgets.text("account_secret_key", "", "4e. Secret key for SP secret")
 # --- Create (gated) ---
 dbutils.widgets.dropdown("create_policy", "false", ["true", "false"], "5a. Create the policy?")
 dbutils.widgets.dropdown("auto_assign", "false", ["true", "false"], "5b. Auto-assign to this workspace?")
+# Safety gate: you must set this to true (after reviewing the proposed rules) before the create cell
+# will run. Forces a look at what would be allowed/blocked.
+dbutils.widgets.dropdown("reviewed_rules", "false", ["true", "false"], "5c. I've reviewed the rules")
 
 LOOKBACK_DAYS = int(dbutils.widgets.get("lookback_days"))
 MIN_EVENTS = int(dbutils.widgets.get("min_events"))
@@ -97,6 +100,7 @@ ACCOUNT_SECRET_SCOPE = dbutils.widgets.get("account_secret_scope").strip()
 ACCOUNT_SECRET_KEY = dbutils.widgets.get("account_secret_key").strip()
 CREATE_POLICY = dbutils.widgets.get("create_policy") == "true"
 AUTO_ASSIGN = dbutils.widgets.get("auto_assign") == "true"
+REVIEWED_RULES = dbutils.widgets.get("reviewed_rules") == "true"
 
 # Databricks egress policy limits (warn + cap so proposals stay valid).
 MAX_INTERNET_DESTINATIONS = 100     # FQDNs (allow or block) per policy
@@ -504,6 +508,12 @@ if BLOCK_THREAT_DOMAINS != "off":
               f"keeping the first {MAX_INTERNET_DESTINATIONS}. Use matched_only to narrow.")
         blocked_domains = blocked_domains[:MAX_INTERNET_DESTINATIONS]
     print(f"will block {len(blocked_domains)} domain(s).")
+    if blocked_domains:
+        blocked_pdf = pd.DataFrame(
+            [{"blocked_domain": d, "feed": THREAT_FEED,
+              "observed_in_egress": d in all_internet_fqdns} for d in blocked_domains]
+        )
+        display(blocked_pdf)
 else:
     print("Domain blocking off.")
 
@@ -580,6 +590,29 @@ else:
               f"{min(len(t['internet']), MAX_INTERNET_DESTINATIONS)} internet allow, "
               f"{n_store} storage allow, {len(blocked_domains)} blocked ===")
         print(json.dumps({"egress": egress_blocks[tgt].as_dict()}, indent=2))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## ⚠️ Review checkpoint
+# MAGIC
+# MAGIC **Stop and review the proposed egress rules above** (allowed internet/storage destinations and
+# MAGIC any blocked domains) before creating anything. When you're satisfied, set the
+# MAGIC **`reviewed_rules`** widget (`5c`) to `true` — the create cell will refuse to run until you do.
+
+# COMMAND ----------
+
+# DBTITLE 1,Review gate — must confirm before create
+# Only gates an actual create attempt: if you're creating (not under the combiner) you must have
+# reviewed. Propose-only runs (create_policy=false) pass through freely.
+if CREATE_POLICY and not globals().get("_COMBINED_RUN", False) and not REVIEWED_RULES:
+    raise Exception(
+        "STOP — review the proposed egress rules above (internet + storage allows, blocked domains) "
+        "before creating the policy. When satisfied, set widget '5c. I've reviewed the rules' to "
+        "true and re-run. (This gate only triggers when create_policy=true.)"
+    )
+print("Review gate passed." if (CREATE_POLICY and REVIEWED_RULES) else
+      "Review gate not required (propose-only run).")
 
 # COMMAND ----------
 

@@ -158,6 +158,8 @@ dbutils.widgets.text("account_secret_key", "", "4e. Secret key for SP secret")
 # generated <prefix>-... name on re-run). auto_assign then binds the relevant workspace(s) to it.
 dbutils.widgets.dropdown("create_policy", "false", ["true", "false"], "5a. Create the policy?")
 dbutils.widgets.dropdown("auto_assign", "false", ["true", "false"], "5b. Auto-assign to workspace(s)?")
+# Safety gate: set true (after reviewing the proposed rules) before the create cell will run.
+dbutils.widgets.dropdown("reviewed_rules", "false", ["true", "false"], "5c. I've reviewed the rules")
 # Basic egress policy applied only when CREATING a new policy (existing policies keep their egress).
 # allow_all = FULL_ACCESS; dry_run = RESTRICTED_ACCESS + log-only for all products; restricted =
 # RESTRICTED_ACCESS + enforced (configure allowed destinations yourself afterwards).
@@ -222,6 +224,7 @@ ACCOUNT_SECRET_KEY = dbutils.widgets.get("account_secret_key").strip()
 
 CREATE_POLICY = dbutils.widgets.get("create_policy") == "true"
 AUTO_ASSIGN = dbutils.widgets.get("auto_assign") == "true"
+REVIEWED_RULES = dbutils.widgets.get("reviewed_rules") == "true"
 EGRESS_POLICY = dbutils.widgets.get("egress_policy")  # allow_all | dry_run | restricted
 
 
@@ -299,6 +302,7 @@ _decisions = pd.DataFrame([
     ("5a. create_policy", CREATE_POLICY,
      "Master switch: create the account network policy (idempotent). dry_run mode is the safeguard."),
     ("5b. auto_assign", AUTO_ASSIGN, "Bind the relevant workspace(s) to the created policy."),
+    ("5c. reviewed_rules", REVIEWED_RULES, "Must be true (after reviewing the proposed rules) before create runs."),
     ("5c. egress_policy", EGRESS_POLICY,
      "Egress set on CREATE only: allow_all=FULL_ACCESS; dry_run=restricted+log-only; restricted=enforced."),
 ], columns=["widget", "value", "meaning"])
@@ -1872,6 +1876,29 @@ _policy_explainer = pd.DataFrame([
 ])
 print("\nAccount network policy anatomy:")
 display(_policy_explainer)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## ⚠️ Review checkpoint
+# MAGIC
+# MAGIC **Stop and review the proposed ingress rules above** (the allow-list CIDRs, any scoping, the
+# MAGIC threat-match table, and the JSON preview) before creating anything. When satisfied, set the
+# MAGIC **`reviewed_rules`** widget (`5c`) to `true` — the create cell refuses to run until you do.
+
+# COMMAND ----------
+
+# DBTITLE 1,Review gate — must confirm before create
+# Only gates an actual create attempt. Propose-only runs (create_policy=false) and combined runs
+# (the combiner does its own review/gate) pass through.
+if CREATE_POLICY and not globals().get("_COMBINED_RUN", False) and not REVIEWED_RULES:
+    raise Exception(
+        "STOP — review the proposed ingress rules above (allow-list CIDRs, scoping, threat matches, "
+        "JSON preview) before creating the policy. When satisfied, set widget '5c. I've reviewed the "
+        "rules' to true and re-run. (This gate only triggers when create_policy=true.)"
+    )
+print("Review gate passed." if (CREATE_POLICY and REVIEWED_RULES) else
+      "Review gate not required (propose-only run).")
 
 # COMMAND ----------
 

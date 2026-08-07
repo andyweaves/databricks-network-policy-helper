@@ -44,8 +44,10 @@ _COMBINED_RUN = True
 # force the children to propose-only by overriding their create_policy after they run.
 dbutils.widgets.dropdown("create_policy", "false", ["true", "false"], "Z1. Create the merged policy?")
 dbutils.widgets.dropdown("auto_assign", "false", ["true", "false"], "Z2. Auto-assign to workspace(s)?")
+dbutils.widgets.dropdown("reviewed_rules", "false", ["true", "false"], "Z3. I've reviewed the rules")
 CREATE_POLICY = dbutils.widgets.get("create_policy") == "true"
 AUTO_ASSIGN = dbutils.widgets.get("auto_assign") == "true"
+REVIEWED_RULES = dbutils.widgets.get("reviewed_rules") == "true"
 
 # COMMAND ----------
 
@@ -131,6 +133,25 @@ for tgt in all_targets:
     label = "single (all workspaces)" if tgt == _ALL else f"workspace {tgt}"
     print(f"\n=== {label} → policy '{pid}' ===")
     print(json.dumps(pol.as_dict(), indent=2))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## ⚠️ Review checkpoint
+# MAGIC
+# MAGIC **Review the merged ingress + egress policy(ies) above** before creating. Set `reviewed_rules`
+# MAGIC (Z3) to `true` when satisfied — the create cell refuses to run until you do.
+
+# COMMAND ----------
+
+# DBTITLE 1,Review gate — must confirm before create
+if CREATE_POLICY and not REVIEWED_RULES:
+    raise Exception(
+        "STOP — review the merged ingress + egress policy(ies) above before creating. When "
+        "satisfied, set widget 'Z3. I've reviewed the rules' to true and re-run."
+    )
+print("Review gate passed." if (CREATE_POLICY and REVIEWED_RULES) else
+      "Review gate not required (propose-only run).")
 
 # COMMAND ----------
 
