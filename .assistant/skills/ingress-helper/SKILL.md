@@ -132,7 +132,6 @@ those files back in the repo / the git folder it was installed from.
 - `docs/threat-intel-feeds.md` — the enrichment feeds, what each represents, licensing.
 - `docs/cbi-sdk-schema.md` — the verified `AccountNetworkPolicy` SDK object model.
 - `docs/account-admin-setup.md` — account-admin SP + secret-scope setup.
-- `docs/egress-fqdns.md` — external hosts to allow when behind egress controls / SEG.
 
 ## Engine & helper (repo root)
 
