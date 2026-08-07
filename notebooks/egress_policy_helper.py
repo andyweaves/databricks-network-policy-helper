@@ -206,10 +206,12 @@ display(observed_egress)
 # MAGIC ## Classify destinations (storage vs internet FQDN)
 # MAGIC
 # MAGIC Regex-classifies each destination host:
-# MAGIC - **S3** `<bucket>.s3.<region>.amazonaws.com` → storage rule (bucket + region from the host).
+# MAGIC - **S3** `<bucket>.s3[.<region>].amazonaws.com` → storage rule (bucket + region from the host;
+# MAGIC   the global endpoint `<bucket>.s3.amazonaws.com` has no region in the host, so region is left
+# MAGIC   unset — still a valid bucket rule).
 # MAGIC - **GCS** `[<bucket>.]storage.googleapis.com` → storage rule.
 # MAGIC - **Azure** `<account>.<blob|dfs|file>.core.windows.net` → storage rule (account + service).
-# MAGIC - Bare `s3.<region>.amazonaws.com` (no bucket) → **skipped** (too broad to be a useful rule).
+# MAGIC - Bare `s3[.<region>].amazonaws.com` (**no bucket**) → **skipped** (too broad to be a useful rule).
 # MAGIC - Everything else → **internet FQDN** allow rule.
 
 # COMMAND ----------
@@ -271,8 +273,11 @@ skipped_bare_s3 = 0
 for r in observed_egress.toPandas().to_dict(orient="records"):
     kind, info = _classify(r["destination"])
     events = int(r["events"])
-    if kind == "s3" and info.get("region"):
-        key, bucketname = ("s3", (info["bucket"], info["region"]))
+    if kind == "s3":
+        # region may be None for the global endpoint <bucket>.s3.amazonaws.com — that's still a valid
+        # bucket rule (region is optional in the egress schema), so keep it. "" normalises None so it
+        # keys the dict cleanly; the builder turns "" back into None.
+        key, bucketname = ("s3", (info["bucket"], info.get("region") or ""))
     elif kind == "gcs":
         key, bucketname = ("gcs", info["bucket"])
     elif kind == "azure":
@@ -588,7 +593,8 @@ def _build_egress_block(t):
 
     storage = []
     for (bucket, region) in t["s3"]:
-        storage.append(StorDest(bucket_name=bucket, region=region, storage_destination_type=StorType.AWS_S3))
+        storage.append(StorDest(bucket_name=bucket, region=region or None,
+                                storage_destination_type=StorType.AWS_S3))
     for bucket in t["gcs"]:
         storage.append(StorDest(bucket_name=bucket, storage_destination_type=StorType.GOOGLE_CLOUD_STORAGE))
     for (acct, svc) in t["azure"]:
