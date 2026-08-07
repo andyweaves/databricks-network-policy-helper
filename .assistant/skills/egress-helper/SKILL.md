@@ -8,7 +8,7 @@ description: Propose and apply a Databricks serverless egress (SEG) network-poli
 Builds a Databricks **account network policy egress** allow-list from observed outbound traffic. The
 engine is `notebooks/egress_policy_helper.py` in the databricks-network-policy-helper repo.
 
-For **ingress** (source-IP allow-lists) use `cbi-helper`; to build a full ingress+egress policy in
+For **ingress** (source-IP allow-lists) use `ingress-helper`; to build a full ingress+egress policy in
 one go, use `full-policy-helper` (if present).
 
 ## The dry-run-observe loop (important)

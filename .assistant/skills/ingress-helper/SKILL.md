@@ -1,5 +1,5 @@
 ---
-name: cbi-helper
+name: ingress-helper
 description: Suggest and optionally apply Databricks Context-Based Ingress (CBI) network-policy allow-lists from real audit-log traffic. Use when the user wants to build/suggest a context-based ingress policy, tighten inbound network access, allow-list source IPs, analyse who connects to a workspace and from where, or turn system.access.audit logs into a CBI / account network-policy proposal. Analyses public source IPs carrying successful traffic, enriches them with open threat-intelligence and cloud-provider ranges plus RDAP ownership, proposes minimal/optimal/maximum CIDR framings optionally scoped by destination (Apps/Lakebase) and identity (users/SPs), and can write the result into a network policy's dry-run (log-only) or enforced ingress block via the Databricks SDK.
 ---
 
@@ -9,9 +9,12 @@ Turn real `system.access.audit` traffic into a proposed **Context-Based Ingress 
 for a Databricks **account network policy**, with threat-intel + cloud-range enrichment, optional
 destination/identity scoping, and a safe dry-run-first apply path.
 
-The engine is the notebook `notebooks/audit_log_cbi.py` at the repo root. This skill helps deploy it,
-run it with sensible parameters, and review/apply a policy responsibly. Paths below are relative to
-this skill folder (`.assistant/skills/cbi-helper/`).
+The engine is the notebook `notebooks/ingress_policy_helper.py` at the repo root. This skill helps
+deploy it, run it with sensible parameters, and review/apply a policy responsibly. Paths below are
+relative to this skill folder (`.assistant/skills/ingress-helper/`).
+
+For **egress** (outbound allow-lists) use `egress-helper`; to review how a *running* ingress policy
+is performing (what it's denying, rules to add), use `ingress-checker`.
 
 ## When to use
 
@@ -36,7 +39,7 @@ trial an ingress policy in dry-run before enforcing.
    principal via OAuth M2M with its secret in a secret scope. See `docs/account-admin-setup.md`.
 2. **Deploy the notebook** into the workspace:
    `python scripts/deploy_notebook.py --profile <cli-profile> --overwrite`
-   (imports `notebooks/audit_log_cbi.py`; pass `--path` to choose the destination).
+   (imports `notebooks/ingress_policy_helper.py`; pass `--path` to choose the destination).
 3. **Set parameters** — every decision is a widget at the top of the notebook (see its
    "Parameters & decisions" table). Key ones: `lookback_days`, `min_events`, `threat_feeds`,
    `scoping_mode`, `policy_framing`, `policy_mode`, and the account-auth group (auto-detected when
@@ -130,9 +133,8 @@ those files back in the repo / the git folder it was installed from.
 - `docs/cbi-sdk-schema.md` — the verified `AccountNetworkPolicy` SDK object model.
 - `docs/account-admin-setup.md` — account-admin SP + secret-scope setup.
 - `docs/egress-fqdns.md` — external hosts to allow when behind egress controls / SEG.
-- `genie/genie-space-spec.md` — spec for a backing AI/BI Genie space (build once tables persist).
 
 ## Engine & helper (repo root)
 
-- `notebooks/audit_log_cbi.py` — the analysis + proposal + apply notebook (source of truth).
+- `notebooks/ingress_policy_helper.py` — the analysis + proposal + apply notebook (source of truth).
 - `scripts/deploy_notebook.py` — import/update the notebook into a workspace via the CLI.

@@ -3,7 +3,7 @@
 # MAGIC # Full Network Policy Helper (ingress + egress)
 # MAGIC
 # MAGIC Combines the **ingress** (CBI) and **egress** (SEG) helpers into a single account network
-# MAGIC policy. It `%run`s `audit_log_cbi` and `egress_policy_helper` (both in **propose-only** mode —
+# MAGIC policy. It `%run`s `ingress_policy_helper` and `egress_policy_helper` (both in **propose-only** mode —
 # MAGIC they build their rules but don't create anything), then **merges** ingress + egress per policy
 # MAGIC target and creates one policy each.
 # MAGIC
@@ -62,7 +62,7 @@ REVIEWED_RULES = dbutils.widgets.get("reviewed_rules") == "true"
 
 # COMMAND ----------
 
-# MAGIC %run ./audit_log_cbi
+# MAGIC %run ./ingress_policy_helper
 
 # COMMAND ----------
 

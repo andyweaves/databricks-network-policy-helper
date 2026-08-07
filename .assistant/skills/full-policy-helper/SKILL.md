@@ -1,6 +1,6 @@
 ---
 name: full-policy-helper
-description: Build a complete Databricks account network policy — both ingress (CBI) and egress (SEG) — from observed traffic, in one go. Use when the user wants a full network policy from scratch, both inbound and outbound rules, or to combine the ingress and egress helpers into a single policy. Runs the ingress (audit_log_cbi) and egress (egress_policy_helper) analyses, merges their rules per workspace target, and creates one policy each (dry-run or enforce).
+description: Build a complete Databricks account network policy — both ingress (CBI) and egress (SEG) — from observed traffic, in one go. Use when the user wants a full network policy from scratch, both inbound and outbound rules, or to combine the ingress and egress helpers into a single policy. Runs the ingress (ingress_policy_helper) and egress (egress_policy_helper) analyses, merges their rules per workspace target, and creates one policy each (dry-run or enforce).
 ---
 
 # Full Network Policy Helper (ingress + egress)
@@ -9,12 +9,12 @@ Combines the **ingress** (CBI, from `system.access.audit` source IPs) and **egre
 `system.access.outbound_network` destinations) helpers into a single account network policy. The
 engine is `notebooks/full_policy_helper.py` in the databricks-network-policy-helper repo.
 
-Use `cbi-helper` or `egress-helper` alone if you only need one direction.
+Use `ingress-helper` or `egress-helper` alone if you only need one direction.
 
 ## How it works
 
 1. Installs the SDK + restarts **once**, then sets `_COMBINED_RUN = True`.
-2. `%run`s `audit_log_cbi` and `egress_policy_helper` — both in **propose-only** mode (they build
+2. `%run`s `ingress_policy_helper` and `egress_policy_helper` — both in **propose-only** mode (they build
    their rule structures but skip their own restart and create cells because `_COMBINED_RUN` is set).
 3. **Merges** per policy target: the ingress block (into `ingress` or `ingress_dry_run` per
    `policy_mode`) + the egress block go onto one `AccountNetworkPolicy`.
