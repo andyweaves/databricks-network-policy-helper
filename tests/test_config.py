@@ -16,6 +16,12 @@ def test_ingress_scope_properties():
     assert IngressConfig(scoping_mode="ip_and_destination").scope_destination
 
 
+def test_include_account_level_defaults_false():
+    # Account-level (workspace_id=0) rows are account console / SCIM traffic, not workspace-scoped,
+    # so they're excluded by default.
+    assert IngressConfig().include_account_level is False
+
+
 def test_policy_mode_target_maps_to_block():
     assert IngressConfig(policy_mode="dry_run").policy_mode_target == "ingress_dry_run"
     assert IngressConfig(policy_mode="enforce").policy_mode_target == "ingress"

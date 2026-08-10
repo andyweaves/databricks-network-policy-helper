@@ -128,14 +128,17 @@ def test_frequent_public_ips_predicate_toggles():
                                             treat_null_status_as_success=False,
                                             include_account_level=False)
     assert "ip_version = 6" not in q_default
-    assert "workspace_id <> 0" in q_default
+    # workspace_id is a STRING column -> compare against '0', not the integer 0.
+    assert "CAST(workspace_id AS STRING) <> '0'" in q_default
+    assert "workspace_id <> 0" not in q_default
     assert "status_code IS NULL AND FALSE" in q_default
 
     q_all = queries.frequent_public_ips(7, 5, include_ipv6=True,
                                         treat_null_status_as_success=True,
                                         include_account_level=True)
     assert "OR ip_version = 6" in q_all
-    assert "workspace_id <> 0" not in q_all
+    # the account-level filter predicate is omitted when including account-level rows
+    assert "CAST(workspace_id AS STRING) <> '0'" not in q_all
     assert "status_code IS NULL AND TRUE" in q_all
     assert "INTERVAL 7 DAYS" in q_all
     assert "COUNT(*) >= 5" in q_all

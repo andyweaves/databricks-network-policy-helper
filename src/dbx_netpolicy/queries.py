@@ -64,8 +64,10 @@ def candidate_funnel(lookback_days: int, treat_null_status_as_success: bool) -> 
       SUM(CASE WHEN normalized_ip IS NOT NULL
                AND (status_code < 400 OR (status_code IS NULL AND {null_status_ok}))
                THEN 1 ELSE 0 END) AS successful,
-      SUM(CASE WHEN normalized_ip IS NOT NULL AND workspace_id <> 0 THEN 1 ELSE 0 END) AS workspace_level,
-      SUM(CASE WHEN normalized_ip IS NOT NULL AND workspace_id = 0 THEN 1 ELSE 0 END) AS account_level,
+      SUM(CASE WHEN normalized_ip IS NOT NULL AND CAST(workspace_id AS STRING) <> '0'
+               THEN 1 ELSE 0 END) AS workspace_level,
+      SUM(CASE WHEN normalized_ip IS NOT NULL AND CAST(workspace_id AS STRING) = '0'
+               THEN 1 ELSE 0 END) AS account_level,
       SUM(CASE WHEN normalized_ip IS NOT NULL AND ip_version = 4 AND {_NOT_PRIVATE}
                THEN 1 ELSE 0 END) AS public_ipv4,
       COUNT(DISTINCT CASE WHEN normalized_ip IS NOT NULL AND ip_version = 4 AND {_NOT_PRIVATE}
@@ -73,7 +75,7 @@ def candidate_funnel(lookback_days: int, treat_null_status_as_success: bool) -> 
                THEN normalized_ip END) AS distinct_public_ok,
       COUNT(DISTINCT CASE WHEN normalized_ip IS NOT NULL AND ip_version = 4 AND {_NOT_PRIVATE}
                AND (status_code < 400 OR (status_code IS NULL AND {null_status_ok}))
-               AND workspace_id <> 0
+               AND CAST(workspace_id AS STRING) <> '0'
                THEN normalized_ip END) AS distinct_public_ok_ws
     FROM a
     """
@@ -122,7 +124,9 @@ def principal_network_diversity(lookback_days: int) -> str:
 def frequent_public_ips(lookback_days: int, min_events: int, include_ipv6: bool,
                         treat_null_status_as_success: bool, include_account_level: bool) -> str:
     ipv6_predicate = "OR ip_version = 6" if include_ipv6 else ""
-    account_level_predicate = "" if include_account_level else "AND workspace_id <> 0"
+    # workspace_id is a STRING column in system.access.audit; comparing to the integer 0 matches no
+    # rows (silently excluding all workspace-level traffic), so compare against the string '0'.
+    account_level_predicate = "" if include_account_level else "AND CAST(workspace_id AS STRING) <> '0'"
     null_status_ok = "TRUE" if treat_null_status_as_success else "FALSE"
     return f"""
     WITH audit_recent AS ({_AUDIT_RECENT.format(lookback_days=lookback_days)}),
