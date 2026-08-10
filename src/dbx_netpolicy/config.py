@@ -45,7 +45,7 @@ class Connection:
     profile: str | None = None
     warehouse_http_path: str | None = None
     # When no warehouse path is given, the CLI reuses/creates a serverless warehouse; store its name.
-    warehouse_name: str = "dbx-netpolicy"
+    warehouse_name: str = "dbx-nwp-helper"
     account_id: str = ""
     account_host: str = DEFAULT_ACCOUNT_HOST
     # A workspace OAuth session can't call the account API, so the account client uses its own
@@ -78,7 +78,7 @@ class IngressConfig:
     # Policy shape
     policy_framing: str = "minimal"
     scoping_mode: str = "ip_only"
-    policy_scope: str = "single"
+    policy_scope: str = "per_workspace"
     policy_mode: str = "dry_run"
     threat_deny_rules: str = "off"
     name_prefix: str = DEFAULT_NAME_PREFIX
@@ -108,7 +108,7 @@ class EgressConfig:
     refresh_feeds: bool = False
     name_prefix: str = DEFAULT_NAME_PREFIX
     policy_mode: str = "dry_run"
-    policy_scope: str = "single"
+    policy_scope: str = "per_workspace"
     block_threat_domains: str = "off"
     threat_feed: str = "threatfox"
     apply: ApplyOptions = field(default_factory=ApplyOptions)

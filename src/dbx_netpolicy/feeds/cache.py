@@ -18,9 +18,9 @@ CACHE_TTL_SECONDS = 24 * 3600  # feeds refresh daily by default
 
 
 def cache_dir() -> Path:
-    """Platform cache dir: $XDG_CACHE_HOME or ~/.cache, under dbx-netpolicy."""
+    """Platform cache dir: $XDG_CACHE_HOME or ~/.cache, under dbx-nwp-helper."""
     base = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
-    d = Path(base) / "dbx-netpolicy" / "feeds"
+    d = Path(base) / "dbx-nwp-helper" / "feeds"
     d.mkdir(parents=True, exist_ok=True)
     return d
 

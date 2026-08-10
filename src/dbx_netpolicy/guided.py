@@ -1,6 +1,6 @@
 """The guided Q&A wizard.
 
-`dbx-netpolicy guided` — point it at a workspace (a profile, optionally a warehouse) and it walks the
+`dbx-nwp-helper guided` — point it at a workspace (a profile, optionally a warehouse) and it walks the
 user through building an ingress / egress / ACL-migration policy with questionary prompts, using the
 same choice sets as the flags (config.py) and the same run flow as the flag commands (cli._run_*). It
 always ends propose-only by default; the user opts into a write and mode via prompts, then the shared
@@ -63,7 +63,7 @@ def _int(message: str, default: int) -> int:
 def run_wizard(conn: Connection) -> None:
     from .cli import _run_acl, _run_egress, _run_ingress
 
-    console.title_panel("dbx-netpolicy — guided setup",
+    console.title_panel("dbx-nwp-helper — guided setup",
                         "Answer a few questions; I'll analyse traffic and propose a policy.")
 
     direction = _select(
@@ -94,7 +94,7 @@ def _ingress_wizard(conn: Connection) -> IngressConfig:
     min_events = _int("Minimum successful events for an IP to be a candidate?", 1)
     framing = _select("CIDR framing?", POLICY_FRAMINGS, default="minimal")
     scoping = _select("Scoping mode?", SCOPING_MODES, default="ip_only")
-    scope = _select("Policy scope?", POLICY_SCOPES, default="single")
+    scope = _select("Policy scope?", POLICY_SCOPES, default="per_workspace")
     enable_rdap = framing == "maximum" or _confirm("Do RDAP owner lookups (external calls)?", True)
     all_feeds = _confirm("Use all threat-intel feeds?", True)
     feeds = list(THREAT_FEEDS) if all_feeds else (questionary.checkbox(
@@ -118,7 +118,7 @@ def _egress_wizard(conn: Connection) -> EgressConfig:
     lookback = _int("How many days of outbound_network history to analyse?", 30)
     min_events = _int("Minimum events per destination?", 1)
     src_filter = _text("network_source_type filter (blank = all)")
-    scope = _select("Policy scope?", POLICY_SCOPES, default="single")
+    scope = _select("Policy scope?", POLICY_SCOPES, default="per_workspace")
     enable_rdap = _confirm("Look up the cloud owner of internet FQDNs?", True)
     block = _select("Block known-bad domains from a threat feed?", BLOCK_THREAT_DOMAINS, default="off")
     name_prefix = _text("Name prefix for the policy?", "np-helper")

@@ -1,4 +1,4 @@
-"""dbx-netpolicy — build Databricks account network policies from real observed traffic.
+"""dbx-nwp-helper — build Databricks account network policies from real observed traffic.
 
 A visually engaging CLI that turns `system.access.audit` / `system.access.outbound_network`
 traffic into proposed context-based ingress (CBI) and serverless egress (SEG) allow-lists, and

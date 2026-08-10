@@ -1,6 +1,6 @@
 ---
 name: ingress-helper
-description: Suggest and optionally apply Databricks Context-Based Ingress (CBI) network-policy allow-lists from real audit-log traffic, using the dbx-netpolicy CLI. Use when the user wants to build/suggest a context-based ingress policy, tighten inbound network access, allow-list source IPs, analyse who connects to a workspace and from where, or turn system.access.audit logs into a CBI / account network-policy proposal. Runs `dbx-netpolicy ingress` (or the guided wizard), which analyses public source IPs carrying successful traffic, enriches them with open threat-intelligence and cloud-provider ranges plus RDAP ownership, proposes minimal/optimal/maximum CIDR framings optionally scoped by destination (Apps/Lakebase) and identity (users/SPs), and can write the result into a network policy's dry-run (log-only) or enforced ingress block via the Databricks SDK.
+description: Suggest and optionally apply Databricks Context-Based Ingress (CBI) network-policy allow-lists from real audit-log traffic, using the dbx-nwp-helper CLI. Use when the user wants to build/suggest a context-based ingress policy, tighten inbound network access, allow-list source IPs, analyse who connects to a workspace and from where, or turn system.access.audit logs into a CBI / account network-policy proposal. Runs `dbx-nwp-helper ingress` (or the guided wizard), which analyses public source IPs carrying successful traffic, enriches them with open threat-intelligence and cloud-provider ranges plus RDAP ownership, proposes minimal/optimal/maximum CIDR framings optionally scoped by destination (Apps/Lakebase) and identity (users/SPs), and can write the result into a network policy's dry-run (log-only) or enforced ingress block via the Databricks SDK.
 ---
 
 # Context-Based Ingress (CBI) Helper
@@ -9,7 +9,7 @@ Turn real `system.access.audit` traffic into a proposed **Context-Based Ingress 
 for a Databricks **account network policy**, with threat-intel + cloud-range enrichment, optional
 destination/identity scoping, and a safe dry-run-first apply path.
 
-The engine is the **`dbx-netpolicy`** CLI (this repo). This skill helps run it with sensible
+The engine is the **`dbx-nwp-helper`** CLI (this repo). This skill helps run it with sensible
 parameters and review/apply a policy responsibly.
 
 For **egress** (outbound allow-lists) use `egress-helper`. To end up with a combined ingress + egress
@@ -24,8 +24,8 @@ trial an ingress policy in dry-run before enforcing.
 
 ## Setup
 
-The CLI is a uv project. From a checkout: `uv sync`, then run via `uv run dbx-netpolicy …` (or
-`uv tool install .` to expose `dbx-netpolicy` on PATH).
+The CLI is a uv project. From a checkout: `uv sync`, then run via `uv run dbx-nwp-helper …` (or
+`uv tool install .` to expose `dbx-nwp-helper` on PATH).
 
 - **Auth** is the Databricks SDK's unified auth — pass `--profile <name>` (a `~/.databrickscfg`
   profile) or set `DATABRICKS_*` env vars. Analysis needs only workspace read on
@@ -34,7 +34,7 @@ The CLI is a uv project. From a checkout: `uv sync`, then run via `uv run dbx-ne
   service principal via OAuth M2M in the same profile). See `docs/account-admin-setup.md`.
 - **SQL warehouse**: the CLI queries the system tables through a SQL warehouse. Pass
   `--warehouse-http-path` to use a specific one; otherwise it reuses (or creates) a small serverless
-  warehouse named `dbx-netpolicy`.
+  warehouse named `dbx-nwp-helper`.
 
 ## Safety model — read first
 
@@ -52,14 +52,14 @@ The CLI is a uv project. From a checkout: `uv sync`, then run via `uv run dbx-ne
 
 1. **Propose-only first** (no `--create-policy`):
    ```bash
-   uv run dbx-netpolicy ingress --profile <profile> --lookback-days 30
+   uv run dbx-nwp-helper ingress --profile <profile> --lookback-days 30
    ```
    This runs the analysis, prints the candidate IPs, ranked CIDR suggestions, the ⚠️ threat-match
    table, and the JSON policy preview — writing nothing.
 2. **Review** the proposal with the user: framing, scoping, mode, and the exact CIDRs.
 3. **Apply (gated)** — only with explicit go-ahead, add `--create-policy` (defaults to `dry_run`)
    and, when ready, `--policy-mode enforce`. Add `--auto-assign` to bind the workspace(s).
-4. Or run **`uv run dbx-netpolicy guided --profile <profile>`** for a structured Q&A wizard that
+4. Or run **`uv run dbx-nwp-helper guided --profile <profile>`** for a structured Q&A wizard that
    walks the user through the same choices interactively.
 
 ## CIDR framings (`--policy-framing`)
@@ -113,7 +113,7 @@ allow rules, a catch-all allow is added so non-denied traffic is still permitted
 
 ## Feeds
 
-Enrichment feeds are cached locally with a TTL. `dbx-netpolicy feeds list` shows the cache;
+Enrichment feeds are cached locally with a TTL. `dbx-nwp-helper feeds list` shows the cache;
 `feeds refresh` forces a re-download; the analysis commands accept `--refresh-feeds`.
 
 ## References

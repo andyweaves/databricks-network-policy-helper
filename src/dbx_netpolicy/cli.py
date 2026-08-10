@@ -1,4 +1,4 @@
-"""dbx-netpolicy — the Typer CLI.
+"""dbx-nwp-helper — the Typer CLI.
 
 Commands:
   ingress       Build/apply a context-based ingress (CBI) allow-list from audit-log source IPs.
@@ -207,7 +207,8 @@ def ingress(
     refresh_feeds: bool = typer.Option(False, help="Force re-download of cached feeds."),
     policy_framing: Framing = typer.Option(Framing.minimal, help="CIDR framing."),
     scoping_mode: Scoping = typer.Option(Scoping.ip_only, help="Destination/identity scoping."),
-    policy_scope: Scope = typer.Option(Scope.single, help="One policy, or one per workspace."),
+    policy_scope: Scope = typer.Option(
+        Scope.per_workspace, help="Per-workspace policy (default) or a single policy for all."),
     policy_mode: Mode = typer.Option(Mode.dry_run, help="dry_run=log-only; enforce=blocking."),
     threat_deny_rules: ThreatDeny = typer.Option(ThreatDeny.off, help="Threat-intel deny rules."),
     name_prefix: str = typer.Option("np-helper", help="Prefix for policy names/labels."),
@@ -255,7 +256,8 @@ def egress(
     source_type_filter: str = typer.Option("", help="network_source_type filter (blank=all)."),
     enable_rdap: bool = typer.Option(True, help="Cloud-owner lookup for internet FQDNs."),
     refresh_feeds: bool = typer.Option(False, help="Force re-download of cached feeds."),
-    policy_scope: Scope = typer.Option(Scope.single, help="One policy, or one per workspace."),
+    policy_scope: Scope = typer.Option(
+        Scope.per_workspace, help="Per-workspace policy (default) or a single policy for all."),
     policy_mode: Mode = typer.Option(Mode.dry_run, help="dry_run=log-only; enforce=blocking."),
     block_threat_domains: ThreatDeny = typer.Option(
         ThreatDeny.off, help="Block known-bad domains: off/matched_only/all."),

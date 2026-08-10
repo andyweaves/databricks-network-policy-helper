@@ -82,7 +82,8 @@ def test_ingress_ip_only_dry_run(monkeypatch, candidates_df):
         return candidates_df
     monkeypatch.setattr(sqlmod, "query", fake_query)
 
-    cfg = IngressConfig(min_events=1, enable_rdap=False, policy_framing="minimal", scoping_mode="ip_only")
+    cfg = IngressConfig(min_events=1, enable_rdap=False, policy_framing="minimal",
+                        scoping_mode="ip_only", policy_scope="single")
     analysis = ing.analyze(cfg, sql_conn=None, workspace_client=_FakeWorkspaceClient())
     assert not analysis.suggestions.empty
     # threat match table should include 8.8.8.8
@@ -109,7 +110,7 @@ def test_ingress_databricks_owned_takes_precedence(monkeypatch, candidates_df):
     import dbx_netpolicy.sql as sqlmod
     monkeypatch.setattr(sqlmod, "query", lambda _c, t: (
         pd.DataFrame(columns=["source_ip"]) if "IpAccessDenied" in t else candidates_df))
-    cfg = IngressConfig(enable_rdap=False, scoping_mode="ip_only")
+    cfg = IngressConfig(enable_rdap=False, scoping_mode="ip_only", policy_scope="single")
     analysis = ing.analyze(cfg, None, _FakeWorkspaceClient())
     recs = {r["rdap_owner"]: r for _, r in analysis.suggestions.iterrows()}
     dbx_group = [r for r in recs.values() if r["databricks_owned"]]
@@ -137,7 +138,7 @@ def test_egress_classification_and_block(monkeypatch):
     ])
     import dbx_netpolicy.sql as sqlmod
     monkeypatch.setattr(sqlmod, "query", lambda _c, _t: observed)
-    cfg = EgressConfig(enable_rdap=False, block_threat_domains="off")
+    cfg = EgressConfig(enable_rdap=False, block_threat_domains="off", policy_scope="single")
     analysis = eg.analyze(cfg, None)
     assert eg.union(analysis.targets, "s3")
     assert "api.openai.com" in eg.union(analysis.targets, "internet")

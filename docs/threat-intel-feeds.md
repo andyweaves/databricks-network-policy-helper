@@ -1,8 +1,8 @@
 # Enrichment feeds
 
 All feeds are **free, need no API key/registration, and are directly downloadable over HTTPS**.
-They are selectable via the `--threat-feeds` option of `dbx-netpolicy ingress` (all on by default),
-and cached locally with a TTL (`dbx-netpolicy feeds list` / `feeds refresh`). Verify current
+They are selectable via the `--threat-feeds` option of `dbx-nwp-helper ingress` (all on by default),
+and cached locally with a TTL (`dbx-nwp-helper feeds list` / `feeds refresh`). Verify current
 licensing before any external/customer-facing distribution — terms can change.
 
 ## Threat-intelligence (`threat_intel_ips` table)

@@ -2,7 +2,7 @@
 
 > Build Databricks **account network policies** from *real observed traffic* — not guesswork.
 
-`dbx-netpolicy` is a visually engaging CLI that turns the Databricks system tables into proposed
+`dbx-nwp-helper` is a visually engaging CLI that turns the Databricks system tables into proposed
 **account network policies**, with a dry-run-first, review-gated apply path. Both directions are
 covered:
 
@@ -19,21 +19,21 @@ Requires [uv](https://docs.astral.sh/uv/) and a Databricks workspace you can aut
 
 ```bash
 uv sync                                    # set up the environment
-uv run dbx-netpolicy --help                # see all commands
+uv run dbx-nwp-helper --help                # see all commands
 
 # Propose-only (writes nothing): analyse audit traffic and preview a CBI policy
-uv run dbx-netpolicy ingress --profile <profile> --lookback-days 30
+uv run dbx-nwp-helper ingress --profile <profile> --lookback-days 30
 
 # Or let it walk you through it interactively
-uv run dbx-netpolicy guided --profile <profile>
+uv run dbx-nwp-helper guided --profile <profile>
 ```
 
-`uv tool install .` exposes `dbx-netpolicy` on your PATH so you can drop the `uv run` prefix.
+`uv tool install .` exposes `dbx-nwp-helper` on your PATH so you can drop the `uv run` prefix.
 
 **Auth** is the Databricks SDK's [unified auth](https://docs.databricks.com/dev-tools/auth) — a
 `--profile` from `~/.databrickscfg`, `DATABRICKS_*` env vars, or OAuth. Analysis needs only workspace
 read on the system tables plus a **SQL warehouse** (pass `--warehouse-http-path`, or the CLI reuses /
-creates a small serverless one named `dbx-netpolicy`). **Applying a policy or identity-scoping needs
+creates a small serverless one named `dbx-nwp-helper`). **Applying a policy or identity-scoping needs
 an account admin** — pass `--account-id` with account-admin credentials (see
 [`docs/account-admin-setup.md`](docs/account-admin-setup.md)).
 
@@ -41,11 +41,11 @@ an account admin** — pass `--account-id` with account-admin credentials (see
 
 | Command | What it does |
 |---|---|
-| 📥 `dbx-netpolicy ingress` | Propose & apply a CBI allow-list from `system.access.audit` source IPs — enriched with open threat-intel, cloud-provider and Databricks-owned IP ranges + RDAP, optionally scoped by destination/identity. |
-| 📤 `dbx-netpolicy egress` | Propose & apply a SEG allow-list from `system.access.outbound_network` destinations (S3 / GCS / Azure storage + internet FQDNs), with optional threat-intel domain blocking. |
-| 🔁 `dbx-netpolicy migrate-acl` | Recreate this workspace's existing IP access list as a CBI policy, verbatim — no traffic analysis, no enrichment. |
-| 🧭 `dbx-netpolicy guided` | Interactive Q&A wizard — point it at a workspace and it walks you through building any of the above. |
-| 📦 `dbx-netpolicy feeds` | Manage the local threat-intel / cloud-range feed cache (`list` / `refresh` / `clear`). |
+| 📥 `dbx-nwp-helper ingress` | Propose & apply a CBI allow-list from `system.access.audit` source IPs — enriched with open threat-intel, cloud-provider and Databricks-owned IP ranges + RDAP, optionally scoped by destination/identity. |
+| 📤 `dbx-nwp-helper egress` | Propose & apply a SEG allow-list from `system.access.outbound_network` destinations (S3 / GCS / Azure storage + internet FQDNs), with optional threat-intel domain blocking. |
+| 🔁 `dbx-nwp-helper migrate-acl` | Recreate this workspace's existing IP access list as a CBI policy, verbatim — no traffic analysis, no enrichment. |
+| 🧭 `dbx-nwp-helper guided` | Interactive Q&A wizard — point it at a workspace and it walks you through building any of the above. |
+| 📦 `dbx-nwp-helper feeds` | Manage the local threat-intel / cloud-range feed cache (`list` / `refresh` / `clear`). |
 
 Every option is discoverable with `--help` on any command. The full detail for each tool lives in its
 Claude skill under [`.claude/skills/`](.claude/skills/).
@@ -77,6 +77,34 @@ Each helper can add its rules to an existing policy, so you compose one yourself
    --existing-policy-id <id>`. It updates **only its own direction**, leaving the first intact.
 
 🎉 The result is one account network policy carrying both blocks. (Order doesn't matter.)
+
+## 🕵️ Threat-intelligence feeds
+
+All feeds are **free, need no API key, and download over HTTPS** — cached locally with a TTL
+(`dbx-nwp-helper feeds list` / `feeds refresh`). Verify current licensing before any customer-facing
+distribution. Full detail (grain, confidence mapping, what's deliberately excluded) is in
+[`docs/threat-intel-feeds.md`](docs/threat-intel-feeds.md).
+
+**Ingress** (`--threat-feeds`, all on by default) flags observed source IPs that fall in known-bad
+ranges — those groups are excluded from the allow-list and surfaced for investigation:
+
+| Feed | `--threat-feeds` key | What it is |
+|---|---|---|
+| [Spamhaus DROP](https://www.spamhaus.org/blocklists/do-not-route-or-peer/) | `spamhaus_drop` | Hijacked / botnet-C2 network ranges (v4 + v6). |
+| [Tor exit list](https://check.torproject.org/torbulkexitlist) | `tor_exit` | Tor exit-node IPs (anonymiser infrastructure; not inherently malicious). |
+| [FireHOL level 1](https://github.com/firehol/blocklist-ipsets) | `firehol_level1` | Conservative aggregation of trusted blocklists. |
+| [IPsum](https://github.com/stamparm/ipsum) | `ipsum` | 30+ feed aggregation; kept where seen on ≥3 lists (≥5 = high confidence). |
+| [DShield (SANS ISC)](https://www.dshield.org/) | `dshield` | Top attacking /24 subnets. |
+| [CINS CI Army](https://cinsscore.com/#list) | `cins_ci_army` | Poorly-rated malicious IPs (gap-filler). |
+
+**Egress** (`--block-threat-domains` with `--threat-feed`) can block known-bad **domains**:
+
+| Feed | `--threat-feed` key | What it is |
+|---|---|---|
+| [abuse.ch ThreatFox](https://threatfox.abuse.ch/) | `threatfox` | Botnet command-and-control (C2) domain IOCs — the closest fit for the data-exfil use case. |
+
+> The **allow-list itself** is the control that stops exfiltration; the block feed is a secondary
+> layer that only catches *known* bad domains. See the egress helper docs for more.
 
 ## 🤖 Claude skills
 
@@ -145,7 +173,7 @@ covered by fast, network-free unit tests, and CLI flows are exercised via Typer'
   `export SSL_CERT_FILE=/path/to/ca-bundle.pem` (and `REQUESTS_CA_BUNDLE` likewise).
 - The egress table (`system.access.outbound_network`) only logs **denied** egress, including
   dry-run would-be-denials — so stand up an egress policy in `dry_run` first, let it observe, then
-  run `dbx-netpolicy egress` to turn the observed destinations into an allow-list.
+  run `dbx-nwp-helper egress` to turn the observed destinations into an allow-list.
 - **Ingress shows no candidate IPs?** The CLI prints a diagnostic funnel explaining where the audit
   rows dropped out. The usual causes: the workspace uses **PrivateLink/NAT** (the audit log records
   the relay's private IP, not the user's public IP — a source-IP allow-list can't be built from
