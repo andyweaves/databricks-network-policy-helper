@@ -116,3 +116,8 @@ tool's reference doc.
 - The egress table (`system.access.outbound_network`) only logs **denied** egress, including
   dry-run would-be-denials — so stand up an egress policy in `dry_run` first, let it observe, then
   run `dbx-netpolicy egress` to turn the observed destinations into an allow-list.
+- **Ingress shows no candidate IPs?** The CLI prints a diagnostic funnel explaining where the audit
+  rows dropped out. The usual causes: the workspace uses **PrivateLink/NAT** (the audit log records
+  the relay's private IP, not the user's public IP — a source-IP allow-list can't be built from
+  that), or the public IPs only appear on **account-level** rows (`workspace_id=0`, e.g. account
+  console / SCIM) — pass `--include-account-level` to use them.

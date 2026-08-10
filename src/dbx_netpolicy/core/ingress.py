@@ -34,6 +34,9 @@ class IngressAnalysis:
     threat_ranges: list = field(default_factory=list)
     excluded_flagged: int = 0
     skipped_ipv6: int = 0
+    # Populated only when the candidate set is empty: a one-row filter-funnel dict explaining where
+    # the audit rows were dropped (see queries.candidate_funnel).
+    funnel: dict | None = None
 
 
 def analyze(cfg: IngressConfig, sql_conn, workspace_client, on_step=lambda _m: None) -> IngressAnalysis:
@@ -44,6 +47,16 @@ def analyze(cfg: IngressConfig, sql_conn, workspace_client, on_step=lambda _m: N
     candidates = sql.query(sql_conn, queries.frequent_public_ips(
         cfg.lookback_days, cfg.min_events, cfg.include_ipv6,
         cfg.treat_null_status_as_success, cfg.include_account_level))
+
+    # When there are no candidates, run a cheap diagnostic funnel so we can explain *why* rather than
+    # just reporting an empty table (the most common confusion: public IPs live on account-level rows,
+    # or PrivateLink/NAT masks the real source IP).
+    funnel = None
+    if candidates.empty:
+        on_step("No candidates — running a diagnostic funnel to explain why…")
+        fdf = sql.query(sql_conn, queries.candidate_funnel(
+            cfg.lookback_days, cfg.treat_null_status_as_success))
+        funnel = fdf.to_dict(orient="records")[0] if not fdf.empty else None
 
     on_step("Reading the workspace IP access list + denied requests…")
     ip_acls = _read_ip_acls(workspace_client)
@@ -75,7 +88,7 @@ def analyze(cfg: IngressConfig, sql_conn, workspace_client, on_step=lambda _m: N
     return IngressAnalysis(
         candidates=candidates, suggestions=suggestions_pdf, threat_matches=threat_matches_pdf,
         denied_requests=denied, ip_acls=ip_acls, suggestion_rows=suggestion_rows,
-        threat_match_rows=threat_match_rows, threat_ranges=threat_ranges,
+        threat_match_rows=threat_match_rows, threat_ranges=threat_ranges, funnel=funnel,
     )
 
 

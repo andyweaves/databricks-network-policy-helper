@@ -289,7 +289,7 @@ def _run_ingress(cfg: IngressConfig, conn: Connection, yes: bool) -> None:
     with sql.connection(conn, http_path) as sconn:
         analysis = ing.analyze(cfg, sconn, wc, on_step=_step)
 
-    render.ingress_analysis(analysis)
+    render.ingress_analysis(analysis, cfg)
 
     identity_resolution = None
     if cfg.scope_identity:
