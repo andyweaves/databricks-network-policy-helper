@@ -143,3 +143,22 @@ def mode_banner(policy_mode: str) -> None:
         console.print(Panel(
             Text("MODE = DRY_RUN — log-only; nothing is blocked.", style="dry_run"),
             border_style="ok", expand=False))
+
+
+def responsibility_warning(direction: str) -> None:
+    """Shown before any network-policy create/update. `direction` names what the rules are built
+    from, e.g. 'source IP addresses' (ingress) or 'FQDNs and storage destinations' (egress)."""
+    body = Text()
+    body.append("⚠️  YOU ARE ABOUT TO CREATE A SECURITY-ENFORCING NETWORK POLICY\n\n", style="warn")
+    body.append(
+        f"This policy controls network access to/from your Databricks environment. The {direction} "
+        "shown above were derived from observed traffic and enrichment feeds as a best-effort "
+        "starting point — they are ", style="value")
+    body.append("not guaranteed to be complete or correct", style="danger")
+    body.append(
+        ".\n\nYou are solely responsible for reviewing every entry and confirming it is accurate and "
+        "appropriate before using it in a policy. An incorrect or incomplete allow-list can block "
+        "legitimate users or workloads (in enforce mode) or fail to block malicious ones.",
+        style="value")
+    console.print(Panel(body, title="[danger]Your responsibility[/danger]",
+                        border_style="danger", expand=False))

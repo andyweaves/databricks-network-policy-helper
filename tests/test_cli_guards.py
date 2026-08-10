@@ -69,6 +69,24 @@ def test_confirm_params_accept_proceeds(monkeypatch):
     cli._confirm_params(yes=False)  # must not raise
 
 
+def test_confirm_write_yes_shows_warning_and_proceeds(capsys):
+    # --yes must still surface the responsibility warning (never silently skip it) and return True.
+    result = cli._confirm_write("dry_run", yes=True, direction="source IP addresses")
+    out = capsys.readouterr().out
+    assert result is True
+    assert "responsib" in out.lower()
+    assert "source IP addresses" in out
+
+
+def test_confirm_write_interactive_decline(monkeypatch, capsys):
+    monkeypatch.setattr("typer.confirm", lambda *a, **k: False)
+    result = cli._confirm_write("enforce", yes=False, direction="FQDNs and storage destinations")
+    out = capsys.readouterr().out
+    assert result is False
+    assert "responsib" in out.lower()
+    assert "FQDNs and storage destinations" in out
+
+
 def test_has_rules_helper():
     assert cli._has_rules({}) is False
     assert cli._has_rules({"__ALL__": {"allow": [], "deny": []}}) is False

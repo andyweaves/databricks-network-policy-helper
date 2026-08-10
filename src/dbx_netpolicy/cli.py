@@ -158,8 +158,10 @@ def _has_rules(policies: dict) -> bool:
     return any(p.get("allow") or p.get("deny") for p in (policies or {}).values())
 
 
-def _confirm_write(cfg_mode: str, yes: bool) -> bool:
-    """The review gate. Returns True if the user has confirmed (or --yes given)."""
+def _confirm_write(cfg_mode: str, yes: bool, direction: str) -> bool:
+    """The review gate. Shows the responsibility warning, then returns True if the user has confirmed
+    (or --yes given). The warning is shown even with --yes so it's never silently skipped."""
+    console.responsibility_warning(direction)
     if yes:
         return True
     console.mode_banner(cfg_mode)
@@ -383,7 +385,7 @@ def _run_ingress(cfg: IngressConfig, conn: Connection, yes: bool) -> None:
                                  "policy can be created. Review the candidate funnel above (try "
                                  "--lookback-days / --min-events / --include-account-level).")
         raise typer.Exit(code=1)
-    if not _confirm_write(cfg.policy_mode, yes):
+    if not _confirm_write(cfg.policy_mode, yes, "source IP addresses / CIDRs"):
         console.banner("info", "Aborted — nothing written.")
         return
 
@@ -425,7 +427,7 @@ def _run_egress(cfg: EgressConfig, conn: Connection, yes: bool) -> None:
                                  "policy can be created. Confirm outbound_network has data for this "
                                  "window (stand up a dry_run egress policy first to populate it).")
         raise typer.Exit(code=1)
-    if not _confirm_write(cfg.policy_mode, yes):
+    if not _confirm_write(cfg.policy_mode, yes, "FQDNs and storage destinations"):
         console.banner("info", "Aborted — nothing written.")
         return
 
@@ -463,7 +465,7 @@ def _run_acl(cfg: AclConfig, conn: Connection, yes: bool) -> None:
     if not cfg.create_policy:
         console.banner("info", "Propose-only run (no --create-policy). Nothing was written.")
         return
-    if not _confirm_write(cfg.policy_mode, yes):
+    if not _confirm_write(cfg.policy_mode, yes, "IP access list entries"):
         console.banner("info", "Aborted — nothing written.")
         return
 
