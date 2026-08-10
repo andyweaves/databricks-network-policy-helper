@@ -4,12 +4,87 @@ message and a non-zero exit, not crash with a KeyError."""
 from __future__ import annotations
 
 import pandas as pd
+import pytest
 from typer.testing import CliRunner
 
 from dbx_netpolicy import cli
 from dbx_netpolicy.core.ingress import IngressAnalysis
 
 runner = CliRunner()
+
+
+def test_resolve_profile_passthrough():
+    assert cli._resolve_profile("myprofile") == "myprofile"
+
+
+def test_resolve_profile_respects_env_auth(monkeypatch):
+    monkeypatch.setenv("DATABRICKS_HOST", "https://x.cloud.databricks.com")
+    assert cli._resolve_profile(None) is None
+
+
+def test_resolve_profile_none_and_no_profiles_errors(monkeypatch):
+    import typer
+    monkeypatch.delenv("DATABRICKS_HOST", raising=False)
+    monkeypatch.setattr(cli, "_available_profiles", lambda: [])
+    with pytest.raises(typer.BadParameter):
+        cli._resolve_profile(None)
+
+
+def test_resolve_profile_none_noninteractive_errors(monkeypatch):
+    import typer
+    monkeypatch.delenv("DATABRICKS_HOST", raising=False)
+    monkeypatch.setattr(cli, "_available_profiles", lambda: ["a", "b"])
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    with pytest.raises(typer.BadParameter):
+        cli._resolve_profile(None)
+
+
+def test_confirm_params_yes_skips(monkeypatch):
+    # --yes must not prompt and must not raise.
+    called = {"n": 0}
+    monkeypatch.setattr("typer.confirm", lambda *a, **k: called.__setitem__("n", called["n"] + 1))
+    cli._confirm_params(yes=True)
+    assert called["n"] == 0
+
+
+def test_confirm_params_noninteractive_skips(monkeypatch):
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    monkeypatch.setattr("typer.confirm", lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("must not prompt non-interactively")))
+    cli._confirm_params(yes=False)
+
+
+def test_confirm_params_decline_aborts(monkeypatch):
+    import typer
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("typer.confirm", lambda *a, **k: False)
+    with pytest.raises(typer.Exit) as exc:
+        cli._confirm_params(yes=False)
+    assert exc.value.exit_code == 0  # user chose to abort — a clean exit, not an error
+
+
+def test_confirm_params_accept_proceeds(monkeypatch):
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("typer.confirm", lambda *a, **k: True)
+    cli._confirm_params(yes=False)  # must not raise
+
+
+def test_confirm_write_yes_shows_warning_and_proceeds(capsys):
+    # --yes must still surface the responsibility warning (never silently skip it) and return True.
+    result = cli._confirm_write("dry_run", yes=True, direction="source IP addresses")
+    out = capsys.readouterr().out
+    assert result is True
+    assert "responsib" in out.lower()
+    assert "source IP addresses" in out
+
+
+def test_confirm_write_interactive_decline(monkeypatch, capsys):
+    monkeypatch.setattr("typer.confirm", lambda *a, **k: False)
+    result = cli._confirm_write("enforce", yes=False, direction="FQDNs and storage destinations")
+    out = capsys.readouterr().out
+    assert result is False
+    assert "responsib" in out.lower()
+    assert "FQDNs and storage destinations" in out
 
 
 def test_has_rules_helper():
@@ -53,7 +128,7 @@ def test_ingress_create_with_no_rules_exits_nonzero(monkeypatch):
         AssertionError("account_client must not be called when there are no rules")))
 
     result = runner.invoke(cli.app, [
-        "ingress", "--warehouse-http-path", "/sql/1.0/warehouses/x",
+        "ingress", "--profile", "test", "--warehouse-http-path", "/sql/1.0/warehouses/x",
         "--account-id", "acc", "--create-policy", "--yes"])
     assert result.exit_code == 1
     assert "Nothing to apply" in result.stdout

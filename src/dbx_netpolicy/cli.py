@@ -78,8 +78,59 @@ class AclEgress(str, Enum):
     allow_all = "allow_all"; dry_run = "dry_run"; restricted = "restricted"  # noqa: E702
 
 
+def _available_profiles() -> list[str]:
+    """Profile names configured in ~/.databrickscfg (or $DATABRICKS_CONFIG_FILE)."""
+    import configparser
+    import os
+
+    path = os.path.expanduser(os.environ.get("DATABRICKS_CONFIG_FILE") or "~/.databrickscfg")
+    if not os.path.exists(path):
+        return []
+    cp = configparser.ConfigParser()
+    try:
+        cp.read(path)
+    except configparser.Error:
+        return []
+    # DEFAULT is a real, selectable profile in .databrickscfg; ConfigParser hides it in sections().
+    names = list(cp.sections())
+    if cp.defaults():
+        names = ["DEFAULT", *names]
+    return names
+
+
+def _resolve_profile(profile: str | None) -> str | None:
+    """Require an explicit profile choice rather than silently falling back to the first-configured
+    one. If --profile is given, use it. If env-based auth is configured (DATABRICKS_HOST), allow it
+    through. Otherwise prompt the user to pick from ~/.databrickscfg; error if none / non-interactive."""
+    import os
+    import sys
+
+    if profile:
+        return profile
+    if os.environ.get("DATABRICKS_HOST"):
+        return None  # explicit env auth — respect it
+
+    profiles = _available_profiles()
+    if not profiles:
+        raise typer.BadParameter(
+            "No --profile given and no profiles found in ~/.databrickscfg. Pass --profile <name> "
+            "or run `databricks auth login` first.")
+    if not sys.stdin.isatty():
+        raise typer.BadParameter(
+            "No --profile given (non-interactive). Pass --profile <name> explicitly — the CLI won't "
+            f"guess. Available: {', '.join(profiles)}")
+
+    import questionary
+    choice = questionary.select(
+        "Which Databricks profile? (pass --profile to skip this prompt)", choices=profiles).ask()
+    if not choice:
+        raise typer.Abort()
+    return choice
+
+
 # Shared connection options (used by every command that hits the workspace).
 def _conn(profile, warehouse_http_path, account_id, account_host, account_profile=None) -> Connection:
+    profile = _resolve_profile(profile)
     return Connection(profile=profile, warehouse_http_path=warehouse_http_path,
                       account_id=account_id or "", account_host=account_host,
                       account_profile=account_profile)
@@ -89,14 +140,28 @@ def _step(message: str) -> None:
     console.console.print(f"[muted]· {message}[/muted]")
 
 
+def _confirm_params(yes: bool) -> None:
+    """After showing the config, ask the user to confirm before doing any work. --yes skips it, and
+    it's a no-op non-interactively so scripted runs aren't blocked. Aborting exits cleanly (0)."""
+    import sys
+    if yes or not sys.stdin.isatty():
+        return
+    if not typer.confirm("Proceed with these parameters? (No to abort and adjust flags)",
+                         default=True):
+        console.banner("info", "Aborted — adjust the flags and re-run (see --help).")
+        raise typer.Exit(code=0)
+
+
 def _has_rules(policies: dict) -> bool:
     """True if any policy target carries at least one allow or deny rule. Guards the apply path so an
     empty analysis (e.g. no candidate IPs) fails with a clear message instead of a KeyError."""
     return any(p.get("allow") or p.get("deny") for p in (policies or {}).values())
 
 
-def _confirm_write(cfg_mode: str, yes: bool) -> bool:
-    """The review gate. Returns True if the user has confirmed (or --yes given)."""
+def _confirm_write(cfg_mode: str, yes: bool, direction: str) -> bool:
+    """The review gate. Shows the responsibility warning, then returns True if the user has confirmed
+    (or --yes given). The warning is shown even with --yes so it's never silently skipped."""
+    console.responsibility_warning(direction)
     if yes:
         return True
     console.mode_banner(cfg_mode)
@@ -291,6 +356,7 @@ def _run_ingress(cfg: IngressConfig, conn: Connection, yes: bool) -> None:
     console.title_panel("Context-Based Ingress (CBI) Helper",
                         "Propose a CBI allow-list from real audit-log source IPs.")
     render.ingress_decisions(cfg)
+    _confirm_params(yes)
 
     wc = auth.workspace_client(conn)
     http_path = sql.resolve_warehouse(conn)
@@ -319,7 +385,7 @@ def _run_ingress(cfg: IngressConfig, conn: Connection, yes: bool) -> None:
                                  "policy can be created. Review the candidate funnel above (try "
                                  "--lookback-days / --min-events / --include-account-level).")
         raise typer.Exit(code=1)
-    if not _confirm_write(cfg.policy_mode, yes):
+    if not _confirm_write(cfg.policy_mode, yes, "source IP addresses / CIDRs"):
         console.banner("info", "Aborted — nothing written.")
         return
 
@@ -343,6 +409,7 @@ def _run_egress(cfg: EgressConfig, conn: Connection, yes: bool) -> None:
     console.title_panel("Egress Policy Helper (serverless egress / SEG)",
                         "Propose an egress allow-list from observed outbound traffic.")
     render.egress_decisions(cfg)
+    _confirm_params(yes)
 
     http_path = sql.resolve_warehouse(conn)
     with sql.connection(conn, http_path) as sconn:
@@ -360,7 +427,7 @@ def _run_egress(cfg: EgressConfig, conn: Connection, yes: bool) -> None:
                                  "policy can be created. Confirm outbound_network has data for this "
                                  "window (stand up a dry_run egress policy first to populate it).")
         raise typer.Exit(code=1)
-    if not _confirm_write(cfg.policy_mode, yes):
+    if not _confirm_write(cfg.policy_mode, yes, "FQDNs and storage destinations"):
         console.banner("info", "Aborted — nothing written.")
         return
 
@@ -379,6 +446,7 @@ def _run_acl(cfg: AclConfig, conn: Connection, yes: bool) -> None:
     console.title_panel("IP Access List → CBI migration",
                         "Recreate this workspace's IP ACL as a CBI policy, verbatim.")
     render.acl_decisions(cfg)
+    _confirm_params(yes)
 
     wc = auth.workspace_client(conn)
     analysis = acl_core.analyze(cfg, wc)
@@ -397,7 +465,7 @@ def _run_acl(cfg: AclConfig, conn: Connection, yes: bool) -> None:
     if not cfg.create_policy:
         console.banner("info", "Propose-only run (no --create-policy). Nothing was written.")
         return
-    if not _confirm_write(cfg.policy_mode, yes):
+    if not _confirm_write(cfg.policy_mode, yes, "IP access list entries"):
         console.banner("info", "Aborted — nothing written.")
         return
 
