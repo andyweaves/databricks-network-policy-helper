@@ -4,42 +4,47 @@
 
 | Operation | When | Privilege |
 |---|---|---|
-| Read `system.access.audit`, enrich, propose | always | workspace read on the audit table |
-| **Resolve identities** (SCIM `users`/`service_principals` list) | `scoping_mode` includes identity | **account admin** |
-| **Apply a CBI policy** (`network_policies.*_rpc`) | gated apply cell, `apply_policy=true` | **account admin** |
+| Read `system.access.audit` / `outbound_network`, enrich, propose | always | workspace read on the system tables |
+| **Resolve identities** (SCIM `users`/`service_principals` list) | ingress `--scoping-mode` includes identity | **account admin** |
+| **Apply a policy** (`network_policies.*_rpc`) | gated apply, `--create-policy` | **account admin** |
 
-Pure analysis, and IP-only / destination-only proposals you don't apply from the notebook, need
-**no** account-level privilege. A workspace PAT is **not** sufficient for account-level calls.
+Pure analysis, and IP-only / destination-only proposals you don't apply, need **no** account-level
+privilege — just workspace read and a SQL warehouse. A workspace PAT is **not** sufficient for
+account-level calls.
+
+## Authentication model
+
+`dbx-netpolicy` uses the Databricks SDK's **unified auth**. Workspace calls (analysis, warehouse
+management, reading the IP ACL) resolve credentials from a `--profile` in `~/.databrickscfg`,
+`DATABRICKS_*` environment variables, or an OAuth session. Account-level calls additionally need
+`--account-id <numeric id>` (not reliably discoverable from a workspace) and account-admin
+credentials resolvable for the account host.
+
+Find the account id in the Account console (top-right user menu) or in the account console URL after
+`/account/`. Set the account host with `--account-host` for Azure
+(`https://accounts.azuredatabricks.net`) or GCP (`https://accounts.gcp.databricks.com`).
 
 ## Recommended: account-admin service principal (OAuth M2M)
 
 1. **Create a service principal** and grant it the **account admin** role:
    Account console → *User management* → *Service principals* → (create) → *Roles* → Account admin.
 2. **Generate an OAuth secret** for it — note the `client_id` and the secret (shown once).
-3. **Store the secret in a Databricks secret scope** (never hardcode):
-   ```bash
-   databricks secrets create-scope np_helper
-   databricks secrets put-secret np_helper account_sp_secret
+3. **Configure a profile** in `~/.databrickscfg` that authenticates as that SP, e.g.:
+   ```ini
+   [np-helper-account]
+   host          = https://accounts.cloud.databricks.com
+   account_id    = <your-account-id>
+   client_id     = <sp-client-id>
+   client_secret = <sp-oauth-secret>
    ```
-4. **Set the notebook widgets** (group 4):
-   - `4a account_id` — your Databricks account id
-   - `4b account_host` — e.g. `https://accounts.cloud.databricks.com`
-     (Azure: `https://accounts.azuredatabricks.net`; GCP: `https://accounts.gcp.databricks.com`)
-   - `4c account_sp_client_id` — the SP's client_id
-   - `4d account_secret_scope` — `np_helper`
-   - `4e account_secret_key` — `account_sp_secret`
+   Then run with `--profile np-helper-account --account-id <your-account-id>`. (Prefer a secret
+   manager / env var over a plaintext secret in the config where your setup allows it.)
 
-`_account_client()` then builds `AccountClient(host, account_id, client_id, client_secret=<secret>)`.
-
-## Ambient fallback
-
-If widgets 4c–4e are blank, the notebook falls back to `AccountClient(host, account_id)` /
-`AccountClient()`, relying on the runtime's ambient account credentials (e.g. an account-admin
-OAuth profile in `~/.databrickscfg`). Fine for interactive local use by an account admin; the SP
-route is preferred for repeatable / job runs.
+For interactive use by an account admin, a `databricks auth login` OAuth profile also works — the SDK
+resolves it the same way.
 
 ## Least privilege note
 
 There is no finer-grained role than account admin for these APIs today. If that's too broad for a
-customer, stop at **suggest + JSON preview** and have their account admin apply the printed policy
-themselves — the notebook's preview cell emits the exact object.
+customer, stop at **propose-only** (omit `--create-policy`) and have their account admin apply the
+printed JSON policy themselves — the preview emits the exact object that would be sent.
