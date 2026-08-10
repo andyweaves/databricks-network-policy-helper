@@ -40,36 +40,49 @@ def _analysis(suggestion_rows=None, ip_acls=None, denied=None, threat_match_rows
         threat_ranges=threat_ranges or [])
 
 
-# ------------------------------------------------------------------- scoping / framing
-def test_ip_only_collapses_to_single_blanket_rule():
-    a = _analysis([_suggestion(rdap_owner="A", minimal_cidrs=["1.1.1.1/32"]),
-                   _suggestion(rdap_owner="B", minimal_cidrs=["2.2.2.2/32"])])
+# ------------------------------------------------------------------- scoping / framing / grouping
+def test_owner_groups_become_separate_labeled_rules():
+    # Every owner group is its own labeled allow rule now (no single blanket collapse), even ip_only.
+    a = _analysis([_suggestion(rdap_owner="Acme Corp", minimal_cidrs=["1.1.1.1/32"]),
+                   _suggestion(rdap_owner="Beta LLC", minimal_cidrs=["2.2.2.2/32"])])
     pols = rules.build_rules(a, IngressConfig(scoping_mode="ip_only", policy_framing="minimal"))
     allow = pols[ALL_WORKSPACES]["allow"]
-    assert len(allow) == 1
-    assert allow[0]["label"].endswith("-ip-only")
-    assert set(allow[0]["cidrs"]) == {"1.1.1.1/32", "2.2.2.2/32"}
+    assert len(allow) == 2
+    labels = {s["label"] for s in allow}
+    assert any(lbl.endswith("-Acme-Corp") for lbl in labels)   # (c) non-cloud -> <prefix>-<owner>
+    assert any(lbl.endswith("-Beta-LLC") for lbl in labels)
 
 
-def test_flagged_groups_excluded_and_counted():
+def test_cloud_owned_included_with_cloud_label():
+    # (b) cloud-provider-owned groups are now INCLUDED, labeled <prefix>-<cloud>-<owner>.
+    a = _analysis([
+        _suggestion(rdap_owner="Palo Alto", cloud_provider=["aws"], minimal_cidrs=["8.8.8.8/32"]),
+    ])
+    pols = rules.build_rules(a, IngressConfig(scoping_mode="ip_only"))
+    labels = [s["label"] for s in pols[ALL_WORKSPACES]["allow"]]
+    assert any(lbl.endswith("-aws-Palo-Alto") for lbl in labels)
+    assert a.excluded_flagged == 0
+
+
+def test_only_threat_groups_excluded():
     a = _analysis([
         _suggestion(rdap_owner="clean", minimal_cidrs=["1.1.1.1/32"]),
         _suggestion(rdap_owner="bad", threat_feeds=["ipsum"], minimal_cidrs=["9.9.9.9/32"]),
         _suggestion(rdap_owner="cloud", cloud_provider=["aws"], minimal_cidrs=["8.8.8.8/32"]),
     ])
     pols = rules.build_rules(a, IngressConfig(scoping_mode="ip_only"))
-    cidrs = pols[ALL_WORKSPACES]["allow"][0]["cidrs"]
-    assert cidrs == ["1.1.1.1/32"]
-    assert a.excluded_flagged == 2
+    all_cidrs = {c for s in pols[ALL_WORKSPACES]["allow"] for c in s["cidrs"]}
+    assert all_cidrs == {"1.1.1.1/32", "8.8.8.8/32"}  # clean + cloud kept; threat excluded
+    assert a.excluded_flagged == 1
 
 
 def test_databricks_owned_included_despite_cloud_flag():
     a = _analysis([_suggestion(rdap_owner="dbx", cloud_provider=["aws"],
                                databricks_owned=["aws"], minimal_cidrs=["4.4.4.4/32"])])
-    # non-ip_only so the databricks rule keeps its own label
     pols = rules.build_rules(a, IngressConfig(scoping_mode="ip_and_destination"))
     labels = [s["label"] for s in pols[ALL_WORKSPACES]["allow"]]
-    assert any("databricks" in lbl for lbl in labels)
+    # (a) databricks-owned -> <prefix>-databricks-<cloud>
+    assert any(lbl.endswith("-databricks-aws") for lbl in labels)
     assert a.excluded_flagged == 0
 
 
@@ -125,8 +138,9 @@ def test_acl_migrate_and_enrich_adds_acl_allow_to_traffic():
     pols = rules.build_rules(a, IngressConfig(scoping_mode="ip_only",
                                               ip_acl_handling="migrate_and_enrich"))
     labels = [s["label"] for s in pols[ALL_WORKSPACES]["allow"]]
-    assert any(lbl.endswith("-ip-only") for lbl in labels)
-    assert any("acl-office" in lbl for lbl in labels)
+    assert any("acl-office" in lbl for lbl in labels)          # migrated ACL rule (as-is)
+    assert any(lbl.endswith("-Acme") for lbl in labels)        # traffic-derived owner-grouped rule
+    assert not any("ip-only" in lbl for lbl in labels)         # no blanket collapse anymore
 
 
 def test_acl_migrate_only_drops_traffic_rules():

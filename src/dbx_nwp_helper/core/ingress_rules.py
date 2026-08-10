@@ -20,6 +20,30 @@ Note = Callable[[str], None]
 _FRAMING_COL = {"minimal": "minimal_cidrs", "optimal": "optimal_cidrs", "maximum": "maximum_cidrs"}
 
 
+def _slug(text) -> str:
+    """Normalise an owner/provider name into a readable, label-safe slug."""
+    import re
+    return re.sub(r"[^A-Za-z0-9]+", "-", str(text or "")).strip("-")
+
+
+def _group_label(name_prefix: str, row) -> str:
+    """Owner-grouped allow-rule label:
+      (a) <prefix>-databricks-<cloud>     when the group is Databricks-owned
+      (b) <prefix>-<cloud>-<rdap_owner>   when it's in a cloud-provider range
+      (c) <prefix>-<rdap_owner>           otherwise (non-cloud candidate)
+    `rdap_owner` may be a bare CIDR when RDAP didn't resolve — still a valid, readable label."""
+    owner = _slug(row["rdap_owner"])
+    if row["databricks_owned"]:
+        cloud = _slug((row["databricks_owned"] or ["databricks"])[0])
+        base = f"{name_prefix}-databricks-{cloud}"
+    elif row["cloud_provider"]:
+        cloud = _slug((row["cloud_provider"] or [""])[0])
+        base = f"{name_prefix}-{cloud}-{owner}"
+    else:
+        base = f"{name_prefix}-{owner}"
+    return base[:250]
+
+
 def resolve_identities(analysis: IngressAnalysis, account, note: Note = lambda _m: None) -> dict:
     """Resolve principals to numeric account ids via SCIM (account admin required). Returns
     {principal string -> {principal_id, principal_type}}. Unresolved principals are dropped."""
@@ -80,7 +104,10 @@ def build_rules(analysis: IngressAnalysis, cfg: IngressConfig, identity_resoluti
 
     if use_traffic_rules and not suggestions.empty:
         for _, row in suggestions.iterrows():
-            if not row["databricks_owned"] and (row["threat_feeds"] or row["cloud_provider"]):
+            # Threat-intel-matched groups are never allow-listed (they only appear in the threat
+            # table for investigation). Cloud-provider-owned groups ARE included, as labeled rules
+            # (b), so they're reviewable rather than silently dropped. Databricks-owned always wins.
+            if not row["databricks_owned"] and row["threat_feeds"]:
                 excluded_flagged += 1
                 continue
             ipv4_cidrs = []
@@ -95,10 +122,8 @@ def build_rules(analysis: IngressAnalysis, cfg: IngressConfig, identity_resoluti
             if not ipv4_cidrs:
                 continue
 
-            label_base = (f"{cfg.name_prefix}-databricks" if row["databricks_owned"]
-                          else f"{cfg.name_prefix}-{row['rdap_owner']}")
             spec = {
-                "label": label_base[:250],
+                "label": _group_label(cfg.name_prefix, row),
                 "cidrs": ipv4_cidrs,
                 "destination": (row["scoped_destination"]
                                 if (cfg.scope_destination and not row["databricks_owned"])
@@ -124,18 +149,8 @@ def build_rules(analysis: IngressAnalysis, cfg: IngressConfig, identity_resoluti
                     spec["label"] += " [identity-unresolved]"
             target_specs[row["policy_target"]].append(spec)
 
-    # ip_only: collapse each target's groups into a single blanket rule.
-    if cfg.scoping_mode == "ip_only":
-        for tgt, specs in list(target_specs.items()):
-            all_cidrs = []
-            for spec in specs:
-                for c in spec["cidrs"]:
-                    if c not in all_cidrs:
-                        all_cidrs.append(c)
-            target_specs[tgt] = [{
-                "label": f"{cfg.name_prefix}-ip-only", "cidrs": all_cidrs,
-                "destination": "all_destinations", "identity_type": "ALL_USERS", "identities": [],
-            }]
+    # (Previously ip_only collapsed all groups into one blanket rule; now every owner group becomes
+    # its own labeled allow rule in all scoping modes — see _group_label.)
 
     acl_allow_specs, acl_deny_specs = _acl_specs(analysis, cfg)
     denied_deny_specs = _denied_specs(analysis, cfg)
