@@ -45,6 +45,9 @@ class EgressAnalysis:
     fqdn_owner: dict = field(default_factory=dict)
     blocked_domains: list = field(default_factory=list)
     skipped_bare_s3: int = 0
+    # S3 buckets dropped because a region couldn't be determined (region is required by the API for
+    # AWS storage destinations). List of bucket names.
+    dropped_s3_no_region: list = field(default_factory=list)
 
 
 def _classify(host: str) -> tuple[str, dict]:
@@ -69,6 +72,26 @@ def _new_target():
     return {"s3": {}, "gcs": {}, "azure": {}, "internet": {}}
 
 
+def _infer_s3_region(bucket: str) -> str | None:
+    """Best-effort S3 bucket region lookup. A HEAD to the global endpoint returns the bucket's home
+    region in the `x-amz-bucket-region` header, no credentials required. Returns the region or None.
+    Cached per bucket by the caller."""
+    from urllib.request import Request, urlopen
+    for url in (f"https://{bucket}.s3.amazonaws.com", f"https://s3.amazonaws.com/{bucket}"):
+        try:
+            req = Request(url, method="HEAD")
+            with urlopen(req, timeout=10) as resp:
+                region = resp.headers.get("x-amz-bucket-region")
+                if region:
+                    return region
+        except Exception as e:  # noqa: BLE001 - 301/403/404 all still carry the region header
+            hdrs = getattr(getattr(e, "headers", None), "get", lambda _k: None)
+            region = hdrs("x-amz-bucket-region") if hdrs else None
+            if region:
+                return region
+    return None
+
+
 def analyze(cfg: EgressConfig, sql_conn, on_step=lambda _m: None) -> EgressAnalysis:
     from .. import queries, sql
 
@@ -79,11 +102,25 @@ def analyze(cfg: EgressConfig, sql_conn, on_step=lambda _m: None) -> EgressAnaly
     targets = defaultdict(_new_target)
     fqdn_resolved_ips = {}
     skipped_bare_s3 = 0
+    s3_region_cache: dict[str, str | None] = {}  # bucket -> region (inferred once), None if unknown
+    dropped_s3: dict[str, bool] = {}             # bucket -> True once dropped (dedupe warnings)
     for r in observed.to_dict(orient="records"):
         kind, info = _classify(r["destination"])
         events = int(r["events"])
         if kind == "s3":
-            key, bucketname = ("s3", (info["bucket"], info.get("region") or ""))
+            bucket = info["bucket"]
+            region = info.get("region")
+            if not region:
+                # Global endpoint (<bucket>.s3.amazonaws.com) has no region in the host. Region is
+                # required by the API, so infer it via a HEAD; drop the bucket if we can't.
+                if bucket not in s3_region_cache:
+                    on_step(f"Inferring S3 region for bucket '{bucket}'…")
+                    s3_region_cache[bucket] = _infer_s3_region(bucket)
+                region = s3_region_cache[bucket]
+            if not region:
+                dropped_s3[bucket] = True
+                continue
+            key, bucketname = ("s3", (bucket, region))
         elif kind == "gcs":
             key, bucketname = ("gcs", info["bucket"])
         elif kind == "azure":
@@ -106,7 +143,8 @@ def analyze(cfg: EgressConfig, sql_conn, on_step=lambda _m: None) -> EgressAnaly
     if not targets:
         targets[ALL_WORKSPACES] = _new_target()
 
-    analysis = EgressAnalysis(observed=observed, targets=dict(targets), skipped_bare_s3=skipped_bare_s3)
+    analysis = EgressAnalysis(observed=observed, targets=dict(targets), skipped_bare_s3=skipped_bare_s3,
+                              dropped_s3_no_region=sorted(dropped_s3))
 
     if cfg.enable_rdap:
         on_step("Matching internet FQDNs to a cloud owner (offline range match)…")
@@ -262,7 +300,9 @@ def _build_egress_block(t: dict, blocked_domains: list, policy_mode: str):
 
     storage = []
     for (bucket, region) in t["s3"]:
-        storage.append(StorDest(bucket_name=bucket, region=region or None,
+        if not region:
+            continue  # region is required for AWS S3; a region-less entry would be rejected
+        storage.append(StorDest(bucket_name=bucket, region=region,
                                 storage_destination_type=StorType.AWS_S3))
     for bucket in t["gcs"]:
         storage.append(StorDest(bucket_name=bucket, storage_destination_type=StorType.GOOGLE_CLOUD_STORAGE))

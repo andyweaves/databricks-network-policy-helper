@@ -207,6 +207,12 @@ def egress_analysis(analysis: EgressAnalysis) -> None:
             f"Threat-intel blocked domains ({len(analysis.blocked_domains)})")
     if analysis.skipped_bare_s3:
         console.banner("info", f"Skipped {analysis.skipped_bare_s3} bare/path-style S3 endpoint(s).")
+    if analysis.dropped_s3_no_region:
+        buckets = ", ".join(analysis.dropped_s3_no_region)
+        console.banner("warn", f"Excluded {len(analysis.dropped_s3_no_region)} S3 bucket(s) whose "
+                               f"region could not be determined (region is required for an AWS "
+                               f"storage rule): {buckets}. Add them manually with their region if "
+                               f"needed.")
 
 
 def egress_preview(previews: dict, cfg: EgressConfig) -> None:
