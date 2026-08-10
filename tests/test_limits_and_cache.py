@@ -99,6 +99,22 @@ def test_cache_get_or_build_uses_builder_when_stale(tmp_path, monkeypatch):
     assert calls["n"] == 2
 
 
+def test_cache_does_not_persist_empty_results(tmp_path, monkeypatch):
+    # A failed download returns an empty frame — it must NOT be cached (else the next run reuses bad
+    # data for the whole TTL, which silently made all cloud/Databricks checks false).
+    monkeypatch.setattr(cache, "cache_dir", lambda: tmp_path)
+    calls = {"n": 0}
+
+    def build_empty():
+        calls["n"] += 1
+        return pd.DataFrame(columns=["cidr"])
+
+    cache.get_or_build("feed", build_empty, refresh=False)
+    assert cache.load("feed") is None       # nothing persisted
+    cache.get_or_build("feed", build_empty, refresh=False)
+    assert calls["n"] == 2                    # so the builder is retried, not served from cache
+
+
 def test_cache_clear(tmp_path, monkeypatch):
     monkeypatch.setattr(cache, "cache_dir", lambda: tmp_path)
     cache.store("a", pd.DataFrame({"x": [1]}))

@@ -47,13 +47,19 @@ def store(name: str, df: pd.DataFrame) -> None:
 
 def get_or_build(name: str, builder: Callable[[], pd.DataFrame], refresh: bool = False,
                  ttl: int = CACHE_TTL_SECONDS) -> pd.DataFrame:
-    """Return the cached feed table, (re)building via `builder` when missing/stale/forced."""
+    """Return the cached feed table, (re)building via `builder` when missing/stale/forced.
+
+    An empty result is NOT cached: an empty feed almost always means the download failed (network /
+    TLS / feed outage), and caching it would make the next run reuse bad data for the whole TTL —
+    which previously made all cloud/Databricks membership checks silently return false. Not caching
+    it means the next run retries the fetch."""
     if not refresh and is_fresh(name, ttl):
         cached = load(name)
-        if cached is not None:
+        if cached is not None and not cached.empty:
             return cached
     df = builder()
-    store(name, df)
+    if df is not None and not df.empty:
+        store(name, df)
     return df
 
 

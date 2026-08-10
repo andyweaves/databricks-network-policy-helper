@@ -66,6 +66,14 @@ def analyze(cfg: IngressConfig, sql_conn, workspace_client, on_step=lambda _m: N
     threat_df = loaders.threat_intel(cfg.threat_feeds, refresh=cfg.refresh_feeds)
     cloud_df = loaders.cloud_ranges(refresh=cfg.refresh_feeds)
     dbx_df = loaders.databricks_ranges(refresh=cfg.refresh_feeds)
+    on_step(f"Loaded enrichment ranges: {len(threat_df):,} threat-intel, {len(cloud_df):,} cloud, "
+            f"{len(dbx_df):,} Databricks.")
+    # A feed that comes back empty (download failed) would make its membership checks silently false;
+    # flag it so the operator knows the enrichment is degraded rather than trusting a clean result.
+    for label, df in (("cloud-provider", cloud_df), ("Databricks", dbx_df)):
+        if df.empty:
+            on_step(f"⚠️  {label} ranges are EMPTY — those checks can't run (likely a feed download "
+                    f"failure). Re-run with --refresh-feeds, or check network/proxy egress.")
     threat_ranges = enrich.load_ranges(threat_df, ["source_feed", "threat_type", "confidence", "source_url"])
     cloud_ranges = enrich.load_ranges(cloud_df, ["provider", "service", "region"])
     databricks_ranges = enrich.load_ranges(dbx_df, ["platform", "region", "direction"])
