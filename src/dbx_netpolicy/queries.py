@@ -30,6 +30,55 @@ def audit_row_count(lookback_days: int) -> str:
     return f"SELECT COUNT(*) AS n FROM ({_AUDIT_RECENT.format(lookback_days=lookback_days)})"
 
 
+# The private/reserved-range exclusion used by frequent_public_ips — factored out so the diagnostic
+# funnel counts "public" identically to the candidate query.
+_NOT_PRIVATE = """NOT (
+      ip_version = 4 AND (
+        ip_cidr_contains('10.0.0.0/8', normalized_ip)
+        OR ip_cidr_contains('172.16.0.0/12', normalized_ip)
+        OR ip_cidr_contains('192.168.0.0/16', normalized_ip)
+        OR ip_cidr_contains('127.0.0.0/8', normalized_ip)
+        OR ip_cidr_contains('169.254.0.0/16', normalized_ip)
+        OR ip_cidr_contains('100.64.0.0/10', normalized_ip)
+        OR ip_cidr_contains('192.0.2.0/24', normalized_ip)
+        OR ip_cidr_contains('198.18.0.0/15', normalized_ip)
+        OR ip_cidr_contains('198.51.100.0/24', normalized_ip)
+        OR ip_cidr_contains('203.0.113.0/24', normalized_ip)
+        OR normalized_ip = '0.0.0.0'
+      ))"""
+
+
+def candidate_funnel(lookback_days: int, treat_null_status_as_success: bool) -> str:
+    """A single-row diagnostic showing how many audit rows survive each successive filter the
+    candidate query applies — so an empty candidate set can be explained (private IPs? all
+    account-level? nothing successful?). Independent of the include_* toggles: it always reports
+    each dimension so the user can see which toggle would help."""
+    null_status_ok = "TRUE" if treat_null_status_as_success else "FALSE"
+    return f"""
+    WITH a AS ({_AUDIT_RECENT.format(lookback_days=lookback_days)})
+    SELECT
+      COUNT(*) AS total_rows,
+      SUM(CASE WHEN normalized_ip IS NOT NULL THEN 1 ELSE 0 END) AS with_source_ip,
+      SUM(CASE WHEN normalized_ip IS NOT NULL AND ip_version = 4 THEN 1 ELSE 0 END) AS ipv4,
+      SUM(CASE WHEN normalized_ip IS NOT NULL AND ip_version = 6 THEN 1 ELSE 0 END) AS ipv6,
+      SUM(CASE WHEN normalized_ip IS NOT NULL
+               AND (status_code < 400 OR (status_code IS NULL AND {null_status_ok}))
+               THEN 1 ELSE 0 END) AS successful,
+      SUM(CASE WHEN normalized_ip IS NOT NULL AND workspace_id <> 0 THEN 1 ELSE 0 END) AS workspace_level,
+      SUM(CASE WHEN normalized_ip IS NOT NULL AND workspace_id = 0 THEN 1 ELSE 0 END) AS account_level,
+      SUM(CASE WHEN normalized_ip IS NOT NULL AND ip_version = 4 AND {_NOT_PRIVATE}
+               THEN 1 ELSE 0 END) AS public_ipv4,
+      COUNT(DISTINCT CASE WHEN normalized_ip IS NOT NULL AND ip_version = 4 AND {_NOT_PRIVATE}
+               AND (status_code < 400 OR (status_code IS NULL AND {null_status_ok}))
+               THEN normalized_ip END) AS distinct_public_ok,
+      COUNT(DISTINCT CASE WHEN normalized_ip IS NOT NULL AND ip_version = 4 AND {_NOT_PRIVATE}
+               AND (status_code < 400 OR (status_code IS NULL AND {null_status_ok}))
+               AND workspace_id <> 0
+               THEN normalized_ip END) AS distinct_public_ok_ws
+    FROM a
+    """
+
+
 def surface_summary(lookback_days: int) -> str:
     return f"""
     WITH audit_recent AS ({_AUDIT_RECENT.format(lookback_days=lookback_days)})

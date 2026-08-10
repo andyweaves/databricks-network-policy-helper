@@ -70,12 +70,14 @@ def acl_decisions(cfg: AclConfig) -> None:
 
 
 # ------------------------------------------------------------------------------- ingress tables
-def ingress_analysis(analysis: IngressAnalysis) -> None:
+def ingress_analysis(analysis: IngressAnalysis, cfg: IngressConfig | None = None) -> None:
     console.rule("Candidate public source IPs")
     console.dataframe(_trim(analysis.candidates,
                             ["public_ip", "events", "principals", "services", "active_days",
                              "first_active_date", "last_active_date"]),
                       f"Frequent public source IPs ({len(analysis.candidates):,})")
+    if analysis.candidates.empty and analysis.funnel is not None:
+        _explain_empty_candidates(analysis.funnel, cfg)
 
     console.rule("Proposed CIDR groups")
     if analysis.suggestions.empty:
@@ -105,6 +107,53 @@ def ingress_analysis(analysis: IngressAnalysis) -> None:
                                 ["source_ip", "denied_events", "principals", "first_denied",
                                  "last_denied"]),
                           "Source IPs currently blocked by the IP ACL")
+
+
+def _explain_empty_candidates(funnel: dict, cfg: IngressConfig | None) -> None:
+    """Turn the diagnostic funnel into a readable table + targeted hints, so an empty candidate set
+    tells the user *where* their IPs were dropped and which knob would help."""
+    def _n(key):
+        return int(funnel.get(key) or 0)
+
+    rows = [
+        ("total audit rows", _n("total_rows"), ""),
+        ("… with a source IP", _n("with_source_ip"), "rows carrying a usable source_ip_address"),
+        ("… IPv4 / IPv6", f"{_n('ipv4'):,} / {_n('ipv6'):,}", "CBI policies are IPv4-only"),
+        ("… successful", _n("successful"), "status_code < 400 (or NULL if you opted in)"),
+        ("… workspace-level / account-level", f"{_n('workspace_level'):,} / {_n('account_level'):,}",
+         "workspace_id <> 0 vs = 0"),
+        ("… public IPv4", _n("public_ipv4"), "private/CGNAT/reserved ranges excluded"),
+        ("distinct public IPs (successful)", _n("distinct_public_ok"),
+         "candidates if account-level is included"),
+        ("distinct public IPs (successful, workspace-level)", _n("distinct_public_ok_ws"),
+         "candidates under the default filters"),
+    ]
+    df = pd.DataFrame([{"filter stage": s, "rows / count": v, "meaning": m} for s, v, m in rows])
+    console.banner("warn", "No candidate public source IPs survived the filters. Here's the funnel:")
+    console.dataframe(df, "Why the candidate set is empty", max_rows=50)
+
+    # Targeted, ordered hints — most likely cause first.
+    hints = []
+    include_account = getattr(cfg, "include_account_level", False) if cfg else False
+    if _n("distinct_public_ok_ws") == 0 and _n("distinct_public_ok") > 0 and not include_account:
+        hints.append("Public IPs appear only on ACCOUNT-LEVEL rows (workspace_id=0) — e.g. account "
+                     "console / SCIM traffic. Re-run with --include-account-level to use them.")
+    if _n("with_source_ip") > 0 and _n("public_ipv4") == 0 and _n("ipv4") > 0:
+        hints.append("Source IPs are all private/reserved — this workspace likely uses PrivateLink "
+                     "or a NAT gateway, so the audit log records the relay's private IP, not the "
+                     "user's public IP. A source-IP allow-list can't be built from this traffic.")
+    if _n("successful") == 0 and _n("with_source_ip") > 0:
+        hints.append("No rows counted as successful — try --treat-null-status-as-success if your "
+                     "audit rows have NULL status_code.")
+    if _n("ipv4") == 0 and _n("ipv6") > 0:
+        hints.append("Traffic is IPv6-only; CBI policies are IPv4-only, so nothing can be proposed.")
+    if _n("total_rows") == 0:
+        hints.append("No audit rows in the window at all — widen --lookback-days, or confirm the "
+                     "warehouse can read system.access.audit.")
+    if not hints:
+        hints.append("Try widening --lookback-days, lowering --min-events, or --include-account-level.")
+    for h in hints:
+        console.banner("info", h)
 
 
 def ingress_preview(previews: dict, cfg: IngressConfig, analysis: IngressAnalysis) -> None:
