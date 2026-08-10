@@ -71,8 +71,8 @@ Claude skill under [`.claude/skills/`](.claude/skills/).
 Each helper can add its rules to an existing policy, so you compose one yourself in two runs:
 
 1. 🥇 Run the first direction with `--create-policy --policy-action create_new`. It creates the policy
-   (named from `--name-prefix`, e.g. `np-helper`) and prints its **policy id**. Use `--policy-scope
-   single`.
+   and prints its **policy id**. Use a single-policy scope (`--policy-scope current_workspace` or
+   `all_workspaces`), not `per_workspace`.
 2. 🥈 Run the second direction with `--create-policy --policy-action add_to_existing
    --existing-policy-id <id>`. It updates **only its own direction**, leaving the first intact.
 
@@ -117,12 +117,12 @@ tool's reference doc.
 
 | Path | What |
 |---|---|
-| `src/dbx_netpolicy/cli.py` | 🎛️ The Typer CLI (all commands + flags). |
-| `src/dbx_netpolicy/guided.py` | 🧭 The interactive Q&A wizard. |
-| `src/dbx_netpolicy/core/` | 🧠 Engines: ingress, egress, ACL, policy builders, limits. |
-| `src/dbx_netpolicy/feeds/` | 🕵️ Threat-intel / cloud / Databricks range loaders + local cache + RDAP. |
-| `src/dbx_netpolicy/{auth,sql,queries}.py` | 🔌 Unified auth, SQL-warehouse connection, system-table queries. |
-| `src/dbx_netpolicy/{console,render}.py` | 🎨 Rich theming + result rendering. |
+| `src/dbx_nwp_helper/cli.py` | 🎛️ The Typer CLI (all commands + flags). |
+| `src/dbx_nwp_helper/guided.py` | 🧭 The interactive Q&A wizard. |
+| `src/dbx_nwp_helper/core/` | 🧠 Engines: ingress, egress, ACL, policy builders, limits. |
+| `src/dbx_nwp_helper/feeds/` | 🕵️ Threat-intel / cloud / Databricks range loaders + local cache + RDAP. |
+| `src/dbx_nwp_helper/{auth,sql,queries}.py` | 🔌 Unified auth, SQL-warehouse connection, system-table queries. |
+| `src/dbx_nwp_helper/{console,render}.py` | 🎨 Rich theming + result rendering. |
 | `.claude/skills/<tool>/SKILL.md` | 📚 Per-tool reference doc + Claude skill. |
 | `docs/account-admin-setup.md` | 👑 Account-admin credential setup (applying a policy). |
 | `docs/cbi-sdk-schema.md` | 🧩 The verified `AccountNetworkPolicy` SDK object model. |
@@ -145,7 +145,7 @@ uv run pytest -k threat_deny                     # tests matching a keyword
 Coverage (optional, prints per-module line coverage):
 
 ```bash
-uv run --with pytest-cov pytest --cov=dbx_netpolicy --cov-report=term-missing
+uv run --with pytest-cov pytest --cov=dbx_nwp_helper --cov-report=term-missing
 ```
 
 Lint with ruff (the CI standard for this repo):

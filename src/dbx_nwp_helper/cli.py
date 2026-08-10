@@ -55,7 +55,8 @@ class Scoping(str, Enum):
 
 
 class Scope(str, Enum):
-    single = "single"; per_workspace = "per_workspace"  # noqa: E702
+    current_workspace = "current_workspace"  # noqa: E702
+    per_workspace = "per_workspace"; all_workspaces = "all_workspaces"  # noqa: E702
 
 
 class Mode(str, Enum):
@@ -208,7 +209,9 @@ def ingress(
     policy_framing: Framing = typer.Option(Framing.minimal, help="CIDR framing."),
     scoping_mode: Scoping = typer.Option(Scoping.ip_only, help="Destination/identity scoping."),
     policy_scope: Scope = typer.Option(
-        Scope.per_workspace, help="Per-workspace policy (default) or a single policy for all."),
+        Scope.current_workspace,
+        help="current_workspace (default): one policy for the profile's workspace; per_workspace: "
+             "one per workspace seen; all_workspaces: a single policy from all workspaces' traffic."),
     policy_mode: Mode = typer.Option(Mode.dry_run, help="dry_run=log-only; enforce=blocking."),
     threat_deny_rules: ThreatDeny = typer.Option(ThreatDeny.off, help="Threat-intel deny rules."),
     name_prefix: str = typer.Option("np-helper", help="Prefix for policy names/labels."),
@@ -257,7 +260,9 @@ def egress(
     enable_rdap: bool = typer.Option(True, help="Cloud-owner lookup for internet FQDNs."),
     refresh_feeds: bool = typer.Option(False, help="Force re-download of cached feeds."),
     policy_scope: Scope = typer.Option(
-        Scope.per_workspace, help="Per-workspace policy (default) or a single policy for all."),
+        Scope.current_workspace,
+        help="current_workspace (default): one policy for the profile's workspace; per_workspace: "
+             "one per workspace seen; all_workspaces: a single policy from all workspaces' traffic."),
     policy_mode: Mode = typer.Option(Mode.dry_run, help="dry_run=log-only; enforce=blocking."),
     block_threat_domains: ThreatDeny = typer.Option(
         ThreatDeny.off, help="Block known-bad domains: off/matched_only/all."),
@@ -422,7 +427,7 @@ def _run_ingress(cfg: IngressConfig, conn: Connection, yes: bool) -> None:
     this_ws = auth.this_workspace_id(conn)
     with console.status("Applying policy…"):
         results = rules.apply(policies, cfg, account, conn.account_id, this_ws,
-                              note=lambda m: console.banner("info", m))
+                              profile=conn.profile, note=lambda m: console.banner("info", m))
     render.apply_results(results, conn.account_host, conn.account_id)
 
 
@@ -443,9 +448,12 @@ def _run_egress(cfg: EgressConfig, conn: Connection, yes: bool) -> None:
     if cfg.apply.create_policy:
         _ensure_account_id(conn, "Creating a policy")
 
+    # current_workspace scope needs this workspace's id to both filter analysis and name the policy.
+    this_ws = auth.this_workspace_id(conn) if cfg.policy_scope == "current_workspace" else None
+
     http_path = sql.resolve_warehouse(conn)
     with sql.connection(conn, http_path) as sconn:
-        analysis = eg.analyze(cfg, sconn, on_step=_step)
+        analysis = eg.analyze(cfg, sconn, on_step=_step, this_workspace_id=this_ws)
 
     render.egress_analysis(analysis)
     previews = eg.preview_blocks(analysis, cfg)
@@ -466,10 +474,11 @@ def _run_egress(cfg: EgressConfig, conn: Connection, yes: bool) -> None:
         return
 
     account = auth.account_client(conn)
-    this_ws = auth.this_workspace_id(conn)
+    if this_ws is None:
+        this_ws = auth.this_workspace_id(conn)
     with console.status("Applying egress policy…"):
         results = eg.apply(analysis, cfg, account, conn.account_id, this_ws,
-                           note=lambda m: console.banner("info", m))
+                           profile=conn.profile, note=lambda m: console.banner("info", m))
     render.apply_results(results, conn.account_host, conn.account_id)
 
 

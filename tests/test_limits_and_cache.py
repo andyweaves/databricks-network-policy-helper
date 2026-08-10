@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import pandas as pd
 
-from dbx_netpolicy.config import (
+from dbx_nwp_helper.config import (
     MAX_CIDRS_PER_POLICY,
     MAX_IDENTITIES_PER_POLICY,
     MAX_INGRESS_RULES_PER_POLICY,
 )
-from dbx_netpolicy.core import limits
-from dbx_netpolicy.core.egress import _classify, _host_hostfile
-from dbx_netpolicy.feeds import cache
+from dbx_nwp_helper.core import limits
+from dbx_nwp_helper.core.egress import _classify, _host_hostfile
+from dbx_nwp_helper.feeds import cache
 
 
 def _noop(_m):
@@ -99,6 +99,22 @@ def test_cache_get_or_build_uses_builder_when_stale(tmp_path, monkeypatch):
     assert calls["n"] == 2
 
 
+def test_cache_does_not_persist_empty_results(tmp_path, monkeypatch):
+    # A failed download returns an empty frame — it must NOT be cached (else the next run reuses bad
+    # data for the whole TTL, which silently made all cloud/Databricks checks false).
+    monkeypatch.setattr(cache, "cache_dir", lambda: tmp_path)
+    calls = {"n": 0}
+
+    def build_empty():
+        calls["n"] += 1
+        return pd.DataFrame(columns=["cidr"])
+
+    cache.get_or_build("feed", build_empty, refresh=False)
+    assert cache.load("feed") is None       # nothing persisted
+    cache.get_or_build("feed", build_empty, refresh=False)
+    assert calls["n"] == 2                    # so the builder is retried, not served from cache
+
+
 def test_cache_clear(tmp_path, monkeypatch):
     monkeypatch.setattr(cache, "cache_dir", lambda: tmp_path)
     cache.store("a", pd.DataFrame({"x": [1]}))
@@ -109,7 +125,7 @@ def test_cache_clear(tmp_path, monkeypatch):
 
 
 def test_tls_enable_idempotent():
-    from dbx_netpolicy import tls
+    from dbx_nwp_helper import tls
     # Should return a bool and never raise; second call is a no-op.
     first = tls.enable()
     second = tls.enable()

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from dbx_netpolicy import render
+from dbx_nwp_helper import render
 
 
 def test_apply_results_reports_id_and_url(capsys):

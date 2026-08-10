@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from dbx_netpolicy.config import ApplyOptions, IngressConfig, validate_apply
+from dbx_nwp_helper.config import ApplyOptions, IngressConfig, validate_apply
 
 
 def test_ingress_scope_properties():
@@ -22,10 +22,10 @@ def test_include_account_level_defaults_false():
     assert IngressConfig().include_account_level is False
 
 
-def test_policy_scope_defaults_to_per_workspace():
-    from dbx_netpolicy.config import EgressConfig
-    assert IngressConfig().policy_scope == "per_workspace"
-    assert EgressConfig().policy_scope == "per_workspace"
+def test_policy_scope_defaults_to_current_workspace():
+    from dbx_nwp_helper.config import EgressConfig
+    assert IngressConfig().policy_scope == "current_workspace"
+    assert EgressConfig().policy_scope == "current_workspace"
 
 
 def test_policy_mode_target_maps_to_block():
@@ -44,17 +44,19 @@ def test_validate_apply_noop_when_not_creating():
 def test_validate_apply_requires_existing_id():
     with pytest.raises(ValueError, match="existing-policy-id"):
         validate_apply(ApplyOptions(create_policy=True, policy_action="add_to_existing"),
-                       "single", "egress")
+                       "current_workspace", "egress")
 
 
-def test_validate_apply_requires_single_scope():
-    with pytest.raises(ValueError, match="single"):
+def test_validate_apply_rejects_per_workspace():
+    with pytest.raises(ValueError, match="per_workspace"):
         validate_apply(
             ApplyOptions(create_policy=True, policy_action="add_to_existing", existing_policy_id="p"),
             "per_workspace", "egress")
 
 
-def test_validate_apply_ok_single_with_id():
-    validate_apply(
-        ApplyOptions(create_policy=True, policy_action="add_to_existing", existing_policy_id="p"),
-        "single", "egress")
+def test_validate_apply_ok_single_scopes_with_id():
+    # both single-policy scopes are valid targets for add_to_existing
+    for scope in ("current_workspace", "all_workspaces"):
+        validate_apply(
+            ApplyOptions(create_policy=True, policy_action="add_to_existing", existing_policy_id="p"),
+            scope, "egress")

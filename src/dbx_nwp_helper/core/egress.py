@@ -92,12 +92,17 @@ def _infer_s3_region(bucket: str) -> str | None:
     return None
 
 
-def analyze(cfg: EgressConfig, sql_conn, on_step=lambda _m: None) -> EgressAnalysis:
+def analyze(cfg: EgressConfig, sql_conn, on_step=lambda _m: None,
+            this_workspace_id=None) -> EgressAnalysis:
     from .. import queries, sql
+
+    only_ws = this_workspace_id if cfg.policy_scope == "current_workspace" else None
+    if only_ws is not None:
+        on_step(f"Scope=current_workspace — restricting analysis to workspace {only_ws}.")
 
     on_step("Querying observed egress destinations…")
     observed = sql.query(sql_conn, queries.observed_egress(
-        cfg.lookback_days, cfg.min_events, cfg.source_type_filter))
+        cfg.lookback_days, cfg.min_events, cfg.source_type_filter, only_workspace_id=only_ws))
 
     targets = defaultdict(_new_target)
     fqdn_resolved_ips = {}
@@ -337,15 +342,21 @@ def preview_blocks(analysis: EgressAnalysis, cfg: EgressConfig) -> dict:
 
 
 def apply(analysis: EgressAnalysis, cfg: EgressConfig, account, account_id: str,
-          this_workspace_id, note: Note = lambda _m: None) -> list[dict]:
+          this_workspace_id, profile: str | None = None, note: Note = lambda _m: None) -> list[dict]:
     from . import policy
 
     blocks = build_blocks(analysis, cfg)
     add_to_existing = cfg.apply.policy_action == "add_to_existing"
     results = []
     for tgt in sorted(blocks, key=str):
-        pid = cfg.apply.existing_policy_id if add_to_existing else policy.policy_name(
-            cfg.name_prefix, workspace_id=(None if tgt == ALL_WORKSPACES else int(tgt)))
+        if add_to_existing:
+            pid = cfg.apply.existing_policy_id
+        elif tgt != ALL_WORKSPACES:
+            pid = policy.policy_name(cfg.name_prefix, workspace_id=int(tgt))
+        elif cfg.policy_scope == "current_workspace":
+            pid = policy.policy_name(cfg.name_prefix, suffix=profile or str(this_workspace_id))
+        else:
+            pid = policy.policy_name(cfg.name_prefix)
         bind_ws = this_workspace_id if tgt == ALL_WORKSPACES else int(tgt)
         try:
             action, effective_id = policy.apply_egress(
