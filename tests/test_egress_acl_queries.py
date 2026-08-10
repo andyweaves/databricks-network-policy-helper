@@ -34,6 +34,47 @@ def test_egress_analyze_targets_and_union(monkeypatch):
     assert a.skipped_bare_s3 == 1
 
 
+def test_egress_global_s3_region_inferred(monkeypatch):
+    # <bucket>.s3.amazonaws.com has no region in the host -> infer it, keep the bucket.
+    observed = pd.DataFrame([
+        {"destination": "mybucket.s3.amazonaws.com", "destination_type": "DNS", "events": 4,
+         "workspace_ids": [1], "resolved_ips": []}])
+    monkeypatch.setattr("dbx_netpolicy.sql.query", lambda _c, _t: observed)
+    monkeypatch.setattr(eg, "_infer_s3_region", lambda bucket: "us-east-1")
+    cfg = EgressConfig(enable_rdap=False, block_threat_domains="off")
+    a = eg.analyze(cfg, sql_conn=None)
+    assert eg.union(a.targets, "s3") == {("mybucket", "us-east-1"): 4}
+    assert a.dropped_s3_no_region == []
+
+
+def test_egress_global_s3_region_uninferable_dropped(monkeypatch):
+    # region can't be inferred -> drop the bucket, flag it, and never emit an invalid rule.
+    observed = pd.DataFrame([
+        {"destination": "mybucket.s3.amazonaws.com", "destination_type": "DNS", "events": 4,
+         "workspace_ids": [1], "resolved_ips": []}])
+    monkeypatch.setattr("dbx_netpolicy.sql.query", lambda _c, _t: observed)
+    monkeypatch.setattr(eg, "_infer_s3_region", lambda bucket: None)
+    cfg = EgressConfig(enable_rdap=False, block_threat_domains="off")
+    a = eg.analyze(cfg, sql_conn=None)
+    assert eg.union(a.targets, "s3") == {}
+    assert a.dropped_s3_no_region == ["mybucket"]
+    # the built block must contain no S3 storage destination (no invalid region-less entry)
+    assert eg.build_blocks(a, cfg) == {}
+
+
+def test_egress_build_skips_regionless_s3_defensively():
+    # Even if a region-less entry somehow reaches the target dict, the builder must skip it.
+    a = eg.EgressAnalysis(observed=pd.DataFrame(),
+                          targets={eg.ALL_WORKSPACES: {"s3": {("b", ""): 3}, "gcs": {}, "azure": {},
+                                                       "internet": {}}})
+    cfg = EgressConfig(enable_rdap=False, block_threat_domains="off")
+    blocks = eg.build_blocks(a, cfg)
+    # target has "content" (the s3 dict is non-empty) but the region-less entry is skipped ->
+    # no allowed_storage_destinations
+    block = blocks[eg.ALL_WORKSPACES].as_dict()["network_access"]
+    assert not block.get("allowed_storage_destinations")
+
+
 def test_egress_per_workspace_fans_out(monkeypatch):
     observed = pd.DataFrame([
         {"destination": "api.openai.com", "destination_type": "DNS", "events": 5,
