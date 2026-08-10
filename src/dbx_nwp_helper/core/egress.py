@@ -162,6 +162,24 @@ def analyze(cfg: EgressConfig, sql_conn, on_step=lambda _m: None,
     return analysis
 
 
+def recommend(hosting_owner: str | None) -> str:
+    """Map an internet-FQDN hosting owner (from the offline cloud-range match) to a recommendation:
+      Databricks-owned              -> ALLOW
+      a known cloud (AWS/GCP/Azure)  -> REVIEW — Cloud-owned
+      matched, non-cloud            -> REVIEW — Other infra provider
+      owner-lookup off / DNS failed -> REVIEW — owner unknown  (don't claim a provider we can't see)
+    (Storage destinations — S3/GCS/Azure — are always cloud-owned, so they get REVIEW — Cloud-owned.)"""
+    if hosting_owner == "Databricks":
+        return "ALLOW — Databricks-owned"
+    if hosting_owner in ("AWS", "GCP", "AZURE", "Azure", "ORACLE", "Oracle"):
+        return "REVIEW — Cloud-owned"
+    # "non-cloud / unknown" (no RDAP match) or "non-cloud: <owner>" (RDAP named a non-cloud provider).
+    if hosting_owner and hosting_owner.startswith("non-cloud"):
+        return "REVIEW — Other infra provider"
+    # None (owner lookup disabled) or a "DNS resolution failed …" status.
+    return "REVIEW — owner unknown"
+
+
 def union(targets: dict, key: str) -> dict:
     merged = {}
     for t in targets:
@@ -208,6 +226,17 @@ def _owner_lookup(analysis: EgressAnalysis, fqdn_resolved_ips: dict, cfg: Egress
                 return owner
         return "non-cloud / unknown"
 
+    from ..feeds import rdap
+
+    rdap_cache: dict[str, str | None] = {}
+
+    def rdap_owner(ip):
+        """RDAP fallback for IPs not in a published cloud range — names the real owner (Cloudflare,
+        Akamai, DigitalOcean, …). Cached per IP; best-effort (None on failure)."""
+        if ip not in rdap_cache:
+            rdap_cache[ip] = (rdap.lookup(ip) or {}).get("rdap_owner_name")
+        return rdap_cache[ip]
+
     for fqdn in all_fqdns:
         ip = next(iter(fqdn_resolved_ips.get(fqdn, [])), None)
         if ip is None:
@@ -216,8 +245,15 @@ def _owner_lookup(analysis: EgressAnalysis, fqdn_resolved_ips: dict, cfg: Egress
             except OSError:
                 ip = None
         analysis.fqdn_ip[fqdn] = ip
-        analysis.fqdn_owner[fqdn] = (owner_for_ip(ip) if ip is not None
-                                     else "DNS resolution failed - check egress control")
+        if ip is None:
+            analysis.fqdn_owner[fqdn] = "DNS resolution failed - check egress control"
+            continue
+        owner = owner_for_ip(ip)
+        if owner == "non-cloud / unknown":
+            # Not a known cloud range — ask RDAP who actually owns the IP.
+            named = rdap_owner(ip)
+            owner = f"non-cloud: {named}" if named else "non-cloud / unknown"
+        analysis.fqdn_owner[fqdn] = owner
 
 
 def _host_hostfile(line: str) -> str:

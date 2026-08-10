@@ -227,8 +227,8 @@ def _build_suggestions(enriched, cfg) -> list[dict]:
             "recommendation": (
                 "ALLOW — Databricks-owned" if databricks_owned else
                 "REVIEW — known-bad range" if threat_feeds else
-                "REVIEW — cloud-owned range" if cloud_providers else
-                "candidate"
+                "REVIEW — Cloud-owned range" if cloud_providers else
+                "REVIEW — Other hosting provider"
             ),
         })
     return suggestion_rows

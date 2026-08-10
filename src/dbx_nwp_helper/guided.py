@@ -102,7 +102,7 @@ def _ingress_wizard(conn: Connection) -> IngressConfig:
     acl_handling = _select("How should an existing IP ACL be treated?", IP_ACL_HANDLING,
                            default="migrate_and_enrich")
     threat_deny = _select("Add threat-intel deny rules?", THREAT_DENY_RULES, default="off")
-    name_prefix = _text("Name prefix for the policy?", "np-helper")
+    name_prefix = _text("Name prefix for the policy?", "dbx-nwp")
 
     apply = _apply_wizard(conn, scope, other="egress")
     mode = _mode_wizard() if apply.create_policy else "dry_run"
@@ -121,7 +121,7 @@ def _egress_wizard(conn: Connection) -> EgressConfig:
     scope = _select("Policy scope?", POLICY_SCOPES, default="current_workspace")
     enable_rdap = _confirm("Look up the cloud owner of internet FQDNs?", True)
     block = _select("Block known-bad domains from a threat feed?", BLOCK_THREAT_DOMAINS, default="off")
-    name_prefix = _text("Name prefix for the policy?", "np-helper")
+    name_prefix = _text("Name prefix for the policy?", "dbx-nwp")
 
     apply = _apply_wizard(conn, scope, other="ingress")
     mode = _mode_wizard() if apply.create_policy else "dry_run"
@@ -133,7 +133,7 @@ def _egress_wizard(conn: Connection) -> EgressConfig:
 
 def _acl_wizard(conn: Connection) -> AclConfig:
     console.rule("IP ACL migration questions")
-    name_prefix = _text("Name prefix for the policy?", "np-helper")
+    name_prefix = _text("Name prefix for the policy?", "dbx-nwp")
     egress_policy = _select("Egress to set on a newly-created policy?", ACL_EGRESS_POLICIES,
                             default="allow_all")
     create = bool(conn.account_id) and _confirm("Create the policy now (needs account admin)?", False)

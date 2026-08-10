@@ -187,19 +187,21 @@ def egress_analysis(analysis: EgressAnalysis) -> None:
 
     console.dataframe(
         pd.DataFrame([{"fqdn": f, "events": n, "resolved_ip": analysis.fqdn_ip.get(f),
-                       "hosting_owner": analysis.fqdn_owner.get(f)}
+                       "hosting_owner": analysis.fqdn_owner.get(f),
+                       "recommendation": egress_core.recommend(analysis.fqdn_owner.get(f))}
                       for f, n in sorted(internet.items(), key=lambda kv: kv[1], reverse=True)]),
         f"Internet FQDNs to allow ({len(internet)})")
+    # Storage destinations are inherently cloud-owned buckets/accounts -> cloud-owned recommendation.
     console.dataframe(
-        pd.DataFrame([{"bucket": b, "region": reg, "events": n}
+        pd.DataFrame([{"bucket": b, "region": reg, "events": n, "recommendation": "REVIEW — Cloud-owned"}
                       for (b, reg), n in sorted(s3.items(), key=lambda kv: kv[1], reverse=True)]),
         f"AWS S3 buckets ({len(s3)})")
     console.dataframe(
-        pd.DataFrame([{"bucket": b, "events": n}
+        pd.DataFrame([{"bucket": b, "events": n, "recommendation": "REVIEW — Cloud-owned"}
                       for b, n in sorted(gcs.items(), key=lambda kv: kv[1], reverse=True)]),
         f"GCS buckets ({len(gcs)})")
     console.dataframe(
-        pd.DataFrame([{"account": a, "service": s, "events": n}
+        pd.DataFrame([{"account": a, "service": s, "events": n, "recommendation": "REVIEW — Cloud-owned"}
                       for (a, s), n in sorted(azure.items(), key=lambda kv: kv[1], reverse=True)]),
         f"Azure storage ({len(azure)})")
     if analysis.blocked_domains:

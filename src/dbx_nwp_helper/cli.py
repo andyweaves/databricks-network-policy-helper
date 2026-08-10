@@ -214,7 +214,7 @@ def ingress(
              "one per workspace seen; all_workspaces: a single policy from all workspaces' traffic."),
     policy_mode: Mode = typer.Option(Mode.dry_run, help="dry_run=log-only; enforce=blocking."),
     threat_deny_rules: ThreatDeny = typer.Option(ThreatDeny.off, help="Threat-intel deny rules."),
-    name_prefix: str = typer.Option("np-helper", help="Prefix for policy names/labels."),
+    name_prefix: str = typer.Option("dbx-nwp", help="Prefix for policy names/labels."),
     ip_acl_handling: AclHandling = typer.Option(
         AclHandling.migrate_and_enrich, help="How to treat an existing IP ACL."),
     deny_denied_ips: bool = typer.Option(False, help="Deny currently-denied (403) source IPs."),
@@ -267,7 +267,7 @@ def egress(
     block_threat_domains: ThreatDeny = typer.Option(
         ThreatDeny.off, help="Block known-bad domains: off/matched_only/all."),
     threat_feed: str = typer.Option("threatfox", help="Threat-domain feed."),
-    name_prefix: str = typer.Option("np-helper", help="Prefix for policy names/labels."),
+    name_prefix: str = typer.Option("dbx-nwp", help="Prefix for policy names/labels."),
     account_id: str | None = typer.Option(None, help="Databricks account_id (apply)."),
     account_host: str = typer.Option("https://accounts.cloud.databricks.com", help="Account host."),
     account_profile: str | None = typer.Option(
@@ -295,7 +295,7 @@ def egress(
 def migrate_acl(
     profile: str | None = typer.Option(None, help="Databricks CLI/config profile."),
     policy_mode: Mode = typer.Option(Mode.enforce, help="enforce (default) or dry_run."),
-    name_prefix: str = typer.Option("np-helper", help="Prefix for the policy name/labels."),
+    name_prefix: str = typer.Option("dbx-nwp", help="Prefix for the policy name/labels."),
     egress_policy: AclEgress = typer.Option(AclEgress.allow_all, help="Egress set on create."),
     auto_assign: bool = typer.Option(True, help="Bind this workspace to the new policy."),
     account_id: str | None = typer.Option(None, help="Databricks account_id (apply)."),
