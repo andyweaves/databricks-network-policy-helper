@@ -101,6 +101,36 @@ tool's reference doc.
 | `docs/threat-intel-feeds.md` | 🕵️ The enrichment feeds, what each represents, licensing. |
 | `tests/` | ✅ Offline engine tests (fixtures; no Databricks/network). |
 
+## 🧪 Development & tests
+
+The test suite is **fully offline** — it uses fixtures and fakes, so it needs no Databricks
+workspace, no warehouse, and no network access. Run it with `uv`:
+
+```bash
+uv sync                 # once, to set up the dev environment (installs pytest, ruff)
+uv run pytest           # run all tests
+uv run pytest -q        # quieter output
+uv run pytest tests/test_ingress_rules.py       # a single file
+uv run pytest -k threat_deny                     # tests matching a keyword
+```
+
+Coverage (optional, prints per-module line coverage):
+
+```bash
+uv run --with pytest-cov pytest --cov=dbx_netpolicy --cov-report=term-missing
+```
+
+Lint with ruff (the CI standard for this repo):
+
+```bash
+uv run ruff check src/ tests/     # report issues
+uv run ruff check --fix src/ tests/   # auto-fix what it can
+```
+
+Please keep `pytest` and `ruff` green before opening a PR. When you change behaviour, add or update a
+test — the engines (`core/`), feed parsers (`feeds/`), and query builders (`queries.py`) are all
+covered by fast, network-free unit tests, and CLI flows are exercised via Typer's `CliRunner`.
+
 ## 📝 Notes & caveats
 
 - Requires `databricks-sdk>=0.113.0` for the network-policy dataclasses (pinned in `pyproject.toml`).
