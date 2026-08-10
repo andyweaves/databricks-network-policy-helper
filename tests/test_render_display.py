@@ -7,6 +7,28 @@ import pandas as pd
 from dbx_netpolicy import render
 
 
+def test_apply_results_reports_id_and_url(capsys):
+    render.apply_results(
+        [{"target": "single", "action": "created", "policy_id": "np-helper"}],
+        account_host="https://accounts.cloud.databricks.com", account_id="ACC")
+    out = capsys.readouterr().out
+    assert "network policy id: np-helper" in out
+    assert "network-access-policies/np-helper?account_id=ACC" in out
+
+
+def test_apply_results_reports_id_without_url_when_no_account(capsys):
+    render.apply_results([{"target": "single", "action": "updated", "policy_id": "np-helper"}])
+    out = capsys.readouterr().out
+    assert "network policy id: np-helper" in out
+    assert "network-access-policies" not in out  # no URL without host/account_id
+
+
+def test_apply_results_reports_errors(capsys):
+    render.apply_results([{"target": 123, "error": "boom"}])
+    out = capsys.readouterr().out
+    assert "boom" in out
+
+
 def test_policy_url_format():
     url = render.policy_url("https://accounts.cloud.databricks.com", "ACC123", "np-helper")
     assert url == ("https://accounts.cloud.databricks.com/security/networking/"

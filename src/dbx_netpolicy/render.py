@@ -250,12 +250,16 @@ def apply_results(results: list[dict], account_host: str = "", account_id: str =
         if "error" in r:
             console.banner("danger", f"target {r['target']}: {r['error']}")
             continue
-        msg = f"{r['action']} '{r['policy_id']}'"
+        msg = f"{r['action']} network policy"
         if r.get("assigned") is not None:
             msg += f" and bound workspace {r['assigned']}"
         console.banner("success", msg)
+        console.console.print(f"   [key]network policy id:[/key] {r['policy_id']}")
         if account_host and account_id:
-            console.console.print(f"   [info]{policy_url(account_host, account_id, r['policy_id'])}[/info]")
+            url = policy_url(account_host, account_id, r["policy_id"])
+            # soft_wrap keeps the URL on one logical line (terminals still soft-wrap the display,
+            # but it stays a single copy-pasteable string and isn't hard-broken mid-token).
+            console.console.print(f"   [key]url:[/key] [info]{url}[/info]", soft_wrap=True)
 
 
 def _trim(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
