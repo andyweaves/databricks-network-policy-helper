@@ -69,22 +69,52 @@ def test_confirm_params_accept_proceeds(monkeypatch):
     cli._confirm_params(yes=False)  # must not raise
 
 
-def test_confirm_write_yes_shows_warning_and_proceeds(capsys):
-    # --yes must still surface the responsibility warning (never silently skip it) and return True.
-    result = cli._confirm_write("dry_run", yes=True, direction="source IP addresses")
-    out = capsys.readouterr().out
-    assert result is True
-    assert "responsib" in out.lower()
-    assert "source IP addresses" in out
+def test_confirm_write_yes_proceeds():
+    assert cli._confirm_write("dry_run", yes=True) is True
 
 
-def test_confirm_write_interactive_decline(monkeypatch, capsys):
+def test_confirm_write_interactive_decline(monkeypatch):
     monkeypatch.setattr("typer.confirm", lambda *a, **k: False)
-    result = cli._confirm_write("enforce", yes=False, direction="FQDNs and storage destinations")
+    assert cli._confirm_write("enforce", yes=False) is False
+
+
+def test_responsibility_warning_shown(capsys):
+    from dbx_netpolicy import console
+    console.responsibility_warning("source IP addresses / CIDRs")
     out = capsys.readouterr().out
-    assert result is False
     assert "responsib" in out.lower()
-    assert "FQDNs and storage destinations" in out
+    assert "security-enforcing" in out.lower()
+    # mentions the reuse-the-JSON case, not just create-here
+    assert "copy this JSON" in out or "copy" in out.lower()
+
+
+def test_ensure_account_id_passthrough_when_set():
+    from dbx_netpolicy.config import Connection
+    conn = Connection(account_id="already-set")
+    cli._ensure_account_id(conn, "Creating a policy")  # no prompt, no raise
+    assert conn.account_id == "already-set"
+
+
+def test_ensure_account_id_noninteractive_errors(monkeypatch):
+    import typer
+
+    from dbx_netpolicy.config import Connection
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    with pytest.raises(typer.BadParameter):
+        cli._ensure_account_id(Connection(account_id=""), "Creating a policy")
+
+
+def test_ensure_account_id_prompts_interactive(monkeypatch):
+    from dbx_netpolicy.config import Connection
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+    class _Q:
+        def ask(self):
+            return "  1234567890  "
+    monkeypatch.setattr("questionary.text", lambda *a, **k: _Q())
+    conn = Connection(account_id="")
+    cli._ensure_account_id(conn, "Creating a policy")
+    assert conn.account_id == "1234567890"
 
 
 def test_has_rules_helper():
