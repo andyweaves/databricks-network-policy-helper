@@ -23,7 +23,7 @@ EGRESS_THREAT_FEEDS = ["threatfox"]
 ACL_EGRESS_POLICIES = ["allow_all", "dry_run", "restricted"]
 
 DEFAULT_ACCOUNT_HOST = "https://accounts.cloud.databricks.com"
-DEFAULT_NAME_PREFIX = "np-helper"
+DEFAULT_NAME_PREFIX = "dbx-nwp"
 
 # Databricks account network-policy limits (warn + auto-cap so proposals stay valid).
 MAX_INGRESS_RULES_PER_POLICY = 50

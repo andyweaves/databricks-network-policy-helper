@@ -89,6 +89,11 @@ def test_ingress_ip_only_dry_run(monkeypatch, candidates_df):
     # threat match table should include 8.8.8.8
     assert "8.8.8.8" in set(analysis.threat_matches["observed_ip"])
 
+    # A plain (non-flagged) candidate is recommended for review as an unknown hosting provider.
+    recs = set(analysis.suggestions["recommendation"])
+    assert "REVIEW — Other hosting provider" in recs
+    assert "candidate" not in recs
+
     policies = rules.build_rules(analysis, cfg)
     previews = rules.preview_blocks(policies, cfg)
     # single scope -> one target

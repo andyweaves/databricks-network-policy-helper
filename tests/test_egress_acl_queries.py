@@ -10,7 +10,55 @@ from dbx_nwp_helper.core import acl as acl_core
 from dbx_nwp_helper.core import egress as eg
 
 
+# ------------------------------------------------------------------------ egress recommendation
+def test_egress_recommend_maps_owner():
+    assert eg.recommend("Databricks") == "ALLOW — Databricks-owned"
+    assert eg.recommend("AWS") == "REVIEW — Cloud-owned"
+    assert eg.recommend("GCP") == "REVIEW — Cloud-owned"
+    assert eg.recommend("Azure") == "REVIEW — Cloud-owned"
+    assert eg.recommend("non-cloud / unknown") == "REVIEW — Other infra provider"
+    assert eg.recommend("non-cloud: Cloudflare") == "REVIEW — Other infra provider"
+
+
+def test_egress_recommend_unknown_when_no_lookup():
+    # owner lookup disabled (None) or DNS failed -> don't claim a provider
+    assert eg.recommend(None) == "REVIEW — owner unknown"
+    assert eg.recommend("DNS resolution failed - check egress control") == "REVIEW — owner unknown"
+
+
 # --------------------------------------------------------------------------------- egress
+def test_egress_owner_lookup_rdap_fallback(monkeypatch):
+    # FQDN resolves to an IP that's NOT in any cloud range -> RDAP fallback names the owner.
+    observed = pd.DataFrame([
+        {"destination": "api.example.com", "destination_type": "DNS", "events": 5,
+         "workspace_ids": [1], "resolved_ips": ["104.16.1.1"]}])
+    monkeypatch.setattr("dbx_nwp_helper.sql.query", lambda _c, _t: observed)
+    monkeypatch.setattr(eg, "_load_cloud_networks", lambda: [])  # nothing matches offline
+    from dbx_nwp_helper.feeds import rdap
+    monkeypatch.setattr(rdap, "lookup", lambda ip: {"rdap_owner_name": "Cloudflare"})
+    cfg = EgressConfig(enable_rdap=True, block_threat_domains="off", policy_scope="all_workspaces")
+    a = eg.analyze(cfg, sql_conn=None)
+    assert a.fqdn_owner["api.example.com"] == "non-cloud: Cloudflare"
+    assert eg.recommend(a.fqdn_owner["api.example.com"]) == "REVIEW — Other infra provider"
+
+
+def test_egress_owner_lookup_cloud_match_no_rdap(monkeypatch):
+    # An IP in a cloud range is named directly; RDAP must NOT be called.
+    observed = pd.DataFrame([
+        {"destination": "api.example.com", "destination_type": "DNS", "events": 5,
+         "workspace_ids": [1], "resolved_ips": ["52.10.0.5"]}])
+    monkeypatch.setattr("dbx_nwp_helper.sql.query", lambda _c, _t: observed)
+    import ipaddress
+    monkeypatch.setattr(eg, "_load_cloud_networks",
+                        lambda: [(ipaddress.ip_network("52.10.0.0/16"), "AWS")])
+    from dbx_nwp_helper.feeds import rdap
+    monkeypatch.setattr(rdap, "lookup", lambda ip: (_ for _ in ()).throw(
+        AssertionError("RDAP must not be called when the offline cloud match succeeds")))
+    cfg = EgressConfig(enable_rdap=True, block_threat_domains="off", policy_scope="all_workspaces")
+    a = eg.analyze(cfg, sql_conn=None)
+    assert a.fqdn_owner["api.example.com"] == "AWS"
+
+
 def test_egress_analyze_targets_and_union(monkeypatch):
     observed = pd.DataFrame([
         {"destination": "b.s3.us-west-2.amazonaws.com", "destination_type": "DNS", "events": 10,

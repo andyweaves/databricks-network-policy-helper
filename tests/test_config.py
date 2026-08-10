@@ -22,6 +22,14 @@ def test_include_account_level_defaults_false():
     assert IngressConfig().include_account_level is False
 
 
+def test_name_prefix_default_aligns_with_command():
+    from dbx_nwp_helper.config import DEFAULT_NAME_PREFIX, AclConfig, EgressConfig
+    assert DEFAULT_NAME_PREFIX == "dbx-nwp"
+    assert IngressConfig().name_prefix == "dbx-nwp"
+    assert EgressConfig().name_prefix == "dbx-nwp"
+    assert AclConfig().name_prefix == "dbx-nwp"
+
+
 def test_policy_scope_defaults_to_current_workspace():
     from dbx_nwp_helper.config import EgressConfig
     assert IngressConfig().policy_scope == "current_workspace"
