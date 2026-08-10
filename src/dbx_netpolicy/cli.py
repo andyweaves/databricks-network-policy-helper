@@ -140,6 +140,27 @@ def _step(message: str) -> None:
     console.console.print(f"[muted]· {message}[/muted]")
 
 
+def _ensure_account_id(conn: Connection, reason: str) -> None:
+    """Ensure conn.account_id is set before account-level work begins, prompting for it up front
+    rather than failing deep in the apply/SCIM step. `reason` explains why it's needed. Mutates conn.
+    Prompts interactively; errors clearly when non-interactive."""
+    import sys
+
+    if conn.account_id:
+        return
+    msg = (f"{reason} needs a Databricks account_id (numeric). Find it in the Account console "
+           "top-right user menu, or in the account-console URL after '/account/'.")
+    if not sys.stdin.isatty():
+        raise typer.BadParameter(
+            f"{msg}\nPass --account-id <id> (non-interactive, so the CLI can't prompt).")
+    import questionary
+    console.banner("info", msg)
+    entered = (questionary.text("Databricks account_id:").ask() or "").strip()
+    if not entered:
+        raise typer.Abort()
+    conn.account_id = entered
+
+
 def _confirm_params(yes: bool) -> None:
     """After showing the config, ask the user to confirm before doing any work. --yes skips it, and
     it's a no-op non-interactively so scripted runs aren't blocked. Aborting exits cleanly (0)."""
@@ -158,10 +179,8 @@ def _has_rules(policies: dict) -> bool:
     return any(p.get("allow") or p.get("deny") for p in (policies or {}).values())
 
 
-def _confirm_write(cfg_mode: str, yes: bool, direction: str) -> bool:
-    """The review gate. Shows the responsibility warning, then returns True if the user has confirmed
-    (or --yes given). The warning is shown even with --yes so it's never silently skipped."""
-    console.responsibility_warning(direction)
+def _confirm_write(cfg_mode: str, yes: bool) -> bool:
+    """The write gate. Returns True if the user has confirmed (or --yes given)."""
     if yes:
         return True
     console.mode_banner(cfg_mode)
@@ -358,6 +377,12 @@ def _run_ingress(cfg: IngressConfig, conn: Connection, yes: bool) -> None:
     render.ingress_decisions(cfg)
     _confirm_params(yes)
 
+    # Account-level work (apply, or identity scoping via SCIM) needs an account_id — prompt for it up
+    # front rather than failing after the analysis + enrichment have already run.
+    if cfg.apply.create_policy or cfg.scope_identity:
+        reason = "Creating a policy" if cfg.apply.create_policy else "Identity scoping (SCIM)"
+        _ensure_account_id(conn, reason)
+
     wc = auth.workspace_client(conn)
     http_path = sql.resolve_warehouse(conn)
     with sql.connection(conn, http_path) as sconn:
@@ -376,6 +401,8 @@ def _run_ingress(cfg: IngressConfig, conn: Connection, yes: bool) -> None:
                                  note=lambda m: console.banner("warn", m))
     previews = rules.preview_blocks(policies, cfg, note=lambda m: console.banner("info", m))
     render.ingress_preview(previews, cfg, analysis)
+    if previews:
+        console.responsibility_warning("source IP addresses / CIDRs")
 
     if not cfg.apply.create_policy:
         console.banner("info", "Propose-only run (no --create-policy). Nothing was written.")
@@ -385,7 +412,7 @@ def _run_ingress(cfg: IngressConfig, conn: Connection, yes: bool) -> None:
                                  "policy can be created. Review the candidate funnel above (try "
                                  "--lookback-days / --min-events / --include-account-level).")
         raise typer.Exit(code=1)
-    if not _confirm_write(cfg.policy_mode, yes, "source IP addresses / CIDRs"):
+    if not _confirm_write(cfg.policy_mode, yes):
         console.banner("info", "Aborted — nothing written.")
         return
 
@@ -411,6 +438,9 @@ def _run_egress(cfg: EgressConfig, conn: Connection, yes: bool) -> None:
     render.egress_decisions(cfg)
     _confirm_params(yes)
 
+    if cfg.apply.create_policy:
+        _ensure_account_id(conn, "Creating a policy")
+
     http_path = sql.resolve_warehouse(conn)
     with sql.connection(conn, http_path) as sconn:
         analysis = eg.analyze(cfg, sconn, on_step=_step)
@@ -418,6 +448,8 @@ def _run_egress(cfg: EgressConfig, conn: Connection, yes: bool) -> None:
     render.egress_analysis(analysis)
     previews = eg.preview_blocks(analysis, cfg)
     render.egress_preview(previews, cfg)
+    if previews:
+        console.responsibility_warning("FQDNs and storage destinations")
 
     if not cfg.apply.create_policy:
         console.banner("info", "Propose-only run (no --create-policy). Nothing was written.")
@@ -427,7 +459,7 @@ def _run_egress(cfg: EgressConfig, conn: Connection, yes: bool) -> None:
                                  "policy can be created. Confirm outbound_network has data for this "
                                  "window (stand up a dry_run egress policy first to populate it).")
         raise typer.Exit(code=1)
-    if not _confirm_write(cfg.policy_mode, yes, "FQDNs and storage destinations"):
+    if not _confirm_write(cfg.policy_mode, yes):
         console.banner("info", "Aborted — nothing written.")
         return
 
@@ -448,6 +480,9 @@ def _run_acl(cfg: AclConfig, conn: Connection, yes: bool) -> None:
     render.acl_decisions(cfg)
     _confirm_params(yes)
 
+    if cfg.create_policy:
+        _ensure_account_id(conn, "Creating a policy")
+
     wc = auth.workspace_client(conn)
     analysis = acl_core.analyze(cfg, wc)
     render.acl_analysis(analysis, cfg)
@@ -461,11 +496,12 @@ def _run_acl(cfg: AclConfig, conn: Connection, yes: bool) -> None:
 
     preview = acl_core.preview_block(analysis, cfg, note=lambda m: console.banner("info", m))
     render.acl_preview(preview, cfg)
+    console.responsibility_warning("IP access list entries")
 
     if not cfg.create_policy:
         console.banner("info", "Propose-only run (no --create-policy). Nothing was written.")
         return
-    if not _confirm_write(cfg.policy_mode, yes, "IP access list entries"):
+    if not _confirm_write(cfg.policy_mode, yes):
         console.banner("info", "Aborted — nothing written.")
         return
 
