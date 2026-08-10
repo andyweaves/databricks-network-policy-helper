@@ -18,7 +18,7 @@ dependencies = [
     "pandas>=2.0.0",
     "pyarrow>=14.0.0",
     # Verify TLS against the OS trust store so corporate-proxy root CAs are honoured by the SDK,
-    # the SQL connector, and feed downloads alike (see src/dbx_netpolicy/tls.py).
+    # the SQL connector, and feed downloads alike (see src/dbx_nwp_helper/tls.py).
     "truststore>=0.9.0",
 ]
 
@@ -27,7 +27,7 @@ Homepage = "https://github.com/andyweaves/databricks-network-policy-helper"
 Repository = "https://github.com/andyweaves/databricks-network-policy-helper"
 
 [project.scripts]
-dbx-nwp-helper = "dbx_netpolicy.cli:app"
+dbx-nwp-helper = "dbx_nwp_helper.cli:app"
 
 [dependency-groups]
 dev = [
@@ -40,7 +40,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/dbx_netpolicy"]
+packages = ["src/dbx_nwp_helper"]
 
 [tool.ruff]
 line-length = 110

@@ -43,10 +43,15 @@ def analyze(cfg: IngressConfig, sql_conn, workspace_client, on_step=lambda _m: N
     """Run SQL + enrichment and produce the candidate/suggestion/threat-match review tables."""
     from .. import queries, sql
 
+    # current_workspace scope restricts the analysis to this workspace's own traffic.
+    only_ws = workspace_client.get_workspace_id() if cfg.policy_scope == "current_workspace" else None
+    if only_ws is not None:
+        on_step(f"Scope=current_workspace — restricting analysis to workspace {only_ws}.")
+
     on_step("Querying frequent public source IPs…")
     candidates = sql.query(sql_conn, queries.frequent_public_ips(
         cfg.lookback_days, cfg.min_events, cfg.include_ipv6,
-        cfg.treat_null_status_as_success, cfg.include_account_level))
+        cfg.treat_null_status_as_success, cfg.include_account_level, only_workspace_id=only_ws))
 
     # When there are no candidates, run a cheap diagnostic funnel so we can explain *why* rather than
     # just reporting an empty table (the most common confusion: public IPs live on account-level rows,

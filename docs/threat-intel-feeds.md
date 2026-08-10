@@ -26,8 +26,8 @@ on. The loader keeps only IPs seen on **≥3** lists (`IPSUM_MIN_LISTS`), taggin
 ### Held back (unconfirmed licensing — technically work, not enabled)
 blocklist.de, Emerging Threats `compromised-ips.txt`, dataplane.org signals. All are free/ungated
 and parse cleanly; they were left out pending explicit licensing confirmation. To add one: write a
-`_feed_*` loader in `src/dbx_netpolicy/feeds/threat.py`, register it in `THREAT_FEED_LOADERS`, and
-add its key to `THREAT_FEEDS` in `src/dbx_netpolicy/config.py`.
+`_feed_*` loader in `src/dbx_nwp_helper/feeds/threat.py`, register it in `THREAT_FEED_LOADERS`, and
+add its key to `THREAT_FEEDS` in `src/dbx_nwp_helper/config.py`.
 
 ### Deliberately excluded (gated / unsuitable)
 AbuseIPDB, GreyNoise, Cisco Talos, AlienVault OTX, VirusTotal, IPQualityScore (all API-key gated);

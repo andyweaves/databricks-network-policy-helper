@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dbx_netpolicy.core import policy
+from dbx_nwp_helper.core import policy
 
 
 def _allow(**kw):
@@ -105,3 +105,19 @@ def test_policy_name_per_workspace_trims_long_prefix():
 def test_policy_name_long_prefix_per_workspace_within_budget():
     name = policy.policy_name("really-long-prefix-name", workspace_id=42)
     assert name.endswith("-ws-42")
+
+
+def test_policy_name_current_workspace_uses_profile_suffix():
+    assert policy.policy_name("np-helper", suffix="sfe-plain") == "np-helper-sfe-plain"
+
+
+def test_policy_name_suffix_is_slugified():
+    # a profile with spaces / odd chars is normalised to a policy-id-safe slug
+    name = policy.policy_name("np", suffix="My Prod Workspace!")
+    assert name == "np-my-prod-workspace"
+
+
+def test_policy_name_suffix_trims_prefix_to_fit():
+    name = policy.policy_name("really-long-prefix-name", suffix="my-workspace-profile")
+    assert name.endswith("-my-workspace-profile")
+    assert len(name) <= 30

@@ -11,9 +11,9 @@ import ipaddress
 
 import pandas as pd
 
-from dbx_netpolicy.config import IngressConfig
-from dbx_netpolicy.core import ingress_rules as rules
-from dbx_netpolicy.core.ingress import ALL_WORKSPACES, IngressAnalysis
+from dbx_nwp_helper.config import IngressConfig
+from dbx_nwp_helper.core import ingress_rules as rules
+from dbx_nwp_helper.core.ingress import ALL_WORKSPACES, IngressAnalysis
 
 
 def _suggestion(**kw):
@@ -265,7 +265,7 @@ def test_resolve_identities_maps_users():
 
 def test_apply_single_create_new_no_assign():
     a = _analysis([_suggestion(minimal_cidrs=["1.1.1.1/32"])])
-    cfg = IngressConfig(scoping_mode="ip_only", name_prefix="np-smoke", policy_scope="single")
+    cfg = IngressConfig(scoping_mode="ip_only", name_prefix="np-smoke", policy_scope="all_workspaces")
     cfg.apply.create_policy = True
     pols = rules.build_rules(a, cfg)
     acct = _FakeAccount()
@@ -278,7 +278,7 @@ def test_apply_single_create_new_no_assign():
 
 def test_apply_single_auto_assign_binds_workspace():
     a = _analysis([_suggestion(minimal_cidrs=["1.1.1.1/32"])])
-    cfg = IngressConfig(scoping_mode="ip_only", name_prefix="np", policy_scope="single")
+    cfg = IngressConfig(scoping_mode="ip_only", name_prefix="np", policy_scope="all_workspaces")
     cfg.apply.create_policy = True
     cfg.apply.auto_assign = True
     pols = rules.build_rules(a, cfg)
@@ -286,3 +286,24 @@ def test_apply_single_auto_assign_binds_workspace():
     results = rules.apply(pols, cfg, acct, account_id="acc", this_workspace_id=555)
     assert results[0]["assigned"] == 555
     assert acct.workspace_network_configuration.bound == [555]
+
+
+def test_apply_current_workspace_names_policy_with_profile():
+    a = _analysis([_suggestion(minimal_cidrs=["1.1.1.1/32"])])
+    cfg = IngressConfig(scoping_mode="ip_only", name_prefix="np", policy_scope="current_workspace")
+    cfg.apply.create_policy = True
+    pols = rules.build_rules(a, cfg)
+    acct = _FakeAccount()
+    results = rules.apply(pols, cfg, acct, account_id="acc", this_workspace_id=555, profile="sfe-plain")
+    assert results[0]["policy_id"] == "np-sfe-plain"
+    assert results[0]["target"] == "current_workspace"
+
+
+def test_apply_current_workspace_falls_back_to_ws_id_without_profile():
+    a = _analysis([_suggestion(minimal_cidrs=["1.1.1.1/32"])])
+    cfg = IngressConfig(scoping_mode="ip_only", name_prefix="np", policy_scope="current_workspace")
+    cfg.apply.create_policy = True
+    pols = rules.build_rules(a, cfg)
+    acct = _FakeAccount()
+    results = rules.apply(pols, cfg, acct, account_id="acc", this_workspace_id=555, profile=None)
+    assert results[0]["policy_id"] == "np-555"

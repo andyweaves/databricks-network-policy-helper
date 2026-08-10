@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import pandas as pd
 
-from dbx_netpolicy import queries
-from dbx_netpolicy.config import AclConfig, EgressConfig
-from dbx_netpolicy.core import acl as acl_core
-from dbx_netpolicy.core import egress as eg
+from dbx_nwp_helper import queries
+from dbx_nwp_helper.config import AclConfig, EgressConfig
+from dbx_nwp_helper.core import acl as acl_core
+from dbx_nwp_helper.core import egress as eg
 
 
 # --------------------------------------------------------------------------------- egress
@@ -24,7 +24,7 @@ def test_egress_analyze_targets_and_union(monkeypatch):
         {"destination": "s3.us-east-1.amazonaws.com", "destination_type": "DNS", "events": 1,
          "workspace_ids": [1], "resolved_ips": []},  # bare S3 -> skipped
     ])
-    monkeypatch.setattr("dbx_netpolicy.sql.query", lambda _c, _t: observed)
+    monkeypatch.setattr("dbx_nwp_helper.sql.query", lambda _c, _t: observed)
     cfg = EgressConfig(enable_rdap=False, block_threat_domains="off")
     a = eg.analyze(cfg, sql_conn=None)
     assert eg.union(a.targets, "s3") == {("b", "us-west-2"): 10}
@@ -39,7 +39,7 @@ def test_egress_global_s3_region_inferred(monkeypatch):
     observed = pd.DataFrame([
         {"destination": "mybucket.s3.amazonaws.com", "destination_type": "DNS", "events": 4,
          "workspace_ids": [1], "resolved_ips": []}])
-    monkeypatch.setattr("dbx_netpolicy.sql.query", lambda _c, _t: observed)
+    monkeypatch.setattr("dbx_nwp_helper.sql.query", lambda _c, _t: observed)
     monkeypatch.setattr(eg, "_infer_s3_region", lambda bucket: "us-east-1")
     cfg = EgressConfig(enable_rdap=False, block_threat_domains="off")
     a = eg.analyze(cfg, sql_conn=None)
@@ -52,7 +52,7 @@ def test_egress_global_s3_region_uninferable_dropped(monkeypatch):
     observed = pd.DataFrame([
         {"destination": "mybucket.s3.amazonaws.com", "destination_type": "DNS", "events": 4,
          "workspace_ids": [1], "resolved_ips": []}])
-    monkeypatch.setattr("dbx_netpolicy.sql.query", lambda _c, _t: observed)
+    monkeypatch.setattr("dbx_nwp_helper.sql.query", lambda _c, _t: observed)
     monkeypatch.setattr(eg, "_infer_s3_region", lambda bucket: None)
     cfg = EgressConfig(enable_rdap=False, block_threat_domains="off")
     a = eg.analyze(cfg, sql_conn=None)
@@ -79,7 +79,7 @@ def test_egress_per_workspace_fans_out(monkeypatch):
     observed = pd.DataFrame([
         {"destination": "api.openai.com", "destination_type": "DNS", "events": 5,
          "workspace_ids": [1, 2], "resolved_ips": []}])
-    monkeypatch.setattr("dbx_netpolicy.sql.query", lambda _c, _t: observed)
+    monkeypatch.setattr("dbx_nwp_helper.sql.query", lambda _c, _t: observed)
     cfg = EgressConfig(enable_rdap=False, policy_scope="per_workspace", block_threat_domains="off")
     a = eg.analyze(cfg, sql_conn=None)
     assert set(a.targets) == {1, 2}
@@ -89,9 +89,9 @@ def test_egress_build_blocks_restricted_with_enforcement(monkeypatch):
     observed = pd.DataFrame([
         {"destination": "api.openai.com", "destination_type": "DNS", "events": 5,
          "workspace_ids": [1], "resolved_ips": []}])
-    monkeypatch.setattr("dbx_netpolicy.sql.query", lambda _c, _t: observed)
+    monkeypatch.setattr("dbx_nwp_helper.sql.query", lambda _c, _t: observed)
     cfg = EgressConfig(enable_rdap=False, policy_mode="enforce", block_threat_domains="off",
-                       policy_scope="single")
+                       policy_scope="all_workspaces")
     a = eg.analyze(cfg, sql_conn=None)
     prev = eg.preview_blocks(a, cfg)
     na = prev[eg.ALL_WORKSPACES]["egress"]["network_access"]
@@ -105,7 +105,7 @@ def test_egress_blocked_domains_matched_only(monkeypatch):
          "workspace_ids": [1], "resolved_ips": []},
         {"destination": "good.example.com", "destination_type": "DNS", "events": 5,
          "workspace_ids": [1], "resolved_ips": []}])
-    monkeypatch.setattr("dbx_netpolicy.sql.query", lambda _c, _t: observed)
+    monkeypatch.setattr("dbx_nwp_helper.sql.query", lambda _c, _t: observed)
     monkeypatch.setattr(eg, "_load_threat_domains", lambda feed: {"evil.example.com", "other.bad"})
     cfg = EgressConfig(enable_rdap=False, block_threat_domains="matched_only")
     a = eg.analyze(cfg, sql_conn=None)
@@ -114,7 +114,7 @@ def test_egress_blocked_domains_matched_only(monkeypatch):
 
 
 def test_egress_empty_produces_no_blocks(monkeypatch):
-    monkeypatch.setattr("dbx_netpolicy.sql.query", lambda _c, _t: pd.DataFrame(
+    monkeypatch.setattr("dbx_nwp_helper.sql.query", lambda _c, _t: pd.DataFrame(
         columns=["destination", "destination_type", "events", "workspace_ids", "resolved_ips"]))
     cfg = EgressConfig(enable_rdap=False, block_threat_domains="off")
     a = eg.analyze(cfg, sql_conn=None)

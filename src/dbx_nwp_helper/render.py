@@ -28,7 +28,8 @@ def ingress_decisions(cfg: IngressConfig) -> None:
         ("enable_rdap", cfg.enable_rdap, "RDAP owner lookup (needed for 'maximum' framing)."),
         ("policy_framing", cfg.policy_framing, "minimal=/32s, optimal=collapsed, maximum=RDAP range."),
         ("scoping_mode", cfg.scoping_mode, "Whether rules are scoped by destination and/or identity."),
-        ("policy_scope", cfg.policy_scope, "single=one policy; per_workspace=one per workspace."),
+        ("policy_scope", cfg.policy_scope,
+         "current_workspace / per_workspace / all_workspaces."),
         ("policy_mode", cfg.policy_mode, "dry_run=log-only; enforce=blocking."),
         ("threat_deny_rules", cfg.threat_deny_rules, "Add deny rules from threat intel."),
         ("name_prefix", cfg.name_prefix, "Prefix for policy names + rule labels."),
@@ -47,7 +48,8 @@ def egress_decisions(cfg: EgressConfig) -> None:
         ("min_events", cfg.min_events, "Min events per destination."),
         ("source_type_filter", cfg.source_type_filter, "network_source_type filter (blank=all)."),
         ("enable_rdap", cfg.enable_rdap, "Cloud-owner lookup for internet FQDNs."),
-        ("policy_scope", cfg.policy_scope, "single=one policy; per_workspace=one per workspace."),
+        ("policy_scope", cfg.policy_scope,
+         "current_workspace / per_workspace / all_workspaces."),
         ("policy_mode", cfg.policy_mode, "dry_run=log-only; enforce=blocking."),
         ("block_threat_domains", cfg.block_threat_domains, "off / matched_only / all."),
         ("threat_feed", cfg.threat_feed, "Threat-domain feed (abuse.ch ThreatFox)."),
@@ -162,7 +164,7 @@ def ingress_preview(previews: dict, cfg: IngressConfig, analysis: IngressAnalysi
         console.banner("warn", "No rule specs to preview — revisit framing/scoping/threat options.")
         return
     for tgt in sorted(previews, key=str):
-        label = "single policy (all workspaces)" if tgt == ALL_WORKSPACES else f"workspace {tgt}"
+        label = _target_label(tgt, cfg.policy_scope, ALL_WORKSPACES)
         console.json_panel(f"{label} — `{cfg.policy_mode_target}` block", previews[tgt])
     if analysis.excluded_flagged:
         console.banner("info",
@@ -222,7 +224,7 @@ def egress_preview(previews: dict, cfg: EgressConfig) -> None:
         console.banner("warn", "Nothing to propose — no classified destinations.")
         return
     for tgt in sorted(previews, key=str):
-        label = "single (all workspaces)" if tgt == egress_core.ALL_WORKSPACES else f"workspace {tgt}"
+        label = _target_label(tgt, cfg.policy_scope, egress_core.ALL_WORKSPACES)
         console.json_panel(f"{label} — egress block", previews[tgt])
 
 
@@ -266,6 +268,14 @@ def apply_results(results: list[dict], account_host: str = "", account_id: str =
             # soft_wrap keeps the URL on one logical line (terminals still soft-wrap the display,
             # but it stays a single copy-pasteable string and isn't hard-broken mid-token).
             console.console.print(f"   [key]url:[/key] [info]{url}[/info]", soft_wrap=True)
+
+
+def _target_label(tgt, policy_scope: str, all_sentinel) -> str:
+    """Human label for a policy target. The single-policy sentinel reads differently by scope
+    (current_workspace vs all_workspaces); per_workspace targets are the workspace id."""
+    if tgt != all_sentinel:
+        return f"workspace {tgt}"
+    return "this workspace" if policy_scope == "current_workspace" else "all workspaces"
 
 
 def _trim(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:

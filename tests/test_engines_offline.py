@@ -9,11 +9,11 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from dbx_netpolicy.config import AclConfig, EgressConfig, IngressConfig
-from dbx_netpolicy.core import acl as acl_core
-from dbx_netpolicy.core import egress as eg
-from dbx_netpolicy.core import ingress as ing
-from dbx_netpolicy.core import ingress_rules as rules
+from dbx_nwp_helper.config import AclConfig, EgressConfig, IngressConfig
+from dbx_nwp_helper.core import acl as acl_core
+from dbx_nwp_helper.core import egress as eg
+from dbx_nwp_helper.core import ingress as ing
+from dbx_nwp_helper.core import ingress_rules as rules
 
 
 class _FakeAcl:
@@ -56,7 +56,7 @@ def candidates_df():
 
 
 def _patch_feeds(monkeypatch, threat_rows=None, cloud_rows=None, dbx_rows=None):
-    from dbx_netpolicy.feeds import loaders
+    from dbx_nwp_helper.feeds import loaders
     monkeypatch.setattr(loaders, "threat_intel", lambda feeds, refresh=False: pd.DataFrame(
         threat_rows or [], columns=["cidr", "source_feed", "threat_type", "confidence",
                                     "source_url", "loaded_at"]))
@@ -72,7 +72,7 @@ def test_ingress_ip_only_dry_run(monkeypatch, candidates_df):
         ("8.8.8.0/24", "ipsum", "aggregated_blocklist", 1, "http://x", "2026-01-01")])
 
     # Stub sql.query to return our candidates / empty denied.
-    import dbx_netpolicy.sql as sqlmod
+    import dbx_nwp_helper.sql as sqlmod
 
     def fake_query(_conn, text):
         if "outbound_network" in text:
@@ -83,7 +83,7 @@ def test_ingress_ip_only_dry_run(monkeypatch, candidates_df):
     monkeypatch.setattr(sqlmod, "query", fake_query)
 
     cfg = IngressConfig(min_events=1, enable_rdap=False, policy_framing="minimal",
-                        scoping_mode="ip_only", policy_scope="single")
+                        scoping_mode="ip_only", policy_scope="all_workspaces")
     analysis = ing.analyze(cfg, sql_conn=None, workspace_client=_FakeWorkspaceClient())
     assert not analysis.suggestions.empty
     # threat match table should include 8.8.8.8
@@ -107,10 +107,10 @@ def test_ingress_databricks_owned_takes_precedence(monkeypatch, candidates_df):
         cloud_rows=[("8.8.8.0/24", "gcp", "svc", "us", "2026-01-01")],
         dbx_rows=[("8.8.8.0/24", "aws", "us", "inbound", "2026-01-01")],
     )
-    import dbx_netpolicy.sql as sqlmod
+    import dbx_nwp_helper.sql as sqlmod
     monkeypatch.setattr(sqlmod, "query", lambda _c, t: (
         pd.DataFrame(columns=["source_ip"]) if "IpAccessDenied" in t else candidates_df))
-    cfg = IngressConfig(enable_rdap=False, scoping_mode="ip_only", policy_scope="single")
+    cfg = IngressConfig(enable_rdap=False, scoping_mode="ip_only", policy_scope="all_workspaces")
     analysis = ing.analyze(cfg, None, _FakeWorkspaceClient())
     recs = {r["rdap_owner"]: r for _, r in analysis.suggestions.iterrows()}
     dbx_group = [r for r in recs.values() if r["databricks_owned"]]
@@ -136,9 +136,9 @@ def test_egress_classification_and_block(monkeypatch):
         {"destination": "api.openai.com", "destination_type": "DNS", "events": 4,
          "workspace_ids": [123], "resolved_ips": ["1.2.3.4"]},
     ])
-    import dbx_netpolicy.sql as sqlmod
+    import dbx_nwp_helper.sql as sqlmod
     monkeypatch.setattr(sqlmod, "query", lambda _c, _t: observed)
-    cfg = EgressConfig(enable_rdap=False, block_threat_domains="off", policy_scope="single")
+    cfg = EgressConfig(enable_rdap=False, block_threat_domains="off", policy_scope="all_workspaces")
     analysis = eg.analyze(cfg, None)
     assert eg.union(analysis.targets, "s3")
     assert "api.openai.com" in eg.union(analysis.targets, "internet")

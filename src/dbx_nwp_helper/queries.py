@@ -122,11 +122,19 @@ def principal_network_diversity(lookback_days: int) -> str:
 
 
 def frequent_public_ips(lookback_days: int, min_events: int, include_ipv6: bool,
-                        treat_null_status_as_success: bool, include_account_level: bool) -> str:
+                        treat_null_status_as_success: bool, include_account_level: bool,
+                        only_workspace_id: int | None = None) -> str:
     ipv6_predicate = "OR ip_version = 6" if include_ipv6 else ""
     # workspace_id is a STRING column in system.access.audit; comparing to the integer 0 matches no
     # rows (silently excluding all workspace-level traffic), so compare against the string '0'.
-    account_level_predicate = "" if include_account_level else "AND CAST(workspace_id AS STRING) <> '0'"
+    if only_workspace_id is not None:
+        # current_workspace scope: restrict to this workspace's traffic. (Overrides the account-level
+        # toggle — an explicit workspace id is never account-level.)
+        account_level_predicate = f"AND CAST(workspace_id AS STRING) = '{int(only_workspace_id)}'"
+    elif include_account_level:
+        account_level_predicate = ""
+    else:
+        account_level_predicate = "AND CAST(workspace_id AS STRING) <> '0'"
     null_status_ok = "TRUE" if treat_null_status_as_success else "FALSE"
     return f"""
     WITH audit_recent AS ({_AUDIT_RECENT.format(lookback_days=lookback_days)}),
@@ -192,8 +200,11 @@ def denied_requests(lookback_days: int) -> str:
     """
 
 
-def observed_egress(lookback_days: int, min_events: int, source_type_filter: str) -> str:
+def observed_egress(lookback_days: int, min_events: int, source_type_filter: str,
+                    only_workspace_id: int | None = None) -> str:
     src_filter = f"AND network_source_type = '{source_type_filter}'" if source_type_filter else ""
+    ws_filter = (f"AND CAST(workspace_id AS STRING) = '{int(only_workspace_id)}'"
+                 if only_workspace_id is not None else "")
     return f"""
     SELECT
       COALESCE(dns_event.domain_name, storage_event.hostname, destination) AS destination,
@@ -208,6 +219,7 @@ def observed_egress(lookback_days: int, min_events: int, source_type_filter: str
     FROM system.access.outbound_network
     WHERE event_time >= current_date() - INTERVAL {lookback_days} DAYS
       {src_filter}
+      {ws_filter}
       AND COALESCE(dns_event.domain_name, storage_event.hostname, destination) IS NOT NULL
     GROUP BY 1, 2
     HAVING COUNT(*) >= {min_events}

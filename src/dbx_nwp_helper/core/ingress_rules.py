@@ -166,7 +166,7 @@ def build_rules(analysis: IngressAnalysis, cfg: IngressConfig, identity_resoluti
 
     if cfg.policy_scope == "per_workspace" and len(policies) > MAX_POLICIES_PER_ACCOUNT:
         note(f"{len(policies)} per-workspace policies > {MAX_POLICIES_PER_ACCOUNT} account limit — "
-             "consider policy_scope=single or consolidating workspaces.")
+             "consider all_workspaces or consolidating workspaces.")
 
     analysis.excluded_flagged = excluded_flagged
     analysis.skipped_ipv6 = skipped_ipv6
@@ -288,20 +288,26 @@ def preview_blocks(policies: dict, cfg: IngressConfig, note: Note = lambda _m: N
 
 
 def apply(policies: dict, cfg: IngressConfig, account, account_id: str, this_workspace_id,
-          note: Note = lambda _m: None) -> list[dict]:
+          profile: str | None = None, note: Note = lambda _m: None) -> list[dict]:
     """Create/update policy(ies) and optionally assign. Returns a list of result dicts for display."""
     mode_label = {"dry_run": "dry-run", "enforce": "enforced"}[cfg.policy_mode]
     target_attr = cfg.policy_mode_target
     results = []
 
-    if cfg.policy_scope == "single":
+    if cfg.policy_scope != "per_workspace":
+        # A single policy: current_workspace (named <prefix>-<profile>) or all_workspaces (<prefix>).
         p = policies.get(ALL_WORKSPACES) or next(iter(policies.values()))
         add_to_existing = cfg.apply.policy_action == "add_to_existing"
-        single_id = cfg.apply.existing_policy_id if add_to_existing else policy.policy_name(cfg.name_prefix)
+        if add_to_existing:
+            single_id = cfg.apply.existing_policy_id
+        elif cfg.policy_scope == "current_workspace":
+            single_id = policy.policy_name(cfg.name_prefix, suffix=profile or str(this_workspace_id))
+        else:
+            single_id = policy.policy_name(cfg.name_prefix)
         block = policy.build_ingress_block(p["allow"], p["deny"], mode_label, cfg.name_prefix, note)
         action, effective_id, sent = policy.apply_ingress(
             account, account_id, single_id, block, target_attr, must_exist=add_to_existing)
-        result = {"target": "single", "action": action, "policy_id": effective_id, "sent": sent}
+        result = {"target": cfg.policy_scope, "action": action, "policy_id": effective_id, "sent": sent}
         if cfg.apply.auto_assign:
             policy.assign(account, this_workspace_id, effective_id)
             result["assigned"] = this_workspace_id

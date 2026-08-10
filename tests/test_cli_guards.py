@@ -7,8 +7,8 @@ import pandas as pd
 import pytest
 from typer.testing import CliRunner
 
-from dbx_netpolicy import cli
-from dbx_netpolicy.core.ingress import IngressAnalysis
+from dbx_nwp_helper import cli
+from dbx_nwp_helper.core.ingress import IngressAnalysis
 
 runner = CliRunner()
 
@@ -79,7 +79,7 @@ def test_confirm_write_interactive_decline(monkeypatch):
 
 
 def test_responsibility_warning_shown(capsys):
-    from dbx_netpolicy import console
+    from dbx_nwp_helper import console
     console.responsibility_warning("source IP addresses / CIDRs")
     out = capsys.readouterr().out
     assert "responsib" in out.lower()
@@ -89,7 +89,7 @@ def test_responsibility_warning_shown(capsys):
 
 
 def test_ensure_account_id_passthrough_when_set():
-    from dbx_netpolicy.config import Connection
+    from dbx_nwp_helper.config import Connection
     conn = Connection(account_id="already-set")
     cli._ensure_account_id(conn, "Creating a policy")  # no prompt, no raise
     assert conn.account_id == "already-set"
@@ -98,14 +98,14 @@ def test_ensure_account_id_passthrough_when_set():
 def test_ensure_account_id_noninteractive_errors(monkeypatch):
     import typer
 
-    from dbx_netpolicy.config import Connection
+    from dbx_nwp_helper.config import Connection
     monkeypatch.setattr("sys.stdin.isatty", lambda: False)
     with pytest.raises(typer.BadParameter):
         cli._ensure_account_id(Connection(account_id=""), "Creating a policy")
 
 
 def test_ensure_account_id_prompts_interactive(monkeypatch):
-    from dbx_netpolicy.config import Connection
+    from dbx_nwp_helper.config import Connection
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
 
     class _Q:
@@ -137,9 +137,9 @@ def test_ingress_create_with_no_rules_exits_nonzero(monkeypatch):
     # Stub the whole data path so no network is touched and analysis is empty.
     monkeypatch.setattr(cli, "_step", lambda _m: None)
 
-    import dbx_netpolicy.auth as auth
-    import dbx_netpolicy.sql as sqlmod
-    from dbx_netpolicy.core import ingress as ing
+    import dbx_nwp_helper.auth as auth
+    import dbx_nwp_helper.sql as sqlmod
+    from dbx_nwp_helper.core import ingress as ing
 
     monkeypatch.setattr(auth, "workspace_client", lambda conn: object())
     monkeypatch.setattr(sqlmod, "resolve_warehouse", lambda conn: "/sql/1.0/warehouses/x")

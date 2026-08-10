@@ -94,7 +94,7 @@ def _ingress_wizard(conn: Connection) -> IngressConfig:
     min_events = _int("Minimum successful events for an IP to be a candidate?", 1)
     framing = _select("CIDR framing?", POLICY_FRAMINGS, default="minimal")
     scoping = _select("Scoping mode?", SCOPING_MODES, default="ip_only")
-    scope = _select("Policy scope?", POLICY_SCOPES, default="per_workspace")
+    scope = _select("Policy scope?", POLICY_SCOPES, default="current_workspace")
     enable_rdap = framing == "maximum" or _confirm("Do RDAP owner lookups (external calls)?", True)
     all_feeds = _confirm("Use all threat-intel feeds?", True)
     feeds = list(THREAT_FEEDS) if all_feeds else (questionary.checkbox(
@@ -118,7 +118,7 @@ def _egress_wizard(conn: Connection) -> EgressConfig:
     lookback = _int("How many days of outbound_network history to analyse?", 30)
     min_events = _int("Minimum events per destination?", 1)
     src_filter = _text("network_source_type filter (blank = all)")
-    scope = _select("Policy scope?", POLICY_SCOPES, default="per_workspace")
+    scope = _select("Policy scope?", POLICY_SCOPES, default="current_workspace")
     enable_rdap = _confirm("Look up the cloud owner of internet FQDNs?", True)
     block = _select("Block known-bad domains from a threat feed?", BLOCK_THREAT_DOMAINS, default="off")
     name_prefix = _text("Name prefix for the policy?", "np-helper")
@@ -154,8 +154,9 @@ def _apply_wizard(conn: Connection, scope: str, other: str) -> ApplyOptions:
     if _confirm(f"Add these rules to an EXISTING policy (e.g. one the {other} helper made)?", False):
         action = "add_to_existing"
         existing_id = _text("Existing policy id?")
-        if scope != "single":
-            console.banner("warn", "add_to_existing needs single scope — the run will flag this.")
+        if scope == "per_workspace":
+            console.banner("warn", "add_to_existing can't be used with per_workspace scope — the "
+                                   "run will flag this.")
     auto_assign = _confirm("Bind the workspace(s) to the policy?", False)
     return ApplyOptions(create_policy=True, policy_action=action, existing_policy_id=existing_id,
                         auto_assign=auto_assign)

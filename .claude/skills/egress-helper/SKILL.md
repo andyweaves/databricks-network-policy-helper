@@ -62,11 +62,13 @@ If the table is empty, no egress policy is logging yet — start with step 1.
 - `--lookback-days`, `--min-events`, `--source-type-filter`
 - `--enable-rdap` / `--no-enable-rdap`
 - `--name-prefix`, `--policy-mode` (**dry_run** default / enforce), `--policy-scope`
-  (single / per_workspace), `--block-threat-domains`, `--threat-feed`
+  (**current_workspace** default / per_workspace / all_workspaces), `--block-threat-domains`,
+  `--threat-feed`
 - `--account-id` (+ account-admin creds) — required to create/assign.
 - `--create-policy` (gate), `--policy-action` (`create_new` / `add_to_existing`),
   `--existing-policy-id`, `--auto-assign`. `add_to_existing` updates only the egress block of the
-  supplied policy id (leaving its ingress intact) and requires `--policy-scope single`.
+  supplied policy id (leaving its ingress intact) and needs a single-policy scope
+  (`current_workspace` or `all_workspaces`, not `per_workspace`).
 
 ## Limits & safety
 

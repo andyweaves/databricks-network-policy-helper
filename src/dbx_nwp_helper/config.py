@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 THREAT_FEEDS = ["spamhaus_drop", "tor_exit", "firehol_level1", "ipsum", "dshield", "cins_ci_army"]
 POLICY_FRAMINGS = ["minimal", "optimal", "maximum"]
 SCOPING_MODES = ["ip_only", "ip_and_destination", "ip_and_identity", "ip_identity_and_destination"]
-POLICY_SCOPES = ["single", "per_workspace"]
+POLICY_SCOPES = ["current_workspace", "per_workspace", "all_workspaces"]
 POLICY_MODES = ["dry_run", "enforce"]
 THREAT_DENY_RULES = ["off", "matched_only", "all"]
 IP_ACL_HANDLING = ["migrate_and_enrich", "migrate", "ignore"]
@@ -78,7 +78,7 @@ class IngressConfig:
     # Policy shape
     policy_framing: str = "minimal"
     scoping_mode: str = "ip_only"
-    policy_scope: str = "per_workspace"
+    policy_scope: str = "current_workspace"
     policy_mode: str = "dry_run"
     threat_deny_rules: str = "off"
     name_prefix: str = DEFAULT_NAME_PREFIX
@@ -108,7 +108,7 @@ class EgressConfig:
     refresh_feeds: bool = False
     name_prefix: str = DEFAULT_NAME_PREFIX
     policy_mode: str = "dry_run"
-    policy_scope: str = "per_workspace"
+    policy_scope: str = "current_workspace"
     block_threat_domains: str = "off"
     threat_feed: str = "threatfox"
     apply: ApplyOptions = field(default_factory=ApplyOptions)
@@ -138,8 +138,9 @@ def validate_apply(apply: ApplyOptions, policy_scope: str, other_direction: str)
             "policy_action=add_to_existing requires --existing-policy-id "
             f"(e.g. the id the {other_direction} helper created). Set it and re-run."
         )
-    if policy_scope != "single":
+    if policy_scope == "per_workspace":
         raise ValueError(
-            "policy_action=add_to_existing updates one supplied policy id, so it needs "
-            "policy_scope=single. Switch --policy-scope to single, or use create_new for per_workspace."
+            "policy_action=add_to_existing updates one supplied policy id, so it can't be used with "
+            "--policy-scope per_workspace (which fans out to many policies). Use current_workspace "
+            "or all_workspaces, or use create_new for per_workspace."
         )

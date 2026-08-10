@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import pandas as pd
 
-from dbx_netpolicy import queries, render
-from dbx_netpolicy.config import IngressConfig
-from dbx_netpolicy.core import ingress as ing
+from dbx_nwp_helper import queries, render
+from dbx_nwp_helper.config import IngressConfig
+from dbx_nwp_helper.core import ingress as ing
 
 
 def test_candidate_funnel_query_shape():
@@ -20,7 +20,7 @@ def test_candidate_funnel_query_shape():
 
 def test_analyze_runs_funnel_only_when_empty(monkeypatch):
     # frequent_public_ips -> empty; funnel query -> a fixture row; feeds stubbed empty.
-    from dbx_netpolicy.feeds import loaders
+    from dbx_nwp_helper.feeds import loaders
     monkeypatch.setattr(loaders, "threat_intel", lambda f, refresh=False: pd.DataFrame(
         columns=["cidr", "source_feed", "threat_type", "confidence", "source_url", "loaded_at"]))
     monkeypatch.setattr(loaders, "cloud_ranges", lambda refresh=False: pd.DataFrame(
@@ -39,12 +39,16 @@ def test_analyze_runs_funnel_only_when_empty(monkeypatch):
             return pd.DataFrame(columns=["source_ip"])
         return pd.DataFrame()  # frequent_public_ips empty
 
-    monkeypatch.setattr("dbx_netpolicy.sql.query", fake_query)
+    monkeypatch.setattr("dbx_nwp_helper.sql.query", fake_query)
 
     class _WS:
         ip_access_lists = type("A", (), {"list": lambda self=None: []})()
 
-    a = ing.analyze(IngressConfig(enable_rdap=False), sql_conn=None, workspace_client=_WS())
+        def get_workspace_id(self):
+            return 123
+
+    a = ing.analyze(IngressConfig(enable_rdap=False, policy_scope="all_workspaces"),
+                    sql_conn=None, workspace_client=_WS())
     assert a.candidates.empty
     assert a.funnel is not None
     assert a.funnel["distinct_public_ok"] == 5

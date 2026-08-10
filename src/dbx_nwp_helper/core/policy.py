@@ -108,14 +108,26 @@ def build_full_access_egress():
 
 
 # --------------------------------------------------------------------------------- policy id naming
-def policy_name(name_prefix: str, workspace_id: int | None = None) -> str:
-    """Deterministic policy id. single -> <prefix>; per_workspace -> <prefix>-ws-<id> (keep the full
-    workspace id, truncate the prefix to fit the length limit)."""
+def _slug(text: str) -> str:
+    """Normalise a free-form label (e.g. a profile name) into a policy-id-safe slug."""
+    import re
+    return re.sub(r"[^a-z0-9-]+", "-", (text or "").lower()).strip("-")
+
+
+def policy_name(name_prefix: str, workspace_id: int | None = None, suffix: str | None = None) -> str:
+    """Deterministic policy id, truncated to the id length limit while preserving the suffix:
+      all_workspaces   -> <prefix>
+      per_workspace    -> <prefix>-ws-<id>       (workspace_id given)
+      current_workspace-> <prefix>-<profile>     (suffix given)
+    The suffix (workspace id or profile slug) is kept whole; the prefix is trimmed to fit."""
     if workspace_id is not None:
-        suffix = f"-ws-{workspace_id}"
-        room = MAX_POLICY_ID_LEN - len(suffix)
-        return f"{name_prefix[:max(room, 1)].rstrip('-')}{suffix}"
-    return name_prefix[:MAX_POLICY_ID_LEN]
+        tail = f"-ws-{workspace_id}"
+    elif suffix:
+        tail = f"-{_slug(suffix)}"
+    else:
+        return name_prefix[:MAX_POLICY_ID_LEN]
+    room = MAX_POLICY_ID_LEN - len(tail)
+    return f"{name_prefix[:max(room, 1)].rstrip('-')}{tail}"
 
 
 # ----------------------------------------------------------------------------------- apply (writes)

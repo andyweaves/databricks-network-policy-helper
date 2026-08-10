@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from dbx_netpolicy.feeds import threat, util
+from dbx_nwp_helper.feeds import threat, util
 
 NOW = datetime.now(timezone.utc)
 
@@ -79,5 +79,5 @@ def test_load_threat_intel_dedupes_across_feeds(monkeypatch):
 
 
 def test_all_loaders_registered():
-    from dbx_netpolicy.config import THREAT_FEEDS
+    from dbx_nwp_helper.config import THREAT_FEEDS
     assert set(THREAT_FEEDS) == set(threat.THREAT_FEED_LOADERS)

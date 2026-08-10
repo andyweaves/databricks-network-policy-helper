@@ -78,14 +78,17 @@ The CLI is a uv project. From a checkout: `uv sync`, then run via `uv run dbx-nw
 
 ## Policy scope (`--policy-scope`) & limits
 
-- `single` (default) — one policy across all workspaces.
-- `per_workspace` — a tailored policy per workspace, named `<name_prefix>-ws-<id>`; single scope is
-  just `<name_prefix>`. Audit `workspace_id = 0` is account-level, excluded unless
-  `--include-account-level`.
+- `current_workspace` (default) — one policy built from **this** workspace's traffic, named
+  `<name_prefix>-<profile>`, bound to this workspace on `--auto-assign`.
+- `per_workspace` — a tailored policy per workspace seen, named `<name_prefix>-ws-<id>`.
+- `all_workspaces` — a single policy built from **all** workspaces' traffic, named `<name_prefix>`.
+
+Audit `workspace_id = 0` is account-level, excluded unless `--include-account-level`.
 
 Applying: **`--create-policy`** is the master switch; **`--policy-action`** chooses `create_new`
 (a fresh policy from `--name-prefix`) or `add_to_existing` (update `--existing-policy-id`, replacing
-only its ingress block and leaving egress intact — requires `--policy-scope single`);
+only its ingress block and leaving egress intact — needs a single-policy scope, i.e.
+`current_workspace` or `all_workspaces`, not `per_workspace`);
 **`--auto-assign`** binds the workspace(s). `add_to_existing` is how you layer ingress onto a policy
 the egress helper already created (and vice-versa) for a combined policy.
 
