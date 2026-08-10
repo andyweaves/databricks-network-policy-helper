@@ -150,6 +150,13 @@ def build_rules(analysis: IngressAnalysis, cfg: IngressConfig, identity_resoluti
     for spec in acl_deny_specs + denied_deny_specs:
         deny_specs.append(spec)
 
+    # Deny rules apply to every target, but if the run produced no allow-derived targets (e.g.
+    # threat_deny_rules=all, or an ACL with only BLOCK lists and no observed traffic), seed a single
+    # account-wide target so the deny rules aren't silently dropped. build_ingress_block then adds a
+    # catch-all allow so the policy means "block these, allow the rest".
+    if deny_specs and not target_specs:
+        target_specs[ALL_WORKSPACES] = []
+
     policies = {}
     for tgt in sorted(target_specs, key=str):
         label = "single policy" if tgt == ALL_WORKSPACES else f"workspace {tgt}"
