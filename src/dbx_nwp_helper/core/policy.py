@@ -83,7 +83,7 @@ def build_ingress_block(allow: list[dict], deny: list[dict], mode_label: str, na
     )
     allow = list(allow)
     if (deny or []) and not allow:
-        allow = [{"label": f"{name_prefix}-allow-all", "catch_all": True,
+        allow = [{"label": "allow-all", "catch_all": True,
                   "destination": "all_destinations", "identity_type": "ALL_USERS", "identities": []}]
         note("Policy has deny rules but no allow rules — added a catch-all allow (all public IPs) "
              "so non-denied traffic is still permitted (default-allow-except-blocked).")

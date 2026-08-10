@@ -49,18 +49,19 @@ def test_owner_groups_become_separate_labeled_rules():
     allow = pols[ALL_WORKSPACES]["allow"]
     assert len(allow) == 2
     labels = {s["label"] for s in allow}
-    assert any(lbl.endswith("-Acme-Corp") for lbl in labels)   # (c) non-cloud -> <prefix>-<owner>
-    assert any(lbl.endswith("-Beta-LLC") for lbl in labels)
+    # (c) non-cloud -> just the owner slug (no name_prefix on rule labels)
+    assert "Acme-Corp" in labels
+    assert "Beta-LLC" in labels
 
 
 def test_cloud_owned_included_with_cloud_label():
-    # (b) cloud-provider-owned groups are now INCLUDED, labeled <prefix>-<cloud>-<owner>.
+    # (b) cloud-provider-owned groups are now INCLUDED, labeled <cloud>-<owner>.
     a = _analysis([
         _suggestion(rdap_owner="Palo Alto", cloud_provider=["aws"], minimal_cidrs=["8.8.8.8/32"]),
     ])
     pols = rules.build_rules(a, IngressConfig(scoping_mode="ip_only"))
     labels = [s["label"] for s in pols[ALL_WORKSPACES]["allow"]]
-    assert any(lbl.endswith("-aws-Palo-Alto") for lbl in labels)
+    assert "aws-Palo-Alto" in labels
     assert a.excluded_flagged == 0
 
 
@@ -81,8 +82,8 @@ def test_databricks_owned_included_despite_cloud_flag():
                                databricks_owned=["aws"], minimal_cidrs=["4.4.4.4/32"])])
     pols = rules.build_rules(a, IngressConfig(scoping_mode="ip_and_destination"))
     labels = [s["label"] for s in pols[ALL_WORKSPACES]["allow"]]
-    # (a) databricks-owned -> <prefix>-databricks-<cloud>
-    assert any(lbl.endswith("-databricks-aws") for lbl in labels)
+    # (a) databricks-owned -> databricks-<cloud>
+    assert "databricks-aws" in labels
     assert a.excluded_flagged == 0
 
 
@@ -138,8 +139,8 @@ def test_acl_migrate_and_enrich_adds_acl_allow_to_traffic():
     pols = rules.build_rules(a, IngressConfig(scoping_mode="ip_only",
                                               ip_acl_handling="migrate_and_enrich"))
     labels = [s["label"] for s in pols[ALL_WORKSPACES]["allow"]]
-    assert any("acl-office" in lbl for lbl in labels)          # migrated ACL rule (as-is)
-    assert any(lbl.endswith("-Acme") for lbl in labels)        # traffic-derived owner-grouped rule
+    assert "acl-office" in labels          # migrated ACL rule (as-is, no name_prefix)
+    assert "Acme" in labels                # traffic-derived owner-grouped rule
     assert not any("ip-only" in lbl for lbl in labels)         # no blanket collapse anymore
 
 
@@ -197,7 +198,7 @@ def test_threat_deny_all_one_rule_per_feed():
     ])
     pols = rules.build_rules(a, IngressConfig(scoping_mode="ip_only", threat_deny_rules="all"))
     deny = pols.get(ALL_WORKSPACES, {}).get("deny", [])
-    feeds = {s["label"].split("-deny-")[-1] for s in deny}
+    feeds = {s["label"].removeprefix("deny-") for s in deny}
     assert feeds == {"ipsum", "dshield"}
     for s in deny:
         assert all(ipaddress.ip_network(c).version == 4 for c in s["cidrs"])
