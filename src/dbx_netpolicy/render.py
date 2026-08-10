@@ -83,11 +83,10 @@ def ingress_analysis(analysis: IngressAnalysis, cfg: IngressConfig | None = None
     if analysis.suggestions.empty:
         console.banner("warn", "No candidate IP groups produced suggestions — check thresholds.")
     else:
-        console.dataframe(_trim(analysis.suggestions,
-                                ["policy_target", "rdap_owner", "recommendation", "distinct_ips",
-                                 "total_events", "scoped_destination", "threat_feeds",
-                                 "cloud_provider", "databricks_owned"]),
-                          "Ranked suggestions (flagged groups excluded from allow rules)")
+        framing = getattr(cfg, "policy_framing", "minimal") if cfg else "minimal"
+        console.dataframe(_suggestions_display(analysis.suggestions, framing),
+                          f"Ranked suggestions ({framing} framing; flagged groups excluded from "
+                          "allow rules)")
 
     console.rule("⚠️  Threat-intelligence matches")
     if analysis.threat_matches.empty:
@@ -239,7 +238,13 @@ def acl_preview(preview: dict, cfg: AclConfig) -> None:
 
 
 # ------------------------------------------------------------------------------- apply results
-def apply_results(results: list[dict]) -> None:
+def policy_url(account_host: str, account_id: str, policy_id: str) -> str:
+    """The account-console URL for a network policy."""
+    host = (account_host or "").rstrip("/")
+    return f"{host}/security/networking/network-access-policies/{policy_id}?account_id={account_id}"
+
+
+def apply_results(results: list[dict], account_host: str = "", account_id: str = "") -> None:
     console.rule("Apply results")
     for r in results:
         if "error" in r:
@@ -249,6 +254,8 @@ def apply_results(results: list[dict]) -> None:
         if r.get("assigned") is not None:
             msg += f" and bound workspace {r['assigned']}"
         console.banner("success", msg)
+        if account_host and account_id:
+            console.console.print(f"   [info]{policy_url(account_host, account_id, r['policy_id'])}[/info]")
 
 
 def _trim(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
@@ -257,3 +264,42 @@ def _trim(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
         return df
     keep = [c for c in cols if c in df.columns]
     return df[keep] if keep else df
+
+
+_FRAMING_COL = {"minimal": "minimal_cidrs", "optimal": "optimal_cidrs", "maximum": "maximum_cidrs"}
+
+
+def _fmt_flag(value) -> str:
+    """Render an enrichment flag (a list of matched feed/provider names, or None) as either the
+    matched names or an explicit 'no' — so a blank cell never reads as 'we didn't check'."""
+    if value is None:
+        return "no"
+    if hasattr(value, "tolist"):  # numpy array from a DataFrame cell
+        value = value.tolist()
+    if isinstance(value, (list, tuple)):
+        return ", ".join(str(v) for v in value) if len(value) else "no"
+    return str(value)
+
+
+def _suggestions_display(suggestions: pd.DataFrame, framing: str) -> pd.DataFrame:
+    """Build the human-facing suggestions table: friendly target, the framing-matched CIDRs, and
+    unambiguous yes/no-style enrichment flags."""
+    cidr_col = _FRAMING_COL.get(framing, "minimal_cidrs")
+    rows = []
+    for _, r in suggestions.iterrows():
+        tgt = r["policy_target"]
+        cidrs = r.get(cidr_col)
+        cidrs = list(cidrs.tolist()) if hasattr(cidrs, "tolist") else (cidrs or [])
+        rows.append({
+            "policy_target": "(all workspaces)" if tgt == ALL_WORKSPACES else tgt,
+            "rdap_owner": r["rdap_owner"],
+            "recommendation": r["recommendation"],
+            "distinct_ips": r["distinct_ips"],
+            "total_events": r["total_events"],
+            "cidrs": ", ".join(cidrs) if cidrs else "(none)",
+            "scoped_destination": r["scoped_destination"],
+            "threat_feeds": _fmt_flag(r["threat_feeds"]),
+            "cloud_provider": _fmt_flag(r["cloud_provider"]),
+            "databricks_owned": _fmt_flag(r["databricks_owned"]),
+        })
+    return pd.DataFrame(rows)

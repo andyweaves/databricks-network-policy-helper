@@ -328,7 +328,7 @@ def _run_ingress(cfg: IngressConfig, conn: Connection, yes: bool) -> None:
     with console.status("Applying policy…"):
         results = rules.apply(policies, cfg, account, conn.account_id, this_ws,
                               note=lambda m: console.banner("info", m))
-    render.apply_results(results)
+    render.apply_results(results, conn.account_host, conn.account_id)
 
 
 def _run_egress(cfg: EgressConfig, conn: Connection, yes: bool) -> None:
@@ -369,7 +369,7 @@ def _run_egress(cfg: EgressConfig, conn: Connection, yes: bool) -> None:
     with console.status("Applying egress policy…"):
         results = eg.apply(analysis, cfg, account, conn.account_id, this_ws,
                            note=lambda m: console.banner("info", m))
-    render.apply_results(results)
+    render.apply_results(results, conn.account_host, conn.account_id)
 
 
 def _run_acl(cfg: AclConfig, conn: Connection, yes: bool) -> None:
@@ -405,7 +405,7 @@ def _run_acl(cfg: AclConfig, conn: Connection, yes: bool) -> None:
     with console.status("Applying policy…"):
         result = acl_core.apply(analysis, cfg, account, conn.account_id,
                                 note=lambda m: console.banner("info", m))
-    render.apply_results([result])
+    render.apply_results([result], conn.account_host, conn.account_id)
 
 
 if __name__ == "__main__":
