@@ -265,7 +265,7 @@ def test_resolve_identities_maps_users():
 
 def test_apply_single_create_new_no_assign():
     a = _analysis([_suggestion(minimal_cidrs=["1.1.1.1/32"])])
-    cfg = IngressConfig(scoping_mode="ip_only", name_prefix="np-smoke")
+    cfg = IngressConfig(scoping_mode="ip_only", name_prefix="np-smoke", policy_scope="single")
     cfg.apply.create_policy = True
     pols = rules.build_rules(a, cfg)
     acct = _FakeAccount()
@@ -278,7 +278,7 @@ def test_apply_single_create_new_no_assign():
 
 def test_apply_single_auto_assign_binds_workspace():
     a = _analysis([_suggestion(minimal_cidrs=["1.1.1.1/32"])])
-    cfg = IngressConfig(scoping_mode="ip_only", name_prefix="np")
+    cfg = IngressConfig(scoping_mode="ip_only", name_prefix="np", policy_scope="single")
     cfg.apply.create_policy = True
     cfg.apply.auto_assign = True
     pols = rules.build_rules(a, cfg)

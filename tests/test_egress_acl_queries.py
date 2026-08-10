@@ -90,7 +90,8 @@ def test_egress_build_blocks_restricted_with_enforcement(monkeypatch):
         {"destination": "api.openai.com", "destination_type": "DNS", "events": 5,
          "workspace_ids": [1], "resolved_ips": []}])
     monkeypatch.setattr("dbx_netpolicy.sql.query", lambda _c, _t: observed)
-    cfg = EgressConfig(enable_rdap=False, policy_mode="enforce", block_threat_domains="off")
+    cfg = EgressConfig(enable_rdap=False, policy_mode="enforce", block_threat_domains="off",
+                       policy_scope="single")
     a = eg.analyze(cfg, sql_conn=None)
     prev = eg.preview_blocks(a, cfg)
     na = prev[eg.ALL_WORKSPACES]["egress"]["network_access"]

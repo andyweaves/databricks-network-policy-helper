@@ -1,15 +1,15 @@
 ---
 name: ip-acl-migration
-description: Migrate a Databricks workspace's existing IP access list (ACL) into a context-based ingress (CBI) account network policy, as-is, using the dbx-netpolicy CLI. Use when the user wants to convert / migrate an existing IP access list to a network policy, recreate their IP ACL as CBI, or stand up a network policy from the current ACL without audit-log analysis. Runs `dbx-netpolicy migrate-acl`, which reads this workspace's ACL (ALLOW->allow rules, BLOCK->deny rules) and recreates it verbatim — nothing added — then creates the account network policy (enforce or dry-run) and optionally auto-assigns it to the current workspace.
+description: Migrate a Databricks workspace's existing IP access list (ACL) into a context-based ingress (CBI) account network policy, as-is, using the dbx-nwp-helper CLI. Use when the user wants to convert / migrate an existing IP access list to a network policy, recreate their IP ACL as CBI, or stand up a network policy from the current ACL without audit-log analysis. Runs `dbx-nwp-helper migrate-acl`, which reads this workspace's ACL (ALLOW->allow rules, BLOCK->deny rules) and recreates it verbatim — nothing added — then creates the account network policy (enforce or dry-run) and optionally auto-assigns it to the current workspace.
 ---
 
 # IP Access List → CBI migration (simple)
 
 Migrates **this workspace's existing IP access list** into a context-based ingress (CBI) account
 network policy, **as-is** — no audit-log analysis, no enrichment, nothing added. The engine is
-`dbx-netpolicy migrate-acl` (this repo).
+`dbx-nwp-helper migrate-acl` (this repo).
 
-Use the fuller **ingress-helper** skill (`dbx-netpolicy ingress`) instead when the user wants
+Use the fuller **ingress-helper** skill (`dbx-nwp-helper ingress`) instead when the user wants
 traffic-based suggestions, threat-intel / cloud enrichment, or identity/destination scoping.
 
 ## When to use
@@ -19,7 +19,7 @@ IP ACL as CBI, or create a network policy from the current ACL without analysing
 
 ## Setup
 
-`uv sync`, then `uv run dbx-netpolicy migrate-acl …`. Auth is the SDK's unified auth (`--profile` or
+`uv sync`, then `uv run dbx-nwp-helper migrate-acl …`. Auth is the SDK's unified auth (`--profile` or
 `DATABRICKS_*`). Reading the ACL is workspace-level; **creating/assigning the policy needs an account
 admin** — pass `--account-id` with account-admin credentials (see `docs/account-admin-setup.md`).
 This command does not need a SQL warehouse (no traffic analysis).
@@ -51,4 +51,4 @@ This command does not need a SQL warehouse (no traffic analysis).
 
 Nothing is written unless `--create-policy`. Default `--policy-mode enforce` will block non-matching
 source IPs on the assigned workspace — trial with `--policy-mode dry_run` first if unsure. Also
-runnable via `dbx-netpolicy guided`.
+runnable via `dbx-nwp-helper guided`.

@@ -22,6 +22,12 @@ def test_include_account_level_defaults_false():
     assert IngressConfig().include_account_level is False
 
 
+def test_policy_scope_defaults_to_per_workspace():
+    from dbx_netpolicy.config import EgressConfig
+    assert IngressConfig().policy_scope == "per_workspace"
+    assert EgressConfig().policy_scope == "per_workspace"
+
+
 def test_policy_mode_target_maps_to_block():
     assert IngressConfig(policy_mode="dry_run").policy_mode_target == "ingress_dry_run"
     assert IngressConfig(policy_mode="enforce").policy_mode_target == "ingress"

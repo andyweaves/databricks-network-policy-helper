@@ -1,12 +1,12 @@
 ---
 name: egress-helper
-description: Propose and apply a Databricks serverless egress (SEG) network-policy allow-list from observed outbound traffic in system.access.outbound_network, using the dbx-netpolicy CLI. Use when the user wants to build/suggest an egress policy, allow-list outbound destinations, control serverless egress, turn dry-run egress denials into an allow-list, or block known-bad domains. Runs `dbx-netpolicy egress` (or the guided wizard), which classifies observed destinations into storage (S3/GCS/Azure) and internet FQDNs, shows what it would allow for review, and can create the egress policy (dry-run or enforce) and optionally block threat-intel domains.
+description: Propose and apply a Databricks serverless egress (SEG) network-policy allow-list from observed outbound traffic in system.access.outbound_network, using the dbx-nwp-helper CLI. Use when the user wants to build/suggest an egress policy, allow-list outbound destinations, control serverless egress, turn dry-run egress denials into an allow-list, or block known-bad domains. Runs `dbx-nwp-helper egress` (or the guided wizard), which classifies observed destinations into storage (S3/GCS/Azure) and internet FQDNs, shows what it would allow for review, and can create the egress policy (dry-run or enforce) and optionally block threat-intel domains.
 ---
 
 # Egress Policy Helper (serverless egress / SEG)
 
 Builds a Databricks **account network policy egress** allow-list from observed outbound traffic. The
-engine is the **`dbx-netpolicy`** CLI (this repo): `dbx-netpolicy egress` or the guided wizard.
+engine is the **`dbx-nwp-helper`** CLI (this repo): `dbx-nwp-helper egress` or the guided wizard.
 
 For **ingress** (source-IP allow-lists) use `ingress-helper`. To end up with a combined ingress +
 egress policy, run one direction with `--policy-action create_new`, then the other with
@@ -14,9 +14,9 @@ egress policy, run one direction with `--policy-action create_new`, then the oth
 
 ## Setup
 
-`uv sync`, then `uv run dbx-netpolicy egress …`. Auth is the SDK's unified auth (`--profile` or
+`uv sync`, then `uv run dbx-nwp-helper egress …`. Auth is the SDK's unified auth (`--profile` or
 `DATABRICKS_*`); the CLI queries the system tables through a SQL warehouse (`--warehouse-http-path`,
-else it reuses/creates a serverless `dbx-netpolicy` warehouse). Creating/assigning a policy needs an
+else it reuses/creates a serverless `dbx-nwp-helper` warehouse). Creating/assigning a policy needs an
 **account admin** — pass `--account-id` with account-admin credentials (see
 `docs/account-admin-setup.md`).
 
@@ -26,7 +26,7 @@ else it reuses/creates a serverless `dbx-netpolicy` warehouse). Creating/assigni
 (would-be-denials under a dry-run policy). So the workflow is:
 1. Stand up an egress policy in **dry_run** (RESTRICTED_ACCESS, log-only) — blocks nothing.
 2. Let it observe; the table logs every destination that *would* be denied = your egress footprint.
-3. Run `dbx-netpolicy egress` to turn those destinations into a real allow-list.
+3. Run `dbx-nwp-helper egress` to turn those destinations into a real allow-list.
 
 If the table is empty, no egress policy is logging yet — start with step 1.
 
@@ -78,4 +78,4 @@ Egress policy limits: 100 internet destinations, 100 storage destinations per po
 
 - The egress block replaces only the policy's `egress`; `ingress` / `ingress_dry_run` are untouched.
 - Storage destinations and the CBI egress schema are documented at `docs/cbi-sdk-schema.md`.
-- Also runnable via `dbx-netpolicy guided` (interactive Q&A).
+- Also runnable via `dbx-nwp-helper guided` (interactive Q&A).

@@ -14,7 +14,7 @@ account-level calls.
 
 ## Authentication model
 
-`dbx-netpolicy` uses the Databricks SDK's **unified auth**. Workspace calls (analysis, warehouse
+`dbx-nwp-helper` uses the Databricks SDK's **unified auth**. Workspace calls (analysis, warehouse
 management, reading the IP ACL) resolve credentials from a `--profile` in `~/.databrickscfg`,
 `DATABRICKS_*` environment variables, or an OAuth session. Account-level calls additionally need
 `--account-id <numeric id>` (not reliably discoverable from a workspace) and account-admin
