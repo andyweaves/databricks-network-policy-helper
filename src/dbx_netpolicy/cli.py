@@ -89,6 +89,12 @@ def _step(message: str) -> None:
     console.console.print(f"[muted]· {message}[/muted]")
 
 
+def _has_rules(policies: dict) -> bool:
+    """True if any policy target carries at least one allow or deny rule. Guards the apply path so an
+    empty analysis (e.g. no candidate IPs) fails with a clear message instead of a KeyError."""
+    return any(p.get("allow") or p.get("deny") for p in (policies or {}).values())
+
+
 def _confirm_write(cfg_mode: str, yes: bool) -> bool:
     """The review gate. Returns True if the user has confirmed (or --yes given)."""
     if yes:
@@ -108,7 +114,9 @@ def ingress(
     min_events: int = typer.Option(1, help="Min successful events per IP."),
     treat_null_status_as_success: bool = typer.Option(False, help="Count NULL status as success."),
     include_ipv6: bool = typer.Option(False, help="Analyse IPv6 (policy stays IPv4-only)."),
-    include_account_level: bool = typer.Option(False, help="Include workspace_id=0 rows."),
+    include_account_level: bool = typer.Option(
+        False, help="Include account-level (workspace_id=0) audit rows (default off; these are "
+                    "account console / SCIM traffic, not workspace-scoped)."),
     threat_feeds: str | None = typer.Option(
         None, help="Comma-separated feeds (default: all). See `feeds list`."),
     enable_rdap: bool = typer.Option(True, help="RDAP owner lookup (needed for 'maximum')."),
@@ -306,6 +314,11 @@ def _run_ingress(cfg: IngressConfig, conn: Connection, yes: bool) -> None:
     if not cfg.apply.create_policy:
         console.banner("info", "Propose-only run (no --create-policy). Nothing was written.")
         return
+    if not _has_rules(policies):
+        console.banner("danger", "Nothing to apply — the analysis produced no ingress rules, so no "
+                                 "policy can be created. Review the candidate funnel above (try "
+                                 "--lookback-days / --min-events / --include-account-level).")
+        raise typer.Exit(code=1)
     if not _confirm_write(cfg.policy_mode, yes):
         console.banner("info", "Aborted — nothing written.")
         return
@@ -343,7 +356,10 @@ def _run_egress(cfg: EgressConfig, conn: Connection, yes: bool) -> None:
         console.banner("info", "Propose-only run (no --create-policy). Nothing was written.")
         return
     if not previews:
-        return
+        console.banner("danger", "Nothing to apply — no egress destinations were classified, so no "
+                                 "policy can be created. Confirm outbound_network has data for this "
+                                 "window (stand up a dry_run egress policy first to populate it).")
+        raise typer.Exit(code=1)
     if not _confirm_write(cfg.policy_mode, yes):
         console.banner("info", "Aborted — nothing written.")
         return
@@ -368,6 +384,11 @@ def _run_acl(cfg: AclConfig, conn: Connection, yes: bool) -> None:
     analysis = acl_core.analyze(cfg, wc)
     render.acl_analysis(analysis, cfg)
     if not (analysis.allow_specs or analysis.deny_specs):
+        msg = ("No enabled IPv4 IP-access-list entries on this workspace — nothing to migrate.")
+        if cfg.create_policy:
+            console.banner("danger", msg + " No policy can be created.")
+            raise typer.Exit(code=1)
+        console.banner("info", msg)
         return
 
     preview = acl_core.preview_block(analysis, cfg, note=lambda m: console.banner("info", m))
