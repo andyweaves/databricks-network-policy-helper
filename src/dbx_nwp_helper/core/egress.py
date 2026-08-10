@@ -162,22 +162,26 @@ def analyze(cfg: EgressConfig, sql_conn, on_step=lambda _m: None,
     return analysis
 
 
+_CLOUD_OWNERS = {"AWS", "GCP", "AZURE", "Azure", "ORACLE", "Oracle"}
+# Owner values that mean "we couldn't identify it" rather than a real provider name.
+_UNKNOWN_OWNERS = {None, "Unknown", "DNS resolution failed - check egress control"}
+
+
 def recommend(hosting_owner: str | None) -> str:
-    """Map an internet-FQDN hosting owner (from the offline cloud-range match) to a recommendation:
-      Databricks-owned              -> ALLOW
-      a known cloud (AWS/GCP/Azure)  -> REVIEW — Cloud-owned
-      matched, non-cloud            -> REVIEW — Other infra provider
-      owner-lookup off / DNS failed -> REVIEW — owner unknown  (don't claim a provider we can't see)
+    """Map an internet-FQDN hosting owner to a recommendation:
+      Databricks                     -> ALLOW — Databricks-owned
+      AWS / GCP / Azure / Oracle     -> REVIEW — Cloud-owned
+      a named RDAP owner             -> REVIEW — Other infra provider
+      Unknown / DNS failed / off     -> REVIEW — owner unknown  (don't claim a provider we can't see)
     (Storage destinations — S3/GCS/Azure — are always cloud-owned, so they get REVIEW — Cloud-owned.)"""
     if hosting_owner == "Databricks":
         return "ALLOW — Databricks-owned"
-    if hosting_owner in ("AWS", "GCP", "AZURE", "Azure", "ORACLE", "Oracle"):
+    if hosting_owner in _CLOUD_OWNERS:
         return "REVIEW — Cloud-owned"
-    # "non-cloud / unknown" (no RDAP match) or "non-cloud: <owner>" (RDAP named a non-cloud provider).
-    if hosting_owner and hosting_owner.startswith("non-cloud"):
-        return "REVIEW — Other infra provider"
-    # None (owner lookup disabled) or a "DNS resolution failed …" status.
-    return "REVIEW — owner unknown"
+    if hosting_owner in _UNKNOWN_OWNERS:
+        return "REVIEW — owner unknown"
+    # A real, named non-cloud owner from RDAP (Cloudflare, GitHub, Palo Alto, …).
+    return "REVIEW — Other infra provider"
 
 
 def union(targets: dict, key: str) -> dict:
@@ -215,6 +219,7 @@ def _owner_lookup(analysis: EgressAnalysis, fqdn_resolved_ips: dict, cfg: Egress
     cloud_nets = _load_cloud_networks()
 
     def owner_for_ip(ip):
+        """Cloud provider name if the IP is in a published range, else None (caller tries RDAP)."""
         try:
             addr = ipaddress.ip_address(ip)
         except ValueError:
@@ -224,7 +229,7 @@ def _owner_lookup(analysis: EgressAnalysis, fqdn_resolved_ips: dict, cfg: Egress
         for net, owner in cloud_nets:
             if addr.version == net.version and addr in net:
                 return owner
-        return "non-cloud / unknown"
+        return None
 
     from ..feeds import rdap
 
@@ -248,11 +253,8 @@ def _owner_lookup(analysis: EgressAnalysis, fqdn_resolved_ips: dict, cfg: Egress
         if ip is None:
             analysis.fqdn_owner[fqdn] = "DNS resolution failed - check egress control"
             continue
-        owner = owner_for_ip(ip)
-        if owner == "non-cloud / unknown":
-            # Not a known cloud range — ask RDAP who actually owns the IP.
-            named = rdap_owner(ip)
-            owner = f"non-cloud: {named}" if named else "non-cloud / unknown"
+        # Cloud-range match (AWS/GCP/Azure/Oracle/Databricks) wins; else RDAP owner; else Unknown.
+        owner = owner_for_ip(ip) or rdap_owner(ip) or "Unknown"
         analysis.fqdn_owner[fqdn] = owner
 
 

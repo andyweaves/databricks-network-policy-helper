@@ -16,13 +16,14 @@ def test_egress_recommend_maps_owner():
     assert eg.recommend("AWS") == "REVIEW — Cloud-owned"
     assert eg.recommend("GCP") == "REVIEW — Cloud-owned"
     assert eg.recommend("Azure") == "REVIEW — Cloud-owned"
-    assert eg.recommend("non-cloud / unknown") == "REVIEW — Other infra provider"
-    assert eg.recommend("non-cloud: Cloudflare") == "REVIEW — Other infra provider"
+    # a named non-cloud owner (from RDAP)
+    assert eg.recommend("Cloudflare, Inc.") == "REVIEW — Other infra provider"
 
 
 def test_egress_recommend_unknown_when_no_lookup():
-    # owner lookup disabled (None) or DNS failed -> don't claim a provider
+    # owner lookup disabled (None), an explicit Unknown, or DNS failed -> don't claim a provider
     assert eg.recommend(None) == "REVIEW — owner unknown"
+    assert eg.recommend("Unknown") == "REVIEW — owner unknown"
     assert eg.recommend("DNS resolution failed - check egress control") == "REVIEW — owner unknown"
 
 
@@ -38,8 +39,21 @@ def test_egress_owner_lookup_rdap_fallback(monkeypatch):
     monkeypatch.setattr(rdap, "lookup", lambda ip: {"rdap_owner_name": "Cloudflare"})
     cfg = EgressConfig(enable_rdap=True, block_threat_domains="off", policy_scope="all_workspaces")
     a = eg.analyze(cfg, sql_conn=None)
-    assert a.fqdn_owner["api.example.com"] == "non-cloud: Cloudflare"
+    assert a.fqdn_owner["api.example.com"] == "Cloudflare"  # just the owner, no "non-cloud:" prefix
     assert eg.recommend(a.fqdn_owner["api.example.com"]) == "REVIEW — Other infra provider"
+
+
+def test_egress_owner_unknown_when_rdap_also_misses(monkeypatch):
+    observed = pd.DataFrame([
+        {"destination": "api.example.com", "destination_type": "DNS", "events": 5,
+         "workspace_ids": [1], "resolved_ips": ["104.16.1.1"]}])
+    monkeypatch.setattr("dbx_nwp_helper.sql.query", lambda _c, _t: observed)
+    monkeypatch.setattr(eg, "_load_cloud_networks", lambda: [])
+    from dbx_nwp_helper.feeds import rdap
+    monkeypatch.setattr(rdap, "lookup", lambda ip: {"rdap_owner_name": None})
+    cfg = EgressConfig(enable_rdap=True, block_threat_domains="off", policy_scope="all_workspaces")
+    a = eg.analyze(cfg, sql_conn=None)
+    assert a.fqdn_owner["api.example.com"] == "Unknown"
 
 
 def test_egress_owner_lookup_cloud_match_no_rdap(monkeypatch):

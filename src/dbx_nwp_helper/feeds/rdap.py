@@ -14,9 +14,9 @@ from urllib.request import Request, urlopen
 from .http import FEED_USER_AGENT
 
 RDAP_TIMEOUT_SECONDS = 8
-RDAP_MAX_RETRIES = 2
+RDAP_MAX_RETRIES = 4          # rdap.org / RIR servers throttle bursts; a couple of retries wasn't enough
 RDAP_MAX_REFERRAL_DEPTH = 3
-RDAP_DELAY_SECONDS = 0.1
+RDAP_DELAY_SECONDS = 0.25     # gentler default spacing between per-IP lookups in a run
 
 _EMPTY = {"rdap_owner_name": None, "rdap_type": None, "maximum_cidrs": None}
 
@@ -96,6 +96,17 @@ def _maximum_cidrs(start_ip, end_ip):
         return None
 
 
+def _retry_after_seconds(error) -> float | None:
+    """A 429/503 may carry a Retry-After header (delta-seconds). Honour it when present."""
+    hdrs = getattr(error, "headers", None)
+    if hdrs is None:
+        return None
+    try:
+        return float(hdrs.get("Retry-After"))
+    except (TypeError, ValueError):
+        return None
+
+
 def _fetch(url):
     delay, last_error = 1.0, None
     for attempt in range(1, RDAP_MAX_RETRIES + 1):
@@ -107,7 +118,8 @@ def _fetch(url):
         except Exception as error:  # noqa: BLE001
             last_error = error
             if attempt < RDAP_MAX_RETRIES and _should_retry(error):
-                time.sleep(delay)
+                # Respect Retry-After on throttle responses; otherwise exponential backoff (capped).
+                time.sleep(min(_retry_after_seconds(error) or delay, 10.0))
                 delay *= 2
                 continue
             return None, url, error
