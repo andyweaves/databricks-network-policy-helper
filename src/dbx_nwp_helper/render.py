@@ -87,8 +87,8 @@ def ingress_analysis(analysis: IngressAnalysis, cfg: IngressConfig | None = None
     else:
         framing = getattr(cfg, "policy_framing", "minimal") if cfg else "minimal"
         console.dataframe(_suggestions_display(analysis.suggestions, framing),
-                          f"Ranked suggestions ({framing} framing; flagged groups excluded from "
-                          "allow rules)")
+                          f"Ranked suggestions ({framing} framing; grouped into per-owner allow "
+                          "rules — threat-intel groups excluded)")
 
     console.rule("⚠️  Threat-intelligence matches")
     if analysis.threat_matches.empty:
@@ -168,7 +168,8 @@ def ingress_preview(previews: dict, cfg: IngressConfig, analysis: IngressAnalysi
         console.json_panel(f"{label} — `{cfg.policy_mode_target}` block", previews[tgt])
     if analysis.excluded_flagged:
         console.banner("info",
-                       f"Excluded {analysis.excluded_flagged} flagged group(s) (threat/cloud-owned).")
+                       f"Excluded {analysis.excluded_flagged} threat-intel-matched group(s) from the "
+                       "allow-list (see the threat-match table).")
     if analysis.skipped_ipv6:
         console.banner("info", f"{analysis.skipped_ipv6} IPv6 CIDR(s) omitted (CBI is IPv4-only).")
 
