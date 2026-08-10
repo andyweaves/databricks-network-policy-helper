@@ -21,15 +21,54 @@ RDAP_DELAY_SECONDS = 0.1
 _EMPTY = {"rdap_owner_name": None, "rdap_type": None, "maximum_cidrs": None}
 
 
+# RDAP entity roles ranked best→worst for "who owns this" — the org that holds the allocation
+# (registrant/registrar) is the useful name; abuse/technical contacts (often literally "Abuse") are
+# a last resort. Lower number = higher priority.
+_ROLE_PRIORITY = {"registrant": 0, "registrar": 1, "administrative": 2, "technical": 3,
+                  "noc": 4, "abuse": 9}
+
+
+def _entity_name(entity):
+    """The `fn` (full name) from an entity's vCard, or None."""
+    vcard = entity.get("vcardArray")
+    if isinstance(vcard, list) and len(vcard) > 1:
+        for field in vcard[1]:
+            if len(field) >= 4 and field[0] == "fn" and field[3]:
+                return field[3]
+    return None
+
+
 def _extract_entity_names(entities):
-    names = []
+    """Return owner names ranked by entity role (registrant/registrar first, abuse last) so the
+    caller's names[0] is the meaningful org name rather than an abuse-desk contact. Recurses into
+    nested entities. De-duplicated while preserving rank order."""
+    ranked = []  # (priority, name)
     for entity in entities or []:
-        vcard = entity.get("vcardArray")
-        if isinstance(vcard, list) and len(vcard) > 1:
-            for field in vcard[1]:
-                if len(field) >= 4 and field[0] == "fn" and field[3]:
-                    names.append(field[3])
-    return sorted(set(names))
+        name = _entity_name(entity)
+        if name:
+            roles = entity.get("roles") or []
+            best_role = min((_ROLE_PRIORITY.get(r, 5) for r in roles), default=5)
+            ranked.append((best_role, name))
+        # Entities can nest (e.g. an org with sub-contacts) — include those too, one rank lower.
+        for sub_prio, sub_name in _extract_ranked(entity.get("entities")):
+            ranked.append((sub_prio + 0.5, sub_name))
+    ranked.sort(key=lambda pn: pn[0])
+    seen, out = set(), []
+    for _prio, name in ranked:
+        if name not in seen:
+            seen.add(name)
+            out.append(name)
+    return out
+
+
+def _extract_ranked(entities):
+    ranked = []
+    for entity in entities or []:
+        name = _entity_name(entity)
+        if name:
+            roles = entity.get("roles") or []
+            ranked.append((min((_ROLE_PRIORITY.get(r, 5) for r in roles), default=5), name))
+    return ranked
 
 
 def _should_retry(error):
