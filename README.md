@@ -2,116 +2,117 @@
 
 > Build Databricks **account network policies** from *real observed traffic* — not guesswork.
 
-Each tool is a self-contained notebook (+ a 🤖 Databricks Genie Code skill) sharing a common home, a
-common safety model, and the same deploy path.
-
-Both directions of an account network policy are covered:
+`dbx-netpolicy` is a visually engaging CLI that turns the Databricks system tables into proposed
+**account network policies**, with a dry-run-first, review-gated apply path. Both directions are
+covered:
 
 - 📥 **Ingress** — context-based ingress (CBI): who may connect *in*, by source IP.
 - 📤 **Egress** — serverless egress (SEG): where workloads may connect *out*, by destination.
+- 🔁 **IP ACL migration** — recreate an existing IP access list as a CBI policy, verbatim.
 
-🔗 Each helper can either **create a new policy** *or* **add its rules to an existing one** — so you
-run them one after the other, pointed at the same policy, to end up with a single combined
-ingress + egress policy (see [Combining ingress + egress](#-combining-ingress--egress)).
-
-## 🧰 The tools
-
-Each tool's full detail — what it does, every widget, its safety notes — lives in its skill
-(`.assistant/skills/<name>/SKILL.md`) and in the notebook's own header cells. This table is the map.
-
-| Tool | Notebook | Skill / reference | What it does |
-|---|---|---|---|
-| 📥 **Ingress Helper** (CBI) | [`ingress_helper.py`](notebooks/ingress_helper.py) | [ingress-helper](.assistant/skills/ingress-helper/SKILL.md) | Proposes & applies a CBI allow-list from `system.access.audit` source IPs — enriched with open threat-intel, cloud-provider and Databricks-owned IP ranges + RDAP, optionally scoped by destination/identity. |
-| 📤 **Egress Helper** (SEG) | [`egress_helper.py`](notebooks/egress_helper.py) | [egress-helper](.assistant/skills/egress-helper/SKILL.md) | Proposes & applies a SEG allow-list from `system.access.outbound_network` destinations (S3 / GCS / Azure storage + internet FQDNs), with optional threat-intel domain blocking. |
-| 🔁 **IP ACL Migration** | [`ip_acl_migration.py`](notebooks/ip_acl_migration.py) | [ip-acl-migration](.assistant/skills/ip-acl-migration/SKILL.md) | Recreates this workspace's existing IP access list as a CBI policy, verbatim — no traffic analysis, no enrichment. |
+🔗 Each direction can either **create a new policy** *or* **add its rules to an existing** one — so
+run them one after the other, pointed at the same policy, for a combined ingress + egress policy.
 
 ## 🚀 Quick start
 
-1. 📦 **Deploy a notebook** into a workspace with the Databricks CLI:
-   ```bash
-   # one notebook (default: ingress_helper)
-   python scripts/deploy_notebook.py --profile <cli-profile> --notebook egress_helper --overwrite
-   # or all of them
-   python scripts/deploy_notebook.py --profile <cli-profile> --notebook all --overwrite
-   ```
-   Imports to `/Users/<you>/<notebook>`; pass `--path` to change. (You can also clone/attach the repo
-   as a Git folder and open the notebooks directly.)
-2. 🎛️ **Open the notebook** and set the widgets at the top — every decision lives there.
-3. 👀 **Run top to bottom** and review the proposed rules / JSON preview.
-4. ✅ **Apply with intent** — start in `dry_run`, review the logged denials, then re-run in `enforce`.
+Requires [uv](https://docs.astral.sh/uv/) and a Databricks workspace you can authenticate to.
 
-## 🔗 Combining ingress + egress
+```bash
+uv sync                                    # set up the environment
+uv run dbx-netpolicy --help                # see all commands
 
-There's no separate combined notebook — instead, each helper can add its rules to an existing
-policy, so you compose one yourself in two runs:
+# Propose-only (writes nothing): analyse audit traffic and preview a CBI policy
+uv run dbx-netpolicy ingress --profile <profile> --lookback-days 30
 
-1. 🥇 **Run the first helper** (say the ingress helper) with `create_policy=true` and
-   `policy_action=create_new`. It creates the policy and prints its **policy id** (from
-   `name_prefix`, e.g. `np-helper`). Use `policy_scope=single`.
-2. 🥈 **Run the second helper** (the egress helper) with `create_policy=true`,
-   `policy_action=add_to_existing`, and `existing_policy_id` set to the id from step 1. It updates
-   **only its own direction** on that policy, leaving the first helper's block intact.
+# Or let it walk you through it interactively
+uv run dbx-netpolicy guided --profile <profile>
+```
 
-🎉 The result is one account network policy carrying both the ingress and egress blocks. (Order
-doesn't matter — either helper can go first.) `add_to_existing` requires `policy_scope=single`, since
-it targets one specific policy id.
+`uv tool install .` exposes `dbx-netpolicy` on your PATH so you can drop the `uv run` prefix.
+
+**Auth** is the Databricks SDK's [unified auth](https://docs.databricks.com/dev-tools/auth) — a
+`--profile` from `~/.databrickscfg`, `DATABRICKS_*` env vars, or OAuth. Analysis needs only workspace
+read on the system tables plus a **SQL warehouse** (pass `--warehouse-http-path`, or the CLI reuses /
+creates a small serverless one named `dbx-netpolicy`). **Applying a policy or identity-scoping needs
+an account admin** — pass `--account-id` with account-admin credentials (see
+[`docs/account-admin-setup.md`](docs/account-admin-setup.md)).
+
+## 🧰 The commands
+
+| Command | What it does |
+|---|---|
+| 📥 `dbx-netpolicy ingress` | Propose & apply a CBI allow-list from `system.access.audit` source IPs — enriched with open threat-intel, cloud-provider and Databricks-owned IP ranges + RDAP, optionally scoped by destination/identity. |
+| 📤 `dbx-netpolicy egress` | Propose & apply a SEG allow-list from `system.access.outbound_network` destinations (S3 / GCS / Azure storage + internet FQDNs), with optional threat-intel domain blocking. |
+| 🔁 `dbx-netpolicy migrate-acl` | Recreate this workspace's existing IP access list as a CBI policy, verbatim — no traffic analysis, no enrichment. |
+| 🧭 `dbx-netpolicy guided` | Interactive Q&A wizard — point it at a workspace and it walks you through building any of the above. |
+| 📦 `dbx-netpolicy feeds` | Manage the local threat-intel / cloud-range feed cache (`list` / `refresh` / `clear`). |
+
+Every option is discoverable with `--help` on any command. The full detail for each tool lives in its
+Claude skill under [`.claude/skills/`](.claude/skills/).
 
 ## 🔒 Safety model
 
-Both helpers share one safety model:
-
-- 🛑 **Nothing is written unless you opt in** — `create_policy=true`. Analysis and proposal are always
-  side-effect-free, and a review gate (`reviewed_rules`) blocks the create cell until you confirm.
-- 🧪 **Dry-run first.** Default `policy_mode` is `dry_run`, which writes the log-only block and **blocks
-  nothing** — it makes the policy *log* what it would deny so you can review it in the network system
-  tables (`system.access.inbound_network` / `system.access.outbound_network`).
-- ⛔ **Enforce with intent.** `enforce` writes the blocking block and **can lock users or workloads
-  out** if the allow-list is incomplete. Stay in `dry_run` until the logged denials are only bad actors.
+- 🛑 **Nothing is written unless you opt in** — `--create-policy`. Analysis and proposal are always
+  side-effect-free, and an interactive **review gate** confirms before any write (bypass with `--yes`
+  for scripting).
+- 🧪 **Dry-run first.** Default `--policy-mode` is `dry_run` — writes the log-only block and **blocks
+  nothing**, so you can review would-be denials in the network system tables first.
+- ⛔ **Enforce with intent.** `--policy-mode enforce` writes the blocking block and **can lock users
+  or workloads out** if the allow-list is incomplete. Stay in `dry_run` until the logged denials are
+  only bad actors.
 - 🧬 **The platform stays reachable.** The ingress helper auto-allows Databricks' own control-plane /
   serverless IP ranges, so an enforced ingress policy won't lock the platform out.
 - #️⃣ **IPv4 only.** The CBI policy schema is IPv4-only; IPv6 is analysed but never placed in a policy.
 - 🧱 **`add_to_existing` never clobbers the other direction** — it replaces only the block for its own
-  direction and requires the target policy to already exist (it won't silently create one).
+  direction and requires the target policy to already exist.
 
-## 🔑 Permissions
+## 🔗 Combining ingress + egress
 
-- 📖 **Analysis / enrichment:** workspace read on the relevant system tables (`system.access.audit`
-  for ingress; `system.access.outbound_network` for egress).
-- 👑 **Applying a policy, or identity scoping: account admin** — recommended as an account-admin
-  service principal via OAuth M2M with its secret in a secret scope. See
-  [`docs/account-admin-setup.md`](docs/account-admin-setup.md).
+Each helper can add its rules to an existing policy, so you compose one yourself in two runs:
 
-## 🤖 Databricks Genie Code skills
+1. 🥇 Run the first direction with `--create-policy --policy-action create_new`. It creates the policy
+   (named from `--name-prefix`, e.g. `np-helper`) and prints its **policy id**. Use `--policy-scope
+   single`.
+2. 🥈 Run the second direction with `--create-policy --policy-action add_to_existing
+   --existing-policy-id <id>`. It updates **only its own direction**, leaving the first intact.
 
-The repo ships [Databricks Genie Code skills](https://docs.databricks.com/aws/en/genie-code/skills)
-under `.assistant/skills/` — one per tool (linked in the table above). Each skill's `SKILL.md` is
-also the tool's reference doc. Genie Code discovers per-user skills under
-`/Users/<you>/.assistant/skills/`.
+🎉 The result is one account network policy carrying both blocks. (Order doesn't matter.)
 
-✨ **Easiest install:** run [`notebooks/install_skills.py`](notebooks/install_skills.py) from the
-repo / Git-folder checkout — its `skills` widget lists every skill in the repo (`ALL` by default) and
-copies the selected ones into your user skills directory (a `workspace` scope option exists for an
-account-wide install). Or copy the `.assistant/skills/<skill>` folder(s) there by hand.
+## 🤖 Claude skills
 
-💬 Once installed, Genie Code picks them up next time you use it; invoke one with `@<skill-name>`
-(e.g. `@ingress-helper`, `@egress-helper`) in chat.
+The repo ships [Claude Code skills](https://docs.claude.com/en/docs/claude-code) under
+[`.claude/skills/`](.claude/skills/) — one per tool (`ingress-helper`, `egress-helper`,
+`ip-acl-migration`) — so you can drive the CLI conversationally. Each skill's `SKILL.md` is also the
+tool's reference doc.
 
 ## 🗂️ Repo layout
 
 | Path | What |
 |---|---|
-| `notebooks/ingress_helper.py` | 📥 Build/apply an ingress (CBI) policy from audit-log source IPs. |
-| `notebooks/egress_helper.py` | 📤 Build/apply an egress (SEG) policy from observed outbound destinations. |
-| `notebooks/ip_acl_migration.py` | 🔁 Migrate this workspace's IP access list into a CBI policy. |
-| `notebooks/install_skills.py` | 🤖 Install the Genie Code skill(s) into your user skills directory. |
-| `.assistant/skills/<tool>/SKILL.md` | 📚 Per-tool reference doc + Genie Code skill (one per tool). |
-| `scripts/deploy_notebook.py` | 📦 Import/update a notebook (`--notebook <name>`/`all`) into a workspace. |
-| `requirements.txt` | 📌 Python deps (`databricks-sdk`); the notebooks `%pip install -r` it. |
-| `docs/account-admin-setup.md` | 👑 Account-admin service-principal + secret-scope setup (applying a policy). |
+| `src/dbx_netpolicy/cli.py` | 🎛️ The Typer CLI (all commands + flags). |
+| `src/dbx_netpolicy/guided.py` | 🧭 The interactive Q&A wizard. |
+| `src/dbx_netpolicy/core/` | 🧠 Engines: ingress, egress, ACL, policy builders, limits. |
+| `src/dbx_netpolicy/feeds/` | 🕵️ Threat-intel / cloud / Databricks range loaders + local cache + RDAP. |
+| `src/dbx_netpolicy/{auth,sql,queries}.py` | 🔌 Unified auth, SQL-warehouse connection, system-table queries. |
+| `src/dbx_netpolicy/{console,render}.py` | 🎨 Rich theming + result rendering. |
+| `.claude/skills/<tool>/SKILL.md` | 📚 Per-tool reference doc + Claude skill. |
+| `docs/account-admin-setup.md` | 👑 Account-admin credential setup (applying a policy). |
 | `docs/cbi-sdk-schema.md` | 🧩 The verified `AccountNetworkPolicy` SDK object model. |
 | `docs/threat-intel-feeds.md` | 🕵️ The enrichment feeds, what each represents, licensing. |
+| `tests/` | ✅ Offline engine tests (fixtures; no Databricks/network). |
 
 ## 📝 Notes & caveats
 
-- Requires `databricks-sdk>=0.113.0` for the network-policy dataclasses — the notebooks pin it in
-  `requirements.txt` and restart Python to ensure it on serverless / older runtimes.
+- Requires `databricks-sdk>=0.113.0` for the network-policy dataclasses (pinned in `pyproject.toml`).
+- **Applying a policy needs account-level auth**, which is separate from workspace auth — a workspace
+  OAuth session can't call the account API. Use `--account-profile <name>` pointing at an account
+  login (`databricks auth login --host <account-console-host> --account-id <id>`), or set account
+  creds via env. `--profile` is for the workspace (analysis/warehouse) only.
+- **Behind a TLS-inspecting proxy?** The CLI uses [`truststore`](https://pypi.org/project/truststore/)
+  to verify TLS against your **OS trust store**, so a corporate root CA is honoured automatically by
+  the SDK, the SQL connector, and feed downloads — no configuration needed. If you still hit
+  `CERTIFICATE_VERIFY_FAILED` on an unsupported platform, fall back to
+  `export SSL_CERT_FILE=/path/to/ca-bundle.pem` (and `REQUESTS_CA_BUNDLE` likewise).
+- The egress table (`system.access.outbound_network`) only logs **denied** egress, including
+  dry-run would-be-denials — so stand up an egress policy in `dry_run` first, let it observe, then
+  run `dbx-netpolicy egress` to turn the observed destinations into an allow-list.

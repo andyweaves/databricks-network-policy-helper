@@ -1,0 +1,171 @@
+"""The guided Q&A wizard.
+
+`dbx-netpolicy guided` — point it at a workspace (a profile, optionally a warehouse) and it walks the
+user through building an ingress / egress / ACL-migration policy with questionary prompts, using the
+same choice sets as the flags (config.py) and the same run flow as the flag commands (cli._run_*). It
+always ends propose-only by default; the user opts into a write and mode via prompts, then the shared
+review gate confirms before anything is sent.
+"""
+
+from __future__ import annotations
+
+import questionary
+
+from . import console
+from .config import (
+    ACL_EGRESS_POLICIES,
+    BLOCK_THREAT_DOMAINS,
+    IP_ACL_HANDLING,
+    POLICY_FRAMINGS,
+    POLICY_MODES,
+    POLICY_SCOPES,
+    SCOPING_MODES,
+    THREAT_DENY_RULES,
+    THREAT_FEEDS,
+    AclConfig,
+    ApplyOptions,
+    Connection,
+    EgressConfig,
+    IngressConfig,
+)
+
+_STYLE = questionary.Style([
+    ("qmark", "fg:#FF3621 bold"),
+    ("question", "bold"),
+    ("answer", "fg:#00A972 bold"),
+    ("pointer", "fg:#FF3621 bold"),
+    ("highlighted", "fg:#FF3621 bold"),
+])
+
+
+def _select(message: str, choices: list[str], default: str | None = None) -> str:
+    return questionary.select(message, choices=choices, default=default or choices[0],
+                              style=_STYLE).ask()
+
+
+def _confirm(message: str, default: bool = False) -> bool:
+    return questionary.confirm(message, default=default, style=_STYLE).ask()
+
+
+def _text(message: str, default: str = "") -> str:
+    return (questionary.text(message, default=default, style=_STYLE).ask() or "").strip()
+
+
+def _int(message: str, default: int) -> int:
+    while True:
+        raw = _text(message, str(default))
+        try:
+            return int(raw)
+        except ValueError:
+            console.banner("warn", "Enter a whole number.")
+
+
+def run_wizard(conn: Connection) -> None:
+    from .cli import _run_acl, _run_egress, _run_ingress
+
+    console.title_panel("dbx-netpolicy — guided setup",
+                        "Answer a few questions; I'll analyse traffic and propose a policy.")
+
+    direction = _select(
+        "What would you like to build?",
+        ["Ingress (CBI) — who may connect IN, by source IP",
+         "Egress (SEG) — where workloads may connect OUT",
+         "Migrate an existing IP access list into a CBI policy"])
+    if direction is None:
+        return
+
+    # account_id is needed only if the user later opts to apply / identity-scope. Ask up front so the
+    # apply step doesn't fail late, but allow blank for propose-only.
+    if not conn.account_id:
+        acct = _text("Databricks account_id (blank = propose-only, no apply/identity scoping)")
+        conn.account_id = acct
+
+    if direction.startswith("Ingress"):
+        _run_ingress(_ingress_wizard(conn), conn, yes=False)
+    elif direction.startswith("Egress"):
+        _run_egress(_egress_wizard(conn), conn, yes=False)
+    else:
+        _run_acl(_acl_wizard(conn), conn, yes=False)
+
+
+def _ingress_wizard(conn: Connection) -> IngressConfig:
+    console.rule("Ingress questions")
+    lookback = _int("How many days of audit history to analyse?", 30)
+    min_events = _int("Minimum successful events for an IP to be a candidate?", 1)
+    framing = _select("CIDR framing?", POLICY_FRAMINGS, default="minimal")
+    scoping = _select("Scoping mode?", SCOPING_MODES, default="ip_only")
+    scope = _select("Policy scope?", POLICY_SCOPES, default="single")
+    enable_rdap = framing == "maximum" or _confirm("Do RDAP owner lookups (external calls)?", True)
+    all_feeds = _confirm("Use all threat-intel feeds?", True)
+    feeds = list(THREAT_FEEDS) if all_feeds else (questionary.checkbox(
+        "Select threat-intel feeds:", choices=THREAT_FEEDS, style=_STYLE).ask() or list(THREAT_FEEDS))
+    acl_handling = _select("How should an existing IP ACL be treated?", IP_ACL_HANDLING,
+                           default="migrate_and_enrich")
+    threat_deny = _select("Add threat-intel deny rules?", THREAT_DENY_RULES, default="off")
+    name_prefix = _text("Name prefix for the policy?", "np-helper")
+
+    apply = _apply_wizard(conn, scope, other="egress")
+    mode = _mode_wizard() if apply.create_policy else "dry_run"
+    return IngressConfig(
+        lookback_days=lookback, min_events=min_events, threat_feeds=feeds, enable_rdap=enable_rdap,
+        policy_framing=framing, scoping_mode=scoping, policy_scope=scope, policy_mode=mode,
+        threat_deny_rules=threat_deny, name_prefix=name_prefix, ip_acl_handling=acl_handling,
+        apply=apply)
+
+
+def _egress_wizard(conn: Connection) -> EgressConfig:
+    console.rule("Egress questions")
+    lookback = _int("How many days of outbound_network history to analyse?", 30)
+    min_events = _int("Minimum events per destination?", 1)
+    src_filter = _text("network_source_type filter (blank = all)")
+    scope = _select("Policy scope?", POLICY_SCOPES, default="single")
+    enable_rdap = _confirm("Look up the cloud owner of internet FQDNs?", True)
+    block = _select("Block known-bad domains from a threat feed?", BLOCK_THREAT_DOMAINS, default="off")
+    name_prefix = _text("Name prefix for the policy?", "np-helper")
+
+    apply = _apply_wizard(conn, scope, other="ingress")
+    mode = _mode_wizard() if apply.create_policy else "dry_run"
+    return EgressConfig(
+        lookback_days=lookback, min_events=min_events, source_type_filter=src_filter,
+        enable_rdap=enable_rdap, policy_scope=scope, policy_mode=mode, block_threat_domains=block,
+        name_prefix=name_prefix, apply=apply)
+
+
+def _acl_wizard(conn: Connection) -> AclConfig:
+    console.rule("IP ACL migration questions")
+    name_prefix = _text("Name prefix for the policy?", "np-helper")
+    egress_policy = _select("Egress to set on a newly-created policy?", ACL_EGRESS_POLICIES,
+                            default="allow_all")
+    create = bool(conn.account_id) and _confirm("Create the policy now (needs account admin)?", False)
+    mode = _mode_wizard() if create else "enforce"
+    auto_assign = _confirm("Bind this workspace to the new policy?", True) if create else True
+    return AclConfig(policy_mode=mode, name_prefix=name_prefix, egress_policy=egress_policy,
+                     auto_assign=auto_assign, create_policy=create)
+
+
+def _apply_wizard(conn: Connection, scope: str, other: str) -> ApplyOptions:
+    if not conn.account_id:
+        console.banner("info", "No account_id set — this will be a propose-only run.")
+        return ApplyOptions(create_policy=False)
+    if not _confirm("Create/apply the policy now (needs account admin)?", False):
+        return ApplyOptions(create_policy=False)
+    action = "create_new"
+    existing_id = ""
+    if _confirm(f"Add these rules to an EXISTING policy (e.g. one the {other} helper made)?", False):
+        action = "add_to_existing"
+        existing_id = _text("Existing policy id?")
+        if scope != "single":
+            console.banner("warn", "add_to_existing needs single scope — the run will flag this.")
+    auto_assign = _confirm("Bind the workspace(s) to the policy?", False)
+    return ApplyOptions(create_policy=True, policy_action=action, existing_policy_id=existing_id,
+                        auto_assign=auto_assign)
+
+
+def _mode_wizard() -> str:
+    mode = _select("Policy mode? (dry_run is log-only and strongly recommended first)",
+                   POLICY_MODES, default="dry_run")
+    if mode == "enforce":
+        console.banner("danger", "ENFORCE will block non-matching traffic once applied.")
+        if not _confirm("Are you sure you want enforce (not dry_run)?", False):
+            return "dry_run"
+    return mode

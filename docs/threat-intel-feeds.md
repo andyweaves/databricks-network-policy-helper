@@ -1,8 +1,9 @@
 # Enrichment feeds
 
 All feeds are **free, need no API key/registration, and are directly downloadable over HTTPS**.
-They are selectable in the notebook via the `threat_feeds` multiselect widget (all on by default).
-Verify current licensing before any external/customer-facing distribution — terms can change.
+They are selectable via the `--threat-feeds` option of `dbx-netpolicy ingress` (all on by default),
+and cached locally with a TTL (`dbx-netpolicy feeds list` / `feeds refresh`). Verify current
+licensing before any external/customer-facing distribution — terms can change.
 
 ## Threat-intelligence (`threat_intel_ips` table)
 
@@ -25,7 +26,8 @@ on. The loader keeps only IPs seen on **≥3** lists (`IPSUM_MIN_LISTS`), taggin
 ### Held back (unconfirmed licensing — technically work, not enabled)
 blocklist.de, Emerging Threats `compromised-ips.txt`, dataplane.org signals. All are free/ungated
 and parse cleanly; they were left out pending explicit licensing confirmation. To add one: write a
-`_feed_*` loader, register it in `THREAT_FEED_LOADERS`, and add its key to `ALL_THREAT_FEEDS`.
+`_feed_*` loader in `src/dbx_netpolicy/feeds/threat.py`, register it in `THREAT_FEED_LOADERS`, and
+add its key to `THREAT_FEEDS` in `src/dbx_netpolicy/config.py`.
 
 ### Deliberately excluded (gated / unsuitable)
 AbuseIPDB, GreyNoise, Cisco Talos, AlienVault OTX, VirusTotal, IPQualityScore (all API-key gated);
@@ -42,7 +44,7 @@ All are the providers' **official** feeds:
 | AWS | `ip-ranges.amazonaws.com/ip-ranges.json` | stable |
 | GCP | `www.gstatic.com/ipranges/cloud.json` | stable |
 | Oracle | `docs.oracle.com/en-us/iaas/tools/public_ip_ranges.json` | stable |
-| Azure | scraped from `microsoft.com/.../details.aspx?id=56519` → dated `ServiceTags_Public_<date>.json` | Microsoft rotates the URL ~weekly; the notebook resolves the current one. **Do not** use third-party mirrors (e.g. femueller/cloud-ip-ranges). |
+| Azure | scraped from `microsoft.com/.../details.aspx?id=56519` → dated `ServiceTags_Public_<date>.json` | Microsoft rotates the URL ~weekly; the CLI resolves the current one. **Do not** use third-party mirrors (e.g. femueller/cloud-ip-ranges). |
 
 ## Databricks-owned ranges (`databricks_ranges` table)
 

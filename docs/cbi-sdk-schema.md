@@ -1,8 +1,8 @@
 # CBI network-policy SDK schema
 
-Verified against `databricks-sdk` **0.113.0** by introspection (not from docs/memory). The notebook
-pins `databricks-sdk>=0.113.0` at the top because serverless/older DBRs bundle a version without
-these dataclasses.
+Verified against `databricks-sdk` **0.113.0** by introspection (not from docs/memory). The project
+pins `databricks-sdk>=0.113.0` in `pyproject.toml` because these dataclasses don't exist in earlier
+versions.
 
 ## Client & methods
 
@@ -62,16 +62,16 @@ AuthenticationIdentity
 └── principal_type: {PRINCIPAL_TYPE_USER | PRINCIPAL_TYPE_SERVICE_PRINCIPAL}
 ```
 
-## Gotchas baked into the notebook
+## Gotchas baked into the CLI
 
 - **`included_ip_ranges` is an `IpRanges` object**, not a bare list — wrap: `IpRanges(ip_ranges=[...])`.
 - **IPv4 only** — the schema comment says "We only support IPv4 ... CIDR notation for now". IPv6
-  framings are dropped before building a policy.
+  framings are dropped before building a policy (`core/ingress_rules.py`).
 - **`principal_id` is `int`.** The audit log only has string emails/subject_names — there is no
   numeric id in `system.access.audit`. Identity scoping therefore resolves emails→ids via account
   SCIM (`AccountClient.users.list(filter='userName eq "..."')` /
   `service_principals.list(filter='applicationId eq "..."')`, taking `.id`).
 - **No groups** — only USER and SERVICE_PRINCIPAL principal types exist.
 - **Dry-run vs enforce are separate blocks**, not an enforcement flag: write `ingress_dry_run` to
-  trial (log-only), `ingress` to enforce (blocking). Update replaces the whole policy, so the
-  notebook reads the existing policy and re-sends the untouched blocks.
+  trial (log-only), `ingress` to enforce (blocking). Update replaces the whole policy, so the CLI
+  reads the existing policy and re-sends the untouched blocks (`core/policy.py`).
