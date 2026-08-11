@@ -170,6 +170,12 @@ def ingress_preview(previews: dict, cfg: IngressConfig, analysis: IngressAnalysi
         console.banner("info",
                        f"Excluded {analysis.excluded_flagged} threat-intel-matched group(s) from the "
                        "allow-list (see the threat-match table).")
+    if analysis.excluded_unresolved:
+        console.banner("warn",
+                       f"Excluded {analysis.excluded_unresolved} group(s) from the allow-list: identity "
+                       "scoping is on but none of their principals resolved (likely users who've left "
+                       "the workspace/org). Allow-listing their IPs for ALL_USERS would defeat identity "
+                       "scoping — add them manually if the traffic is still expected.")
     if analysis.skipped_ipv6:
         console.banner("info", f"{analysis.skipped_ipv6} IPv6 CIDR(s) omitted (CBI is IPv4-only).")
 

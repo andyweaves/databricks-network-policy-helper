@@ -33,6 +33,7 @@ class IngressAnalysis:
     threat_match_rows: list[dict] = field(default_factory=list)
     threat_ranges: list = field(default_factory=list)
     excluded_flagged: int = 0
+    excluded_unresolved: int = 0
     skipped_ipv6: int = 0
     # Populated only when the candidate set is empty: a one-row filter-funnel dict explaining where
     # the audit rows were dropped (see queries.candidate_funnel).

@@ -54,7 +54,7 @@ def analyze(cfg: AclConfig, workspace_client) -> AclAnalysis:
         cidrs = _ipv4(a["ip_addresses"])
         if not cidrs:
             continue
-        label = f"ip-acl-{a['label']}"[:250]
+        label = f"migrated-ip-acl-{a['label']}"[:250]
         if a["list_type"] == "ALLOW":
             allow_specs.append({"label": label, "cidrs": cidrs})
         elif a["list_type"] == "BLOCK":
