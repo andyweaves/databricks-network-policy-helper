@@ -101,6 +101,7 @@ def build_rules(analysis: IngressAnalysis, cfg: IngressConfig, identity_resoluti
     target_specs = defaultdict(list)
     skipped_ipv6 = 0
     excluded_flagged = 0
+    excluded_unresolved = 0
     use_traffic_rules = cfg.ip_acl_handling != "migrate"
 
     if use_traffic_rules and not suggestions.empty:
@@ -147,7 +148,12 @@ def build_rules(analysis: IngressAnalysis, cfg: IngressConfig, identity_resoluti
                     spec["identity_type"] = "SELECTED_IDENTITIES"
                     spec["identities"] = deduped
                 else:
-                    spec["label"] += " [identity-unresolved]"
+                    # Identity scoping was requested but none of this group's principals resolved
+                    # (they've likely left the workspace/org). Falling back to ALL_USERS would open
+                    # the CIDR to everyone — the opposite of scoping by identity — so exclude the
+                    # group from the allow-list entirely and flag it for the operator.
+                    excluded_unresolved += 1
+                    continue
             target_specs[row["policy_target"]].append(spec)
 
     # (Previously ip_only collapsed all groups into one blanket rule; now every owner group becomes
@@ -185,6 +191,7 @@ def build_rules(analysis: IngressAnalysis, cfg: IngressConfig, identity_resoluti
              "consider all_workspaces or consolidating workspaces.")
 
     analysis.excluded_flagged = excluded_flagged
+    analysis.excluded_unresolved = excluded_unresolved
     analysis.skipped_ipv6 = skipped_ipv6
     return policies
 
@@ -211,7 +218,7 @@ def _acl_specs(analysis: IngressAnalysis, cfg: IngressConfig):
         cidrs = _acl_ipv4(a["ip_addresses"])
         if not cidrs:
             continue
-        label = f"acl-{a['label']}"[:250]
+        label = f"migrated-acl-{a['label']}"[:250]
         if a["list_type"] == "ALLOW":
             allow_specs.append({"label": label, "cidrs": cidrs, "destination": "all_destinations",
                                 "identity_type": "ALL_USERS", "identities": []})

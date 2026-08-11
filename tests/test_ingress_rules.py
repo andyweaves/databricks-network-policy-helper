@@ -120,12 +120,12 @@ def test_identity_scoping_selected_identities():
     assert spec["identities"] == [{"principal_id": 42, "principal_type": "USER"}]
 
 
-def test_identity_scoping_unresolved_labels_rule():
+def test_identity_scoping_unresolved_group_excluded():
+    # Identity scoping on + no principal resolves -> group is dropped, not opened to ALL_USERS.
     a = _analysis([_suggestion(principal_emails=["ghost@x.com"], minimal_cidrs=["1.1.1.1/32"])])
     pols = rules.build_rules(a, IngressConfig(scoping_mode="ip_and_identity"), identity_resolution={})
-    spec = pols[ALL_WORKSPACES]["allow"][0]
-    assert spec["identity_type"] == "ALL_USERS"
-    assert "identity-unresolved" in spec["label"]
+    assert pols == {} or not pols.get(ALL_WORKSPACES, {}).get("allow")
+    assert a.excluded_unresolved == 1
 
 
 # ------------------------------------------------------------------------------- ACL handling
@@ -139,7 +139,7 @@ def test_acl_migrate_and_enrich_adds_acl_allow_to_traffic():
     pols = rules.build_rules(a, IngressConfig(scoping_mode="ip_only",
                                               ip_acl_handling="migrate_and_enrich"))
     labels = [s["label"] for s in pols[ALL_WORKSPACES]["allow"]]
-    assert "acl-office" in labels          # migrated ACL rule (as-is, no name_prefix)
+    assert "migrated-acl-office" in labels  # migrated ACL rule (as-is, no name_prefix)
     assert "Acme" in labels                # traffic-derived owner-grouped rule
     assert not any("ip-only" in lbl for lbl in labels)         # no blanket collapse anymore
 
@@ -150,7 +150,7 @@ def test_acl_migrate_only_drops_traffic_rules():
     pols = rules.build_rules(a, IngressConfig(scoping_mode="ip_only", ip_acl_handling="migrate"))
     labels = [s["label"] for s in pols[ALL_WORKSPACES]["allow"]]
     assert all("ip-only" not in lbl for lbl in labels)
-    assert any("acl-office" in lbl for lbl in labels)
+    assert any("migrated-acl-office" in lbl for lbl in labels)
 
 
 def test_acl_ignore_excludes_acl():
