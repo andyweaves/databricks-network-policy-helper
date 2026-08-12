@@ -159,6 +159,9 @@ Please keep `pytest` and `ruff` green before opening a PR. When you change behav
 test — the engines (`core/`), feed parsers (`feeds/`), and query builders (`queries.py`) are all
 covered by fast, network-free unit tests, and CLI flows are exercised via Typer's `CliRunner`.
 
+## ⚠️ Warning
+A network policy controls access to/from your Databricks environment. The Databricks Network Policy Helper generates candidate policies based on observed traffic which are intended to serve as a starting point— they are not guaranteed to be complete or correct. You are solely responsible for reviewing the generated policies and confirming it is accurate and appropriate before using it in a policy. An incorrect or incomplete allow-list can block legitimate users or workloads (in enforce mode) or fail to block malicious ones.
+
 ## 📝 Notes & caveats
 
 - Requires `databricks-sdk>=0.113.0` for the network-policy dataclasses (pinned in `pyproject.toml`).
