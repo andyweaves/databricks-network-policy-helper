@@ -39,13 +39,14 @@ warehouse (no traffic analysis).
    - **PAS attached?** If the workspace has a Private Access Settings object (AWS/GCP PrivateLink),
      migration to CBI isn't supported yet — it **aborts**. (Azure workspaces have no PAS, so this
      never trips there.)
-   - **Existing CBI ingress policy?** Only matters when the run will **assign** the new policy
-     (assigning replaces the workspace's existing one). When assigning: an **enforced** existing
-     policy → **aborts** (migrating on top of it isn't supported yet); a **dry-run** existing policy →
-     flags it, offers to **promote it to enforced**, then **stops** (a migration needs an enforced
-     baseline first; re-run afterwards). When **not** assigning (propose-only, `--export`, or
-     `--no-auto-assign`), it just **warns** that a policy exists and continues — the new policy is
-     created/exported but not bound to the workspace.
+   - **Existing *restrictive* CBI ingress policy?** Only matters when the run will **assign** the new
+     policy, and only for a policy that **actually restricts traffic** (a sub-block in
+     `RESTRICTED_ACCESS`, or carrying allow/deny rules) — an allow-all policy such as the account's
+     baseline `default-policy` is ignored. When assigning over a restrictive one: an **enforced**
+     policy → **aborts** (migrating on top of it is NOT supported yet); a **dry-run** policy → flags
+     it, offers to **promote it to enforced**, then **stops** (a migration needs an enforced baseline
+     first; re-run afterwards). When **not** assigning (propose-only, `--export`, `--no-auto-assign`),
+     it just **warns** and continues — the new policy is created/exported but not bound.
 4. Names the new policy from `--policy-name`; if not given it **prompts** for one (leave blank there
    to use the profile name). With `--create-policy`, creates/updates that policy and, if
    `--auto-assign` (default on), binds the current workspace to it. An interactive review gate

@@ -437,17 +437,41 @@ def _policy_account(assigned_policy_id, policy_obj):
                              "network_policies": _NP()})()
 
 
+def _ingress(public_mode="FULL_ACCESS", private_mode="ALLOW_ALL_REGISTERED_ENDPOINTS",
+             xws_mode="LEGACY_MODE"):
+    def _blk(mode):
+        return type("B", (), {"restriction_mode": mode, "allow_rules": None, "deny_rules": None})()
+    return type("Ing", (), {"public_access": _blk(public_mode), "private_access": _blk(private_mode),
+                            "cross_workspace_access": _blk(xws_mode)})()
+
+
+def test_ingress_restrictive_matches_allow_all_vs_rules():
+    # mirrors the real default-policy: all sub-blocks permissive, no rules -> not restrictive
+    assert acl_core._ingress_restrictive(_ingress()) is False
+    assert acl_core._ingress_restrictive(None) is False
+    # any sub-block in RESTRICTED_ACCESS -> restrictive
+    assert acl_core._ingress_restrictive(_ingress(public_mode="RESTRICTED_ACCESS")) is True
+    assert acl_core._ingress_restrictive(_ingress(private_mode="RESTRICTED_ACCESS")) is True
+
+
 def test_assigned_ingress_state_none_when_unassigned():
     assert acl_core.assigned_ingress_state(_policy_account(None, None), 42) == (None, None)
 
 
-def test_assigned_ingress_state_enforced_dry_run_and_neither():
-    enforced = type("P", (), {"ingress": object(), "ingress_dry_run": None})()
+def test_assigned_ingress_state_ignores_allow_all_policy():
+    # temp / default-policy: dry-run block present but fully permissive -> no blocker (state None)
+    allow_all = type("P", (), {"ingress": None, "ingress_dry_run": _ingress()})()
+    assert acl_core.assigned_ingress_state(_policy_account("default-policy", allow_all), 42) == (
+        "default-policy", None)
+
+
+def test_assigned_ingress_state_enforced_dry_run_when_restrictive():
+    enforced = type("P", (), {"ingress": _ingress(public_mode="RESTRICTED_ACCESS"),
+                              "ingress_dry_run": None})()
     assert acl_core.assigned_ingress_state(_policy_account("p1", enforced), 42) == ("p1", "enforced")
-    dry = type("P", (), {"ingress": None, "ingress_dry_run": object()})()
+    dry = type("P", (), {"ingress": None,
+                         "ingress_dry_run": _ingress(public_mode="RESTRICTED_ACCESS")})()
     assert acl_core.assigned_ingress_state(_policy_account("p2", dry), 42) == ("p2", "dry_run")
-    neither = type("P", (), {"ingress": None, "ingress_dry_run": None})()
-    assert acl_core.assigned_ingress_state(_policy_account("p3", neither), 42) == ("p3", None)
 
 
 def test_promote_dry_run_to_enforced_moves_block():

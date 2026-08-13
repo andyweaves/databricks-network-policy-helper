@@ -92,11 +92,32 @@ def workspace_pas_attached(account, workspace_id) -> bool | None:
         return None
 
 
+def _ingress_restrictive(ingress) -> bool:
+    """True if an ingress block actually restricts traffic — i.e. any of its sub-blocks is in
+    RESTRICTED_ACCESS mode, or carries allow/deny rules. A block whose sub-blocks are all in their
+    permissive defaults (public FULL_ACCESS, private ALLOW_ALL_REGISTERED_ENDPOINTS, cross-workspace
+    FULL_ACCESS/LEGACY_MODE) with no rules is effectively 'allow all' and does NOT count — so an
+    account's baseline `default-policy` (allow-all) never trips the pre-check."""
+    if ingress is None:
+        return False
+    for attr in ("public_access", "private_access", "cross_workspace_access"):
+        blk = getattr(ingress, attr, None)
+        if blk is None:
+            continue
+        rm = getattr(blk, "restriction_mode", None)
+        if str(getattr(rm, "value", rm) or "") == "RESTRICTED_ACCESS":
+            return True
+        if getattr(blk, "allow_rules", None) or getattr(blk, "deny_rules", None):
+            return True
+    return False
+
+
 def assigned_ingress_state(account, workspace_id) -> tuple[str | None, str | None]:
     """Inspect the network policy currently assigned to the workspace. Returns
-    (assigned_policy_id, ingress_state) where ingress_state is 'enforced' (has an enforced ingress
-    block), 'dry_run' (only a dry-run ingress block), or None (no policy assigned, or no ingress
-    block on it). Best-effort."""
+    (assigned_policy_id, ingress_state) where ingress_state is 'enforced' (a *restrictive* enforced
+    ingress block), 'dry_run' (a *restrictive* dry-run ingress block), or None — no policy assigned,
+    or the assigned policy is effectively allow-all (no restrictive rules to preserve, so migrating
+    over it loses nothing). Best-effort."""
     try:
         opt = account.workspace_network_configuration.get_workspace_network_option_rpc(
             workspace_id=int(workspace_id))
@@ -109,9 +130,9 @@ def assigned_ingress_state(account, workspace_id) -> tuple[str | None, str | Non
         pol = account.network_policies.get_network_policy_rpc(network_policy_id=policy_id)
     except Exception:  # noqa: BLE001
         return policy_id, None
-    if getattr(pol, "ingress", None) is not None:
+    if _ingress_restrictive(getattr(pol, "ingress", None)):
         return policy_id, "enforced"
-    if getattr(pol, "ingress_dry_run", None) is not None:
+    if _ingress_restrictive(getattr(pol, "ingress_dry_run", None)):
         return policy_id, "dry_run"
     return policy_id, None
 

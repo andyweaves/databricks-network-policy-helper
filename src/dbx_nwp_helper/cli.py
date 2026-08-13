@@ -232,12 +232,12 @@ def _acl_preflight(account, workspace_id, will_assign: bool, yes: bool) -> None:
     pas = acl_core.workspace_pas_attached(account, workspace_id)
     if pas is True:
         console.banner("danger", "This workspace has a Private Access Settings (PAS) object attached "
-                                 "(PrivateLink). Migrating a PAS/PrivateLink workspace to CBI isn't "
-                                 "supported yet — aborting.")
+                                 "(PrivateLink). Migrating a PAS/PrivateLink workspace to CBI is NOT "
+                                 "supported yet - aborting.")
         raise typer.Exit(code=1)
     if pas is None:
         console.banner("warn", "Couldn't verify whether a PAS/PrivateLink is attached (account read "
-                               "failed). If this workspace uses PrivateLink, migration isn't "
+                               "failed). If this workspace uses PrivateLink, migration is NOT "
                                "supported yet.")
 
     assigned_id, state = acl_core.assigned_ingress_state(account, workspace_id)
@@ -255,7 +255,7 @@ def _acl_preflight(account, workspace_id, will_assign: bool, yes: bool) -> None:
     if state == "enforced":
         console.banner("danger", f"This workspace already has an ENFORCED CBI ingress policy "
                                  f"('{assigned_id}'). Migrating on top of an existing enforced policy "
-                                 "isn't supported yet — aborting.")
+                                 "is NOT supported yet - aborting.")
         raise typer.Exit(code=1)
 
     # dry-run only, and we're about to assign a replacement
