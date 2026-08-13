@@ -55,14 +55,25 @@ Claude skill under [`.claude/skills/`](.claude/skills/).
 - 🛑 **Nothing is written unless you opt in** — `--create-policy`. Analysis and proposal are always
   side-effect-free, and an interactive **review gate** confirms before any write (bypass with `--yes`
   for scripting).
+- 🎯 **You confirm the target workspace.** Before any analysis or write, the CLI shows the exact
+  workspace it's pointed at — profile, URL and id — and asks you to confirm, so a mis-set `--profile`
+  can't act on the wrong workspace (skip with `--yes`).
 - 🧪 **Dry-run first.** Default `--policy-mode` is `dry_run` — writes the log-only block and **blocks
   nothing**, so you can review would-be denials in the network system tables first.
 - ⛔ **Enforce with intent.** `--policy-mode enforce` writes the blocking block and **can lock users
   or workloads out** if the allow-list is incomplete. Stay in `dry_run` until the logged denials are
   only bad actors.
-- 🧬 **The platform stays reachable.** The ingress helper auto-allows Databricks' own control-plane /
-  serverless IP ranges, so an enforced ingress policy won't lock the platform out.
+- 🧬 **Databricks-owned traffic is prioritised, not blanket-allowed.** When an observed source IP
+  falls in Databricks' own control-plane / serverless ranges, that group is always kept in the
+  allow-list (never dropped, even if a threat feed also matches). The helper does **not** inject
+  Databricks' full published range set — only ranges it actually saw in your audit traffic — so
+  before enforcing an ingress policy, confirm the platform's own ranges are covered.
 - #️⃣ **IPv4 only.** The CBI policy schema is IPv4-only; IPv6 is analysed but never placed in a policy.
+- 🔌 **Disabling the old IP ACL is opt-in and self-guarding.** `--disable-existing-ip-acls` (on
+  `ingress` / `migrate-acl`) turns off the workspace's IP access lists (`enableIpAccessLists=false`)
+  *after* the replacement policy is created **and** assigned — and the CLI refuses the flag unless
+  both happen, so it can't leave the workspace with no ingress control. The lists are preserved
+  (reversible); off by default.
 - 🧱 **`add_to_existing` never clobbers the other direction** — it replaces only the block for its own
   direction and requires the target policy to already exist.
 
@@ -161,6 +172,14 @@ covered by fast, network-free unit tests, and CLI flows are exercised via Typer'
 
 ## 📝 Notes & caveats
 
+- **Policy naming.** For `ingress`/`egress`, policies are named from `--name-prefix` (e.g.
+  `dbx-nwp-<profile>` / `dbx-nwp-ws-<id>` / `dbx-nwp`); pass `--policy-name <id>` to set the id
+  yourself (single-policy scopes only — not `per_workspace` or `add_to_existing`). `migrate-acl` has
+  no `--name-prefix`: it **prompts** for the policy name (blank = the profile name), or takes
+  `--policy-name`. All explicit names are normalised to a lowercase, `-`-safe, length-capped id and
+  the CLI prints the result.
+- **`migrate-acl --export <path>`** writes the proposed `AccountNetworkPolicy` JSON to a file (a
+  curl / REST-ready body) — handy for review or applying out-of-band; works in propose-only mode.
 - Requires `databricks-sdk>=0.113.0` for the network-policy dataclasses (pinned in `pyproject.toml`).
 - **Applying a policy needs account-level auth**, which is separate from workspace auth — a workspace
   OAuth session can't call the account API. Use `--account-profile <name>` pointing at an account

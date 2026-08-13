@@ -121,3 +121,18 @@ def test_policy_name_suffix_trims_prefix_to_fit():
     name = policy.policy_name("really-long-prefix-name", suffix="my-workspace-profile")
     assert name.endswith("-my-workspace-profile")
     assert len(name) <= 30
+
+
+def test_policy_name_explicit_overrides_and_slugifies():
+    # an explicit --policy-name wins over the derived id and is normalised to an id-safe slug
+    assert policy.policy_name("np", explicit="My Prod Policy!") == "my-prod-policy"
+    assert policy.policy_name("np", workspace_id=42, explicit="chosen-name") == "chosen-name"
+
+
+def test_policy_name_explicit_capped_to_limit():
+    assert len(policy.policy_name("np", explicit="x" * 60)) == 30
+
+
+def test_policy_name_explicit_empty_slug_falls_back_to_prefix():
+    # a name that slugs away to nothing falls back to the (slugified) prefix, never an empty id
+    assert policy.policy_name("np-helper", explicit="!!!") == "np-helper"

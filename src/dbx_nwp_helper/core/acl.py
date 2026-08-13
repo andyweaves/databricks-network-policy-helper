@@ -23,6 +23,9 @@ class AclAnalysis:
     ip_acls: list[dict] = field(default_factory=list)
     allow_specs: list[dict] = field(default_factory=list)
     deny_specs: list[dict] = field(default_factory=list)
+    # Workspace-wide IP-ACL enforcement state (enableIpAccessLists): True/False, or None if it
+    # couldn't be read. False means the listed rules exist but aren't currently being enforced.
+    ip_acls_enforced: bool | None = None
 
 
 def _ipv4(cidrs):
@@ -35,6 +38,18 @@ def _ipv4(cidrs):
         except ValueError:
             pass
     return out
+
+
+def _ip_acls_enforced(workspace_client) -> bool | None:
+    """Read the workspace-wide `enableIpAccessLists` toggle. True/False, or None if unreadable."""
+    try:
+        status = workspace_client.workspace_conf.get_status(keys="enableIpAccessLists") or {}
+        val = str(status.get("enableIpAccessLists", "")).lower()
+        if val in ("true", "false"):
+            return val == "true"
+    except Exception:  # noqa: BLE001 - best-effort; absence just means "unknown"
+        pass
+    return None
 
 
 def analyze(cfg: AclConfig, workspace_client) -> AclAnalysis:
@@ -54,19 +69,109 @@ def analyze(cfg: AclConfig, workspace_client) -> AclAnalysis:
         cidrs = _ipv4(a["ip_addresses"])
         if not cidrs:
             continue
-        label = f"migrated-ip-acl-{a['label']}"[:250]
+        # Recreate the rule labels prefixed with `migrated-` (preserving the original ACL label).
+        label = f"migrated-{a['label']}"[:250]
         if a["list_type"] == "ALLOW":
             allow_specs.append({"label": label, "cidrs": cidrs})
         elif a["list_type"] == "BLOCK":
             deny_specs.append({"label": label, "cidrs": cidrs})
 
     return AclAnalysis(workspace_id=workspace_id, ip_acls=ip_acls,
-                       allow_specs=allow_specs, deny_specs=deny_specs)
+                       allow_specs=allow_specs, deny_specs=deny_specs,
+                       ip_acls_enforced=_ip_acls_enforced(workspace_client))
+
+
+def workspace_pas_attached(account, workspace_id) -> bool | None:
+    """True if the workspace has a Private Access Settings (PAS) object attached — i.e. it uses
+    (AWS/GCP) PrivateLink. None if it couldn't be determined (Azure workspaces have no PAS, so this
+    returns False there). Best-effort so a read failure degrades to a warning rather than a crash."""
+    try:
+        ws = account.workspaces.get(workspace_id=int(workspace_id))
+        return bool(getattr(ws, "private_access_settings_id", None))
+    except Exception:  # noqa: BLE001 - couldn't determine; caller warns
+        return None
+
+
+def assigned_ingress_state(account, workspace_id) -> tuple[str | None, str | None]:
+    """Inspect the network policy currently assigned to the workspace. Returns
+    (assigned_policy_id, ingress_state) where ingress_state is 'enforced' (has an enforced ingress
+    block), 'dry_run' (only a dry-run ingress block), or None (no policy assigned, or no ingress
+    block on it). Best-effort."""
+    try:
+        opt = account.workspace_network_configuration.get_workspace_network_option_rpc(
+            workspace_id=int(workspace_id))
+        policy_id = getattr(opt, "network_policy_id", None)
+    except Exception:  # noqa: BLE001
+        return None, None
+    if not policy_id:
+        return None, None
+    try:
+        pol = account.network_policies.get_network_policy_rpc(network_policy_id=policy_id)
+    except Exception:  # noqa: BLE001
+        return policy_id, None
+    if getattr(pol, "ingress", None) is not None:
+        return policy_id, "enforced"
+    if getattr(pol, "ingress_dry_run", None) is not None:
+        return policy_id, "dry_run"
+    return policy_id, None
+
+
+def promote_dry_run_to_enforced(account, policy_id: str, note: Note = lambda _m: None) -> None:
+    """Move a policy's dry-run ingress block into the enforced ingress slot (clearing dry-run)."""
+    pol = account.network_policies.get_network_policy_rpc(network_policy_id=policy_id)
+    pol.ingress = pol.ingress_dry_run
+    pol.ingress_dry_run = None
+    account.network_policies.update_network_policy_rpc(network_policy_id=policy_id, network_policy=pol)
+    note(f"Promoted network policy '{policy_id}' from dry-run to enforced ingress.")
+
+
+def disable_ip_access_lists(workspace_client, note: Note = lambda _m: None) -> bool:
+    """Turn OFF workspace-wide IP access list enforcement via `enableIpAccessLists=false`.
+
+    Disables enforcement of *all* the workspace's IP access lists at once; the lists themselves are
+    preserved, so it's reversible by setting the flag back to true. Returns True if it changed state,
+    False if enforcement was already off. The caller must ensure a replacement CBI policy has been
+    created and assigned first (validate_disable_ip_acls enforces that invariant)."""
+    status = workspace_client.workspace_conf.get_status(keys="enableIpAccessLists") or {}
+    # Enforcement is only ON when the flag is explicitly "true"; anything else (missing key = never
+    # configured, empty, or "false") means there's nothing to disable, so skip the write.
+    if str(status.get("enableIpAccessLists", "")).lower() != "true":
+        note("Workspace IP access list enforcement is already off (never configured or already "
+             "disabled) — no change needed.")
+        return False
+    workspace_client.workspace_conf.set_status({"enableIpAccessLists": "false"})
+    note("Disabled workspace IP access list enforcement (enableIpAccessLists=false). The lists "
+         "themselves are preserved — set it back to true to re-enable.")
+    return True
+
+
+def resolve_policy_id(cfg: AclConfig, workspace_id) -> str:
+    """The new policy's id: the explicit/entered name (--policy-name, resolved by the CLI to the
+    profile name when left blank), falling back to the workspace id if nothing was set. Slugified
+    and length-capped like every other command."""
+    return policy.policy_name("", explicit=(cfg.policy_name or str(workspace_id)))
 
 
 def build_block(analysis: AclAnalysis, cfg: AclConfig, note: Note = lambda _m: None):
     return policy.build_ingress_block(
-        analysis.allow_specs, analysis.deny_specs, cfg.policy_mode, cfg.name_prefix, note)
+        analysis.allow_specs, analysis.deny_specs, cfg.policy_mode, "", note)
+
+
+def build_account_policy(analysis: AclAnalysis, cfg: AclConfig, account_id: str, policy_id: str,
+                         note: Note = lambda _m: None):
+    """The full AccountNetworkPolicy this migration would create (egress + the ingress mode block).
+    Used both to create the policy and to export a curl-ready JSON payload."""
+    from databricks.sdk.service.settings import AccountNetworkPolicy
+    np = AccountNetworkPolicy(account_id=account_id, network_policy_id=policy_id,
+                              egress=build_egress(cfg.egress_policy))
+    setattr(np, cfg.policy_mode_target, build_block(analysis, cfg, note))
+    return np
+
+
+def policy_payload(analysis: AclAnalysis, cfg: AclConfig, account_id: str) -> dict:
+    """The proposed network policy as a plain dict (for --export / a curl body)."""
+    policy_id = resolve_policy_id(cfg, analysis.workspace_id)
+    return build_account_policy(analysis, cfg, account_id, policy_id).as_dict()
 
 
 def preview_block(analysis: AclAnalysis, cfg: AclConfig, note: Note = lambda _m: None) -> dict:
@@ -103,24 +208,24 @@ def build_egress(kind: str):
 
 def apply(analysis: AclAnalysis, cfg: AclConfig, account, account_id: str,
           note: Note = lambda _m: None) -> dict:
-    """Create/update `<prefix>-<workspace_id>` and optionally assign this workspace."""
+    """Create/update the named policy and optionally assign this workspace."""
     from databricks.sdk.errors import NotFound
-    from databricks.sdk.service.settings import AccountNetworkPolicy, WorkspaceNetworkOption
+    from databricks.sdk.service.settings import WorkspaceNetworkOption
 
-    policy_id = f"{cfg.name_prefix}-{analysis.workspace_id}"
+    policy_id = resolve_policy_id(cfg, analysis.workspace_id)
     try:
         existing = account.network_policies.get_network_policy_rpc(network_policy_id=policy_id)
         action = "updated"
     except NotFound:
-        existing = AccountNetworkPolicy(account_id=account_id, network_policy_id=policy_id,
-                                        egress=build_egress(cfg.egress_policy))
+        existing = None
         action = "created"
 
-    setattr(existing, cfg.policy_mode_target, build_block(analysis, cfg, note))
     if action == "created":
-        result = account.network_policies.create_network_policy_rpc(network_policy=existing)
+        new_policy = build_account_policy(analysis, cfg, account_id, policy_id, note)
+        result = account.network_policies.create_network_policy_rpc(network_policy=new_policy)
         effective_id = result.network_policy_id or policy_id
     else:
+        setattr(existing, cfg.policy_mode_target, build_block(analysis, cfg, note))
         account.network_policies.update_network_policy_rpc(
             network_policy_id=policy_id, network_policy=existing)
         effective_id = policy_id

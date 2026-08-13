@@ -175,6 +175,63 @@ def test_egress_blocked_domains_matched_only(monkeypatch):
     assert a.blocked_domains == ["evil.example.com"]
 
 
+def test_egress_warns_and_caps_over_internet_limit():
+    # >100 internet FQDNs must be capped to the limit AND the operator warned (silent truncation
+    # would block the dropped destinations in enforce mode).
+    internet = {f"h{i}.example.com": 1 for i in range(eg.MAX_INTERNET_DESTINATIONS + 25)}
+    a = eg.EgressAnalysis(observed=pd.DataFrame(),
+                          targets={eg.ALL_WORKSPACES: {"s3": {}, "gcs": {}, "azure": {},
+                                                       "internet": internet}})
+    cfg = EgressConfig(enable_rdap=False, block_threat_domains="off")
+    notes = []
+    blocks = eg.build_blocks(a, cfg, note=notes.append)
+    dests = blocks[eg.ALL_WORKSPACES].as_dict()["network_access"]["allowed_internet_destinations"]
+    assert len(dests) == eg.MAX_INTERNET_DESTINATIONS
+    assert any("internet" in n and "egress limit" in n for n in notes)
+
+
+def test_egress_cap_keeps_highest_traffic_internet():
+    # over the cap, the lowest-traffic FQDNs are dropped and the busiest are kept (deterministic).
+    n = eg.MAX_INTERNET_DESTINATIONS
+    internet = {f"h{i}.example.com": (n + 2 - i) for i in range(n + 2)}  # h0 busiest, h{n+1} quietest
+    a = eg.EgressAnalysis(observed=pd.DataFrame(),
+                          targets={eg.ALL_WORKSPACES: {"s3": {}, "gcs": {}, "azure": {},
+                                                       "internet": internet}})
+    cfg = EgressConfig(enable_rdap=False, block_threat_domains="off")
+    blocks = eg.build_blocks(a, cfg)
+    kept = {d["destination"] for d in
+            blocks[eg.ALL_WORKSPACES].as_dict()["network_access"]["allowed_internet_destinations"]}
+    assert len(kept) == n
+    assert "h0.example.com" in kept                                   # busiest kept
+    assert f"h{n}.example.com" not in kept and f"h{n + 1}.example.com" not in kept  # quietest dropped
+
+
+def test_egress_cap_keeps_highest_traffic_storage_across_providers():
+    # storage is ranked across s3/gcs/azure together, so a busy S3 bucket survives the cap even
+    # though it's built after a full page of low-traffic GCS buckets.
+    n = eg.MAX_STORAGE_DESTINATIONS
+    gcs = {f"bucket{i}": 1 for i in range(n)}       # n low-traffic GCS buckets
+    s3 = {("busy-bucket", "us-east-1"): 999}         # one high-traffic S3 bucket
+    a = eg.EgressAnalysis(observed=pd.DataFrame(),
+                          targets={eg.ALL_WORKSPACES: {"s3": s3, "gcs": gcs, "azure": {},
+                                                       "internet": {}}})
+    cfg = EgressConfig(enable_rdap=False, block_threat_domains="off")
+    blocks = eg.build_blocks(a, cfg)
+    dests = blocks[eg.ALL_WORKSPACES].as_dict()["network_access"]["allowed_storage_destinations"]
+    assert len(dests) == n
+    assert any(d.get("bucket_name") == "busy-bucket" for d in dests)
+
+
+def test_egress_under_internet_limit_does_not_warn():
+    a = eg.EgressAnalysis(observed=pd.DataFrame(),
+                          targets={eg.ALL_WORKSPACES: {"s3": {}, "gcs": {}, "azure": {},
+                                                       "internet": {"api.openai.com": 3}}})
+    cfg = EgressConfig(enable_rdap=False, block_threat_domains="off")
+    notes = []
+    eg.build_blocks(a, cfg, note=notes.append)
+    assert notes == []
+
+
 def test_egress_empty_produces_no_blocks(monkeypatch):
     monkeypatch.setattr("dbx_nwp_helper.sql.query", lambda _c, _t: pd.DataFrame(
         columns=["destination", "destination_type", "events", "workspace_ids", "resolved_ips"]))
@@ -205,10 +262,59 @@ def test_acl_analyze_splits_allow_deny_ipv4_only():
         _FakeAcl("bad", "BLOCK", True, ["9.9.9.0/24"]),
         _FakeAcl("off", "ALLOW", False, ["1.1.1.1"]),
     ])
-    a = acl_core.analyze(AclConfig(name_prefix="np"), ws)
+    a = acl_core.analyze(AclConfig(), ws)
     assert a.workspace_id == 42
     assert len(a.allow_specs) == 1 and a.allow_specs[0]["cidrs"] == ["8.8.8.8/32"]  # ipv6 dropped
     assert len(a.deny_specs) == 1 and a.deny_specs[0]["cidrs"] == ["9.9.9.0/24"]
+    # labels are recreated with a `migrated-` prefix over the original ACL label
+    assert a.allow_specs[0]["label"] == "migrated-office"
+    assert a.deny_specs[0]["label"] == "migrated-bad"
+    # _FakeWs has no workspace_conf, so enforcement state is simply unknown (not a crash)
+    assert a.ip_acls_enforced is None
+
+
+class _CreateCapturingAccount:
+    """An account client that captures the network_policy_id sent to create (workspace has no
+    existing policy)."""
+    def __init__(self, captured):
+        from databricks.sdk.errors import NotFound
+        self._NotFound = NotFound
+        self.captured = captured
+
+        parent = self
+
+        class _NP:
+            def get_network_policy_rpc(self, network_policy_id):
+                raise parent._NotFound("no such policy")
+
+            def create_network_policy_rpc(self, network_policy):
+                parent.captured["id"] = network_policy.network_policy_id
+                parent.captured["policy"] = network_policy
+                return network_policy
+
+        self.network_policies = _NP()
+
+
+def test_acl_apply_explicit_policy_name_is_slugified_and_capped():
+    captured = {}
+    ws = _FakeWs([_FakeAcl("office", "ALLOW", True, ["8.8.8.8/32"])], ws_id=42)
+    cfg = AclConfig(policy_name="My Custom ACL Policy", create_policy=True, auto_assign=False)
+    acl_core.apply(acl_core.analyze(cfg, ws), cfg, _CreateCapturingAccount(captured), account_id="a")
+    assert captured["id"] == "my-custom-acl-policy"
+
+    captured2 = {}
+    cfg2 = AclConfig(policy_name="x" * 60, create_policy=True, auto_assign=False)
+    acl_core.apply(acl_core.analyze(cfg2, ws), cfg2, _CreateCapturingAccount(captured2), account_id="a")
+    assert len(captured2["id"]) == 30
+
+
+def test_acl_apply_falls_back_to_workspace_id_when_no_name():
+    # With no explicit/entered name (CLI resolves this, but defend the fallback), the id is the ws id.
+    captured = {}
+    ws = _FakeWs([_FakeAcl("office", "ALLOW", True, ["8.8.8.8/32"])], ws_id=42)
+    cfg = AclConfig(create_policy=True, auto_assign=False)
+    acl_core.apply(acl_core.analyze(cfg, ws), cfg, _CreateCapturingAccount(captured), account_id="a")
+    assert captured["id"] == "42"
 
 
 def test_acl_build_egress_kinds():
@@ -218,12 +324,159 @@ def test_acl_build_egress_kinds():
         assert d["restriction_mode"] == mode
 
 
+class _FakeWorkspaceConf:
+    def __init__(self, initial="true"):
+        self._val = initial
+        self.set_calls = []
+
+    def get_status(self, keys):
+        assert keys == "enableIpAccessLists"
+        return {"enableIpAccessLists": self._val}
+
+    def set_status(self, contents):
+        self.set_calls.append(contents)
+        self._val = contents.get("enableIpAccessLists", self._val)
+
+
+class _WsWithConf:
+    def __init__(self, initial="true"):
+        self.workspace_conf = _FakeWorkspaceConf(initial)
+
+
+def test_disable_ip_access_lists_flips_toggle_off():
+    ws = _WsWithConf(initial="true")
+    assert acl_core.disable_ip_access_lists(ws) is True
+    assert ws.workspace_conf.set_calls == [{"enableIpAccessLists": "false"}]
+
+
+def test_disable_ip_access_lists_idempotent_when_already_off():
+    ws = _WsWithConf(initial="false")
+    # already disabled -> no write, reports no change
+    assert acl_core.disable_ip_access_lists(ws) is False
+    assert ws.workspace_conf.set_calls == []
+
+
+def test_disable_ip_access_lists_noop_when_never_configured():
+    # workspace-conf has no enableIpAccessLists key at all (IP ACLs never set up) -> nothing to
+    # disable, no write, graceful.
+    class _Conf:
+        def __init__(self):
+            self.set_calls = []
+
+        def get_status(self, keys):
+            return {}
+
+        def set_status(self, contents):
+            self.set_calls.append(contents)
+
+    class _WS:
+        def __init__(self):
+            self.workspace_conf = _Conf()
+
+    ws = _WS()
+    assert acl_core.disable_ip_access_lists(ws) is False
+    assert ws.workspace_conf.set_calls == []
+
+
 def test_acl_preview_block_target():
     ws = _FakeWs([_FakeAcl("office", "ALLOW", True, ["8.8.8.8/32"])])
-    cfg = AclConfig(policy_mode="dry_run", name_prefix="np")
+    cfg = AclConfig(policy_mode="dry_run")
     a = acl_core.analyze(cfg, ws)
     prev = acl_core.preview_block(a, cfg)
     assert "ingress_dry_run" in prev
+
+
+def test_acl_analyze_flags_enforcement_state():
+    # enableIpAccessLists status is surfaced so the CLI can flag when ACLs aren't actually enforced.
+    class _WsAcls(_WsWithConf):
+        def __init__(self, initial):
+            super().__init__(initial)
+            self._acls = [_FakeAcl("office", "ALLOW", True, ["8.8.8.8/32"])]
+
+        def get_workspace_id(self):
+            return 42
+
+        @property
+        def ip_access_lists(self):
+            acls = self._acls
+            return type("A", (), {"list": lambda self=None: acls})()
+
+    assert acl_core.analyze(AclConfig(), _WsAcls("false")).ip_acls_enforced is False
+    assert acl_core.analyze(AclConfig(), _WsAcls("true")).ip_acls_enforced is True
+
+
+def _pas_account(pas_id):
+    class _WS:
+        def get(self, workspace_id):
+            return type("W", (), {"private_access_settings_id": pas_id})()
+    return type("Acct", (), {"workspaces": _WS()})()
+
+
+def test_workspace_pas_attached_true_false():
+    assert acl_core.workspace_pas_attached(_pas_account("pas-abc"), 42) is True
+    assert acl_core.workspace_pas_attached(_pas_account(None), 42) is False
+
+
+def test_workspace_pas_attached_none_on_error():
+    class _WS:
+        def get(self, workspace_id):
+            raise RuntimeError("no perms")
+    acct = type("Acct", (), {"workspaces": _WS()})()
+    assert acl_core.workspace_pas_attached(acct, 42) is None
+
+
+def _policy_account(assigned_policy_id, policy_obj):
+    class _WNC:
+        def get_workspace_network_option_rpc(self, workspace_id):
+            return type("O", (), {"network_policy_id": assigned_policy_id})()
+
+    class _NP:
+        def get_network_policy_rpc(self, network_policy_id):
+            return policy_obj
+    return type("Acct", (), {"workspace_network_configuration": _WNC(),
+                             "network_policies": _NP()})()
+
+
+def test_assigned_ingress_state_none_when_unassigned():
+    assert acl_core.assigned_ingress_state(_policy_account(None, None), 42) == (None, None)
+
+
+def test_assigned_ingress_state_enforced_dry_run_and_neither():
+    enforced = type("P", (), {"ingress": object(), "ingress_dry_run": None})()
+    assert acl_core.assigned_ingress_state(_policy_account("p1", enforced), 42) == ("p1", "enforced")
+    dry = type("P", (), {"ingress": None, "ingress_dry_run": object()})()
+    assert acl_core.assigned_ingress_state(_policy_account("p2", dry), 42) == ("p2", "dry_run")
+    neither = type("P", (), {"ingress": None, "ingress_dry_run": None})()
+    assert acl_core.assigned_ingress_state(_policy_account("p3", neither), 42) == ("p3", None)
+
+
+def test_promote_dry_run_to_enforced_moves_block():
+    sent = {}
+    dry_block = object()
+    pol = type("P", (), {"ingress": None, "ingress_dry_run": dry_block})()
+
+    class _NP:
+        def get_network_policy_rpc(self, network_policy_id):
+            return pol
+
+        def update_network_policy_rpc(self, network_policy_id, network_policy):
+            sent["id"] = network_policy_id
+            sent["pol"] = network_policy
+    acct = type("Acct", (), {"network_policies": _NP()})()
+    acl_core.promote_dry_run_to_enforced(acct, "p1")
+    assert sent["id"] == "p1"
+    assert sent["pol"].ingress is dry_block and sent["pol"].ingress_dry_run is None
+
+
+def test_acl_policy_payload_is_curl_ready():
+    # --export builds the full AccountNetworkPolicy (egress + the ingress mode block) as a dict.
+    ws = _FakeWs([_FakeAcl("office", "ALLOW", True, ["8.8.8.8/32"])], ws_id=42)
+    cfg = AclConfig(policy_mode="enforce", policy_name="my-acl", egress_policy="allow_all")
+    a = acl_core.analyze(cfg, ws)
+    payload = acl_core.policy_payload(a, cfg, account_id="acc-123")
+    assert payload["network_policy_id"] == "my-acl"
+    assert payload["account_id"] == "acc-123"
+    assert "egress" in payload and "ingress" in payload  # enforce -> ingress (not ingress_dry_run)
 
 
 # --------------------------------------------------------------------------------- queries
@@ -251,6 +504,8 @@ def test_frequent_public_ips_predicate_toggles():
 def test_observed_egress_source_filter():
     assert "network_source_type = 'DBSQL'" in queries.observed_egress(30, 1, "DBSQL")
     assert "network_source_type =" not in queries.observed_egress(30, 1, "")
+    # a single quote in the filter is escaped (doubled), not left to break/inject into the query
+    assert "network_source_type = 'we''ird'" in queries.observed_egress(30, 1, "we'ird")
 
 
 def test_denied_requests_query_filters_403():

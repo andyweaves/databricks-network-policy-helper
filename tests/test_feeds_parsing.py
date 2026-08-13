@@ -5,9 +5,28 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from dbx_nwp_helper.feeds import threat, util
+from dbx_nwp_helper.feeds import http, threat, util
 
 NOW = datetime.now(timezone.utc)
+
+
+def test_http_get_returns_none_on_malformed_json(monkeypatch):
+    """A non-JSON body (e.g. a proxy error page) must degrade to None, not raise."""
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return b"<html>not json</html>"
+
+    monkeypatch.setattr(http, "urlopen", lambda *a, **k: _Resp())
+    monkeypatch.setattr(http.time, "sleep", lambda _s: None)  # don't wait through the backoff
+    assert http.http_get("https://x.test/feed.json", as_json=True) is None
+    # text mode still returns the body unchanged
+    assert http.http_get("https://x.test/feed.txt") == "<html>not json</html>"
 
 
 def test_valid_cidr_normalises_and_filters_version():
