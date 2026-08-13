@@ -44,6 +44,9 @@ The CLI is a uv project. From a checkout: `uv sync`, then run via `uv run dbx-nw
   if the allow-list is incomplete. Keep `--policy-mode dry_run` until the logs look right.
 - Nothing is written unless **`--create-policy`** is passed, and an interactive review gate
   confirms before any write (bypass only with `--yes` for scripting). Show the JSON preview first.
+- By default the CLI **steps through** each section — pausing after the analysis results and after
+  the proposed-policy preview to ask whether to continue (answering *no* aborts cleanly). **`--yes`
+  runs non-interactively**, skipping the step-through pauses *and* every review/write gate.
 - The CBI policy schema is **IPv4-only**; IPv6 is analysed but never put in a policy.
 - Never pass `--create-policy` (let alone `--policy-mode enforce`) on the user's behalf without
   explicit, current confirmation of the mode and the exact CIDRs.

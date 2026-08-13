@@ -149,7 +149,7 @@ def _acl_wizard(conn: Connection) -> AclConfig:
     # The policy name is prompted for centrally in the run flow (blank = profile name), so it isn't
     # asked here.
     egress_policy = _select("Egress to set on a newly-created policy?", ACL_EGRESS_POLICIES,
-                            default="allow_all")
+                            default="dry_run")
     create = bool(conn.account_id) and _confirm("Create the policy now (needs account admin)?", False)
     mode = _mode_wizard() if create else "enforce"
     auto_assign = _confirm("Bind this workspace to the new policy?", True) if create else True

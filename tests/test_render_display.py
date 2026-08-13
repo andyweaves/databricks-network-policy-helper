@@ -7,6 +7,24 @@ import pandas as pd
 from dbx_nwp_helper import render
 
 
+def test_acl_egress_note_explains_each_option(capsys):
+    from dbx_nwp_helper import render
+    render.acl_egress_note("allow_all")
+    assert "FULL_ACCESS" in capsys.readouterr().out
+    render.acl_egress_note("dry_run")
+    assert "log-only" in capsys.readouterr().out.lower()
+    render.acl_egress_note("restricted")
+    assert "BLOCKS ALL" in capsys.readouterr().out
+
+
+def test_decisions_panel_renders_flag_dash_names(capsys):
+    # settings must display in dash form so they match the CLI flags (copy-paste as `--<name>`).
+    from dbx_nwp_helper import console
+    console.decisions_panel("cfg", [("enable_rdap", True, "meaning")])
+    out = capsys.readouterr().out
+    assert "enable-rdap" in out and "enable_rdap" not in out
+
+
 def test_apply_results_reports_id_and_url(capsys):
     render.apply_results(
         [{"target": "single", "action": "created", "policy_id": "np-helper"}],

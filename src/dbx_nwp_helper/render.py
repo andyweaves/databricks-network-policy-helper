@@ -250,14 +250,32 @@ def acl_analysis(analysis, cfg: AclConfig) -> None:
     if analysis.ip_acls_enforced is False:
         console.banner("warn", "IP access lists are currently DISABLED on this workspace "
                                "(enableIpAccessLists=false) — the rules below exist but are NOT being "
-                               "enforced today. Migrating them into an enforced CBI policy will newly "
-                               "restrict inbound access.")
+                               "enforced today. Migrating them to an enforced CBI policy will restrict "
+                               "access (which is not being enforced today).")
     if not analysis.ip_acls:
         console.banner("warn", "No enabled IP access lists on this workspace — nothing to migrate.")
         return
     console.dataframe(
         pd.DataFrame([{**a, "ip_addresses": ", ".join(a["ip_addresses"])} for a in analysis.ip_acls]),
-        f"Enabled IP access lists on workspace {analysis.workspace_id}")
+        f"IP access lists on workspace {analysis.workspace_id}")
+
+
+def acl_egress_note(egress_policy: str) -> None:
+    """Tell the user what egress block the new policy will carry, per --egress-policy (the migration
+    only builds ingress rules, so this is the operator's egress choice). Applied on create; an
+    existing policy's egress is left unchanged."""
+    if egress_policy == "allow_all":
+        console.banner("info", "Egress on the new policy: FULL_ACCESS (allow_all) — serverless egress "
+                               "is NOT restricted. Change with --egress-policy.")
+    elif egress_policy == "dry_run":
+        console.banner("info", "Egress on the new policy: restricted, DRY-RUN (log-only) — blocks "
+                               "nothing, but logs would-be egress denials so you can build an "
+                               "allow-list before enforcing. Change with --egress-policy.")
+    else:  # restricted
+        console.banner("warn", "Egress on the new policy: restricted, ENFORCED with no allow-list — "
+                               "this BLOCKS ALL serverless egress once assigned. Add egress allow "
+                               "rules (see the egress helper) first, or workloads lose outbound. "
+                               "Change with --egress-policy.")
 
 
 def acl_preview(preview: dict, cfg: AclConfig) -> None:

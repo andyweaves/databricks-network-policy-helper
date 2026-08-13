@@ -69,6 +69,34 @@ def test_confirm_params_accept_proceeds(monkeypatch):
     cli._confirm_params(yes=False)  # must not raise
 
 
+def test_checkpoint_yes_skips_prompt(monkeypatch):
+    monkeypatch.setattr("typer.confirm", lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("must not prompt with --yes")))
+    cli._checkpoint(yes=True)  # must not raise
+
+
+def test_checkpoint_noninteractive_skips_prompt(monkeypatch):
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    monkeypatch.setattr("typer.confirm", lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("must not prompt non-interactively")))
+    cli._checkpoint(yes=False)  # must not raise
+
+
+def test_checkpoint_continue_proceeds(monkeypatch):
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("typer.confirm", lambda *a, **k: True)
+    cli._checkpoint(yes=False)  # must not raise
+
+
+def test_checkpoint_decline_aborts_cleanly(monkeypatch):
+    import typer
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("typer.confirm", lambda *a, **k: False)
+    with pytest.raises(typer.Exit) as exc:
+        cli._checkpoint(yes=False)
+    assert exc.value.exit_code == 0  # 'n' -> clean abort
+
+
 def test_confirm_write_yes_proceeds():
     assert cli._confirm_write("dry_run", yes=True) is True
 
@@ -303,18 +331,37 @@ def test_acl_preflight_aborts_on_pas(monkeypatch):
     import typer
     monkeypatch.setattr("dbx_nwp_helper.core.acl.workspace_pas_attached", lambda a, w: True)
     with pytest.raises(typer.Exit) as e:
-        cli._acl_preflight(object(), 42, yes=True)
+        cli._acl_preflight(object(), 42, will_assign=True, yes=True)
     assert e.value.exit_code == 1
 
 
-def test_acl_preflight_aborts_on_existing_enforced_policy(monkeypatch):
+def test_acl_preflight_aborts_on_existing_enforced_policy_when_assigning(monkeypatch):
     import typer
     monkeypatch.setattr("dbx_nwp_helper.core.acl.workspace_pas_attached", lambda a, w: False)
     monkeypatch.setattr("dbx_nwp_helper.core.acl.assigned_ingress_state",
                         lambda a, w: ("p1", "enforced"))
     with pytest.raises(typer.Exit) as e:
-        cli._acl_preflight(object(), 42, yes=True)
+        cli._acl_preflight(object(), 42, will_assign=True, yes=True)
     assert e.value.exit_code == 1
+
+
+def test_acl_preflight_enforced_warns_and_proceeds_when_not_assigning(monkeypatch, capsys):
+    # not assigning -> existing enforced policy stays put; warn and continue (no abort).
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.workspace_pas_attached", lambda a, w: False)
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.assigned_ingress_state",
+                        lambda a, w: ("p1", "enforced"))
+    cli._acl_preflight(object(), 42, will_assign=False, yes=True)  # must not raise
+    assert "isn't assigning" in capsys.readouterr().out
+
+
+def test_acl_preflight_dry_run_warns_and_proceeds_when_not_assigning(monkeypatch):
+    # not assigning -> no promote prompt, no cancel; just warn and continue.
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.workspace_pas_attached", lambda a, w: False)
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.assigned_ingress_state",
+                        lambda a, w: ("p1", "dry_run"))
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.promote_dry_run_to_enforced",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not promote")))
+    cli._acl_preflight(object(), 42, will_assign=False, yes=True)  # must not raise
 
 
 def test_acl_preflight_dry_run_cancels_without_promote_noninteractive(monkeypatch):
@@ -326,7 +373,7 @@ def test_acl_preflight_dry_run_cancels_without_promote_noninteractive(monkeypatc
     monkeypatch.setattr("dbx_nwp_helper.core.acl.promote_dry_run_to_enforced",
                         lambda *a, **k: promoted.__setitem__("n", promoted["n"] + 1))
     with pytest.raises(typer.Exit) as e:
-        cli._acl_preflight(object(), 42, yes=True)  # --yes -> no prompt, no promotion
+        cli._acl_preflight(object(), 42, will_assign=True, yes=True)  # --yes -> no prompt/promotion
     assert e.value.exit_code == 0 and promoted["n"] == 0
 
 
@@ -341,21 +388,46 @@ def test_acl_preflight_dry_run_promotes_when_confirmed(monkeypatch):
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     monkeypatch.setattr("typer.confirm", lambda *a, **k: True)
     with pytest.raises(typer.Exit) as e:
-        cli._acl_preflight(object(), 42, yes=False)
+        cli._acl_preflight(object(), 42, will_assign=True, yes=False)
     assert e.value.exit_code == 0 and promoted["n"] == 1  # promoted, then migration cancelled
 
 
 def test_acl_preflight_passes_when_clean(monkeypatch):
     monkeypatch.setattr("dbx_nwp_helper.core.acl.workspace_pas_attached", lambda a, w: False)
     monkeypatch.setattr("dbx_nwp_helper.core.acl.assigned_ingress_state", lambda a, w: (None, None))
-    cli._acl_preflight(object(), 42, yes=True)  # must not raise
+    cli._acl_preflight(object(), 42, will_assign=True, yes=True)  # must not raise
 
 
 def test_acl_preflight_warns_but_proceeds_when_pas_unknown(monkeypatch, capsys):
     monkeypatch.setattr("dbx_nwp_helper.core.acl.workspace_pas_attached", lambda a, w: None)
     monkeypatch.setattr("dbx_nwp_helper.core.acl.assigned_ingress_state", lambda a, w: (None, None))
-    cli._acl_preflight(object(), 42, yes=True)  # must not raise
+    cli._acl_preflight(object(), 42, will_assign=True, yes=True)  # must not raise
     assert "couldn't verify" in capsys.readouterr().out.lower()
+
+
+def test_write_json_export_to_directory_uses_policy_id_filename(tmp_path):
+    import json
+    from pathlib import Path
+    dest = cli._write_json_export(str(tmp_path), {"network_policy_id": "my-acl", "egress": {}})
+    assert dest == str(tmp_path / "my-acl.json")
+    assert json.loads(Path(dest).read_text())["network_policy_id"] == "my-acl"
+
+
+def test_write_json_export_creates_missing_parent_dirs(tmp_path):
+    from pathlib import Path
+    target = tmp_path / "nested" / "sub" / "policy.json"
+    dest = cli._write_json_export(str(target), {"network_policy_id": "p"})
+    assert dest == str(target) and Path(target).exists()
+
+
+def test_write_json_export_bad_path_errors_cleanly(tmp_path):
+    import typer
+    # a path whose parent is a *file* can't be created -> clean Exit, not a traceback
+    afile = tmp_path / "afile"
+    afile.write_text("x")
+    with pytest.raises(typer.Exit) as e:
+        cli._write_json_export(str(afile / "policy.json"), {"network_policy_id": "p"})
+    assert e.value.exit_code == 1
 
 
 def test_ingress_policy_name_with_per_workspace_is_rejected():

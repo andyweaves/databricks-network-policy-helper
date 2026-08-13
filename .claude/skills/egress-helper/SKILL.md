@@ -55,7 +55,9 @@ If the table is empty, no egress policy is logging yet — start with step 1.
    > domain block list is a **secondary** layer. Don't rely on the block feed as the primary defence.
 6. Gated create: `--create-policy` writes the egress block; `--policy-action` chooses a new policy
    or an existing one; `--auto-assign` binds the workspace. An interactive review gate confirms
-   before any write (bypass with `--yes`).
+   before any write. By default the CLI also **steps through** each section — pausing after the
+   analysis results and after the preview to ask whether to continue (*no* aborts cleanly). **`--yes`
+   runs non-interactively**, skipping the step-through pauses and every review/write gate.
 
 ## Options
 

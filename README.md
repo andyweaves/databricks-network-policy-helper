@@ -64,6 +64,11 @@ Claude skill under [`.claude/skills/`](.claude/skills/).
 - 🎯 **You confirm the target workspace.** Before any analysis or write, the CLI shows the exact
   workspace it's pointed at — profile, URL and id — and asks you to confirm, so a mis-set `--profile`
   can't act on the wrong workspace (skip with `--yes`).
+- 🧭 **Interactive step-through (default).** The CLI pauses after each major section — the analysis
+  results, then the proposed-policy preview — and asks whether to continue, so you review each step
+  and can stop at any point. Answering **no** aborts cleanly, writing nothing. Pass **`--yes` for
+  non-interactive mode**: it skips the step-through pauses *and* every review/write gate, for
+  scripted / CI runs.
 - 🧪 **Dry-run first.** Default `--policy-mode` is `dry_run` — writes the log-only block and **blocks
   nothing**, so you can review would-be denials in the network system tables first.
 - ⛔ **Enforce with intent.** `--policy-mode enforce` writes the blocking block and **can lock users
