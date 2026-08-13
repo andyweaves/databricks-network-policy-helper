@@ -114,12 +114,17 @@ def _slug(text: str) -> str:
     return re.sub(r"[^a-z0-9-]+", "-", (text or "").lower()).strip("-")
 
 
-def policy_name(name_prefix: str, workspace_id: int | None = None, suffix: str | None = None) -> str:
+def policy_name(name_prefix: str, workspace_id: int | None = None, suffix: str | None = None,
+                explicit: str | None = None) -> str:
     """Deterministic policy id, truncated to the id length limit while preserving the suffix:
       all_workspaces   -> <prefix>
       per_workspace    -> <prefix>-ws-<id>       (workspace_id given)
       current_workspace-> <prefix>-<profile>     (suffix given)
-    The suffix (workspace id or profile slug) is kept whole; the prefix is trimmed to fit."""
+    The suffix (workspace id or profile slug) is kept whole; the prefix is trimmed to fit.
+    An `explicit` name (the user's --policy-name) overrides all of the above: it's slugified to an
+    id-safe form and capped, falling back to the prefix if it slugs away to nothing."""
+    if explicit:
+        return (_slug(explicit) or _slug(name_prefix) or "policy")[:MAX_POLICY_ID_LEN]
     if workspace_id is not None:
         tail = f"-ws-{workspace_id}"
     elif suffix:

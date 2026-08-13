@@ -33,8 +33,11 @@ def ingress_decisions(cfg: IngressConfig) -> None:
         ("policy_mode", cfg.policy_mode, "dry_run=log-only; enforce=blocking."),
         ("threat_deny_rules", cfg.threat_deny_rules, "Add deny rules from threat intel."),
         ("name_prefix", cfg.name_prefix, "Prefix for policy names + rule labels."),
+        ("policy_name", cfg.policy_name, "Explicit policy id (blank = derived from name_prefix)."),
         ("ip_acl_handling", cfg.ip_acl_handling, "Existing IP ACL treatment."),
         ("deny_denied_ips", cfg.deny_denied_ips, "Deny source IPs currently seen blocked (403)."),
+        ("disable_existing_ip_acls", cfg.disable_existing_ip_acls,
+         "After apply, turn off the workspace's IP access lists (needs create + assign)."),
         ("create_policy", cfg.apply.create_policy, "Master switch: nothing is written unless true."),
         ("policy_action", cfg.apply.policy_action, "create_new or add_to_existing."),
         ("existing_policy_id", cfg.apply.existing_policy_id, "Target id for add_to_existing."),
@@ -54,6 +57,7 @@ def egress_decisions(cfg: EgressConfig) -> None:
         ("block_threat_domains", cfg.block_threat_domains, "off / matched_only / all."),
         ("threat_feed", cfg.threat_feed, "Threat-domain feed (abuse.ch ThreatFox)."),
         ("name_prefix", cfg.name_prefix, "Prefix for policy names."),
+        ("policy_name", cfg.policy_name, "Explicit policy id (blank = derived from name_prefix)."),
         ("create_policy", cfg.apply.create_policy, "Master switch: nothing is written unless true."),
         ("policy_action", cfg.apply.policy_action, "create_new or add_to_existing."),
         ("existing_policy_id", cfg.apply.existing_policy_id, "Target id for add_to_existing."),
@@ -64,9 +68,12 @@ def egress_decisions(cfg: EgressConfig) -> None:
 def acl_decisions(cfg: AclConfig) -> None:
     console.decisions_panel("IP ACL → CBI migration configuration", [
         ("policy_mode", cfg.policy_mode, "enforce (default) or dry_run."),
-        ("name_prefix", cfg.name_prefix, "Prefix for the policy name/rule labels."),
+        ("policy_name", cfg.policy_name, "Policy id for the new policy (from --policy-name / prompt)."),
         ("egress_policy", cfg.egress_policy, "Egress set on create: allow_all/dry_run/restricted."),
         ("auto_assign", cfg.auto_assign, "Bind this workspace to the new policy."),
+        ("disable_existing_ip_acls", cfg.disable_existing_ip_acls,
+         "After apply, turn off the workspace's IP access lists (needs create + assign)."),
+        ("export", cfg.export, "Write the proposed policy JSON to this path (blank = don't)."),
         ("create_policy", cfg.create_policy, "Master switch: nothing is written unless true."),
     ])
 
@@ -240,6 +247,11 @@ def egress_preview(previews: dict, cfg: EgressConfig) -> None:
 # ---------------------------------------------------------------------------------- acl tables
 def acl_analysis(analysis, cfg: AclConfig) -> None:
     console.rule("Existing IP access list")
+    if analysis.ip_acls_enforced is False:
+        console.banner("warn", "IP access lists are currently DISABLED on this workspace "
+                               "(enableIpAccessLists=false) — the rules below exist but are NOT being "
+                               "enforced today. Migrating them into an enforced CBI policy will newly "
+                               "restrict inbound access.")
     if not analysis.ip_acls:
         console.banner("warn", "No enabled IP access lists on this workspace — nothing to migrate.")
         return

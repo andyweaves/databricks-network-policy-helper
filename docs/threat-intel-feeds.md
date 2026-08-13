@@ -49,10 +49,12 @@ All are the providers' **official** feeds:
 ## Databricks-owned ranges (`databricks_ranges` table)
 
 Columns: `cidr, platform, region, direction, loaded_at`. Databricks' own control-plane / serverless
-/ storage IPs appear as source IPs in the audit log (the platform reaching into the workspace) —
-they're identified and **auto-added to the allow-list** in their own unscoped rule — an enforced
-policy that omitted them would lock the control plane out. This takes precedence over the
-cloud-provider flag (a Databricks IP is also an AWS/Azure/GCP IP).
+/ storage IPs appear as source IPs in the audit log (the platform reaching into the workspace) — when
+an **observed** source IP falls in one of these ranges its group is kept in the allow-list in its own
+unscoped rule, and takes precedence over the cloud-provider flag (a Databricks IP is also an
+AWS/Azure/GCP IP). Note this only allow-lists Databricks ranges actually seen in the audit traffic —
+the tool does **not** inject the full published range set, so confirm the platform's own ranges are
+covered before enforcing an ingress policy.
 
 Source: the official machine-readable feed **`databricks.com/networking/v1/ip-ranges.json`** — one
 JSON covering **AWS, Azure and GCP**, with `type` inbound/outbound per region. Verified to contain

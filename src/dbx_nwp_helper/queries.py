@@ -202,7 +202,9 @@ def denied_requests(lookback_days: int) -> str:
 
 def observed_egress(lookback_days: int, min_events: int, source_type_filter: str,
                     only_workspace_id: int | None = None) -> str:
-    src_filter = f"AND network_source_type = '{source_type_filter}'" if source_type_filter else ""
+    # Escape single quotes so a value containing one can't break (or inject into) the query.
+    src_filter = (f"AND network_source_type = '{source_type_filter.replace(chr(39), chr(39) * 2)}'"
+                  if source_type_filter else "")
     ws_filter = (f"AND CAST(workspace_id AS STRING) = '{int(only_workspace_id)}'"
                  if only_workspace_id is not None else "")
     return f"""

@@ -85,6 +85,14 @@ The CLI is a uv project. From a checkout: `uv sync`, then run via `uv run dbx-nw
 
 Audit `workspace_id = 0` is account-level, excluded unless `--include-account-level`.
 
+Names are derived from `--name-prefix` as above. To set the policy id yourself instead, pass
+`--policy-name <id>` (single-policy scopes only — not `per_workspace`, and not `add_to_existing`,
+which uses `--existing-policy-id`). It's normalised to an id-safe slug (lowercased, non-alphanumerics
+→ `-`, length-capped) and the CLI prints the resulting id.
+
+Before any analysis or write, the CLI shows the **target workspace** (profile / URL / id) and asks
+you to confirm it — so a mis-set `--profile` can't act on the wrong workspace (skip with `--yes`).
+
 Applying: **`--create-policy`** is the master switch; **`--policy-action`** chooses `create_new`
 (a fresh policy from `--name-prefix`) or `add_to_existing` (update `--existing-policy-id`, replacing
 only its ingress block and leaving egress intact — needs a single-policy scope, i.e.
@@ -102,12 +110,20 @@ traffic-derived rules), `migrate` (recreate the ACL exactly), or `ignore` (traff
 The CLI also surfaces requests **currently being denied** (403 / IpAccessDenied); pass
 `--deny-denied-ips` to turn those source IPs into explicit deny rules.
 
+Once the CBI policy replaces the old IP access list, pass `--disable-existing-ip-acls` (off by
+default) to turn the workspace's IP access lists off (`enableIpAccessLists=false`) so both controls
+don't apply at once. It only runs **after** the policy is created and assigned, and the CLI refuses
+the flag unless the run also does both (`--create-policy` **and** `--auto-assign`) — so it can't
+leave the workspace with no ingress control. The lists are preserved, so it's reversible.
+
 ## Flagged groups & threat-intel deny rules
 
 Threat-intel and cloud-provider-owned groups are **always excluded** from proposed allow rules.
 Threat matches still appear in the ⚠️ threat-match table for investigation. **Databricks-owned** IPs
-are the exception and take **precedence**: they're auto-added to the allow-list in their own unscoped
-rule, so an enforced policy won't lock the control plane out.
+are the exception and take **precedence**: an observed Databricks-owned group is always kept in the
+allow-list (in its own unscoped rule, and never dropped even when a threat feed also matches). Note
+this only covers Databricks ranges **seen in your audit traffic** — the tool does not inject the full
+published range set, so confirm the platform's own ranges are covered before enforcing.
 
 `--threat-deny-rules` adds **deny rules** from the threat-intel table: `off`, `matched_only` (only
 threat CIDRs that matched observed traffic), or `all` (whole feeds). Over the cap it prioritises

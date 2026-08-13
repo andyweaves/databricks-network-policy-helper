@@ -333,26 +333,37 @@ def _build_egress_block(t: dict, blocked_domains: list, policy_mode: str):
         NetworkPolicyEgress,
     )
 
+    # Both destination lists are capped at 100; when there are more, keep the highest-traffic ones
+    # (deterministic: events desc, then name asc as a stable tie-break) rather than an arbitrary
+    # dict order — the excess is dropped from the allow-list, so it should be the least-used.
+    internet_ranked = sorted(t["internet"].items(), key=lambda kv: (-kv[1], kv[0]))
     allowed_internet = [
         InetDest(destination=f, internet_destination_type=InetType.DNS_NAME)
-        for f in list(t["internet"])[:MAX_INTERNET_DESTINATIONS]
+        for f, _events in internet_ranked[:MAX_INTERNET_DESTINATIONS]
     ]
     blocked_internet = [
         InetDest(destination=d, internet_destination_type=InetType.DNS_NAME) for d in blocked_domains
     ] or None
 
-    storage = []
-    for (bucket, region) in t["s3"]:
+    # (events, tie-break key, StorDest) across all three storage kinds, ranked together so the cap
+    # keeps the busiest buckets/accounts regardless of provider.
+    storage_ranked = []
+    for (bucket, region), events in t["s3"].items():
         if not region:
             continue  # region is required for AWS S3; a region-less entry would be rejected
-        storage.append(StorDest(bucket_name=bucket, region=region,
-                                storage_destination_type=StorType.AWS_S3))
-    for bucket in t["gcs"]:
-        storage.append(StorDest(bucket_name=bucket, storage_destination_type=StorType.GOOGLE_CLOUD_STORAGE))
-    for (acct, svc) in t["azure"]:
-        storage.append(StorDest(azure_storage_account=acct, azure_storage_service=svc,
-                                storage_destination_type=StorType.AZURE_STORAGE))
-    storage = storage[:MAX_STORAGE_DESTINATIONS]
+        storage_ranked.append((events, f"s3:{bucket}:{region}",
+                               StorDest(bucket_name=bucket, region=region,
+                                        storage_destination_type=StorType.AWS_S3)))
+    for bucket, events in t["gcs"].items():
+        storage_ranked.append((events, f"gcs:{bucket}",
+                               StorDest(bucket_name=bucket,
+                                        storage_destination_type=StorType.GOOGLE_CLOUD_STORAGE)))
+    for (acct, svc), events in t["azure"].items():
+        storage_ranked.append((events, f"azure:{acct}:{svc}",
+                               StorDest(azure_storage_account=acct, azure_storage_service=svc,
+                                        storage_destination_type=StorType.AZURE_STORAGE)))
+    storage_ranked.sort(key=lambda e: (-e[0], e[1]))
+    storage = [sd for _events, _key, sd in storage_ranked[:MAX_STORAGE_DESTINATIONS]]
 
     enforcement_mode = EnforcementMode.DRY_RUN if policy_mode == "dry_run" else EnforcementMode.ENFORCED
     return NetworkPolicyEgress(network_access=EA(
@@ -368,15 +379,40 @@ def _target_has_content(t: dict, blocked_domains: list) -> bool:
     return bool(t["s3"] or t["gcs"] or t["azure"] or t["internet"] or blocked_domains)
 
 
-def build_blocks(analysis: EgressAnalysis, cfg: EgressConfig) -> dict:
+def _warn_egress_limits(t: dict, tgt, note: Note) -> None:
+    """Warn when a target's destinations exceed the per-policy egress caps (100 internet FQDNs / 100
+    storage destinations). The excess is dropped from the allow-list — and would be *blocked* in
+    enforce mode — so the operator must be told rather than have it happen silently."""
+    where = "" if tgt == ALL_WORKSPACES else f" [workspace {tgt}]"
+    n_internet = len(t["internet"])
+    if n_internet > MAX_INTERNET_DESTINATIONS:
+        note(f"{n_internet} internet FQDN destinations{where} exceed the "
+             f"{MAX_INTERNET_DESTINATIONS}-destination egress limit — keeping the "
+             f"{MAX_INTERNET_DESTINATIONS} highest-traffic; the rest won't be allow-listed (and "
+             f"would be blocked in enforce mode). Raise --min-events or narrow --lookback-days to "
+             f"fit under the cap.")
+    n_storage = len(t["s3"]) + len(t["gcs"]) + len(t["azure"])
+    if n_storage > MAX_STORAGE_DESTINATIONS:
+        note(f"{n_storage} storage destinations{where} exceed the "
+             f"{MAX_STORAGE_DESTINATIONS}-destination egress limit — keeping the "
+             f"{MAX_STORAGE_DESTINATIONS} highest-traffic; the rest won't be allow-listed (and "
+             f"would be blocked in enforce mode).")
+
+
+def build_blocks(analysis: EgressAnalysis, cfg: EgressConfig, note: Note = lambda _m: None) -> dict:
     """{policy_target -> NetworkPolicyEgress} for each target with content."""
-    return {tgt: _build_egress_block(t, analysis.blocked_domains, cfg.policy_mode)
-            for tgt, t in analysis.targets.items()
-            if _target_has_content(t, analysis.blocked_domains)}
+    blocks = {}
+    for tgt, t in analysis.targets.items():
+        if not _target_has_content(t, analysis.blocked_domains):
+            continue
+        _warn_egress_limits(t, tgt, note)
+        blocks[tgt] = _build_egress_block(t, analysis.blocked_domains, cfg.policy_mode)
+    return blocks
 
 
-def preview_blocks(analysis: EgressAnalysis, cfg: EgressConfig) -> dict:
-    return {tgt: {"egress": block.as_dict()} for tgt, block in build_blocks(analysis, cfg).items()}
+def preview_blocks(analysis: EgressAnalysis, cfg: EgressConfig, note: Note = lambda _m: None) -> dict:
+    return {tgt: {"egress": block.as_dict()}
+            for tgt, block in build_blocks(analysis, cfg, note).items()}
 
 
 def apply(analysis: EgressAnalysis, cfg: EgressConfig, account, account_id: str,
@@ -389,6 +425,8 @@ def apply(analysis: EgressAnalysis, cfg: EgressConfig, account, account_id: str,
     for tgt in sorted(blocks, key=str):
         if add_to_existing:
             pid = cfg.apply.existing_policy_id
+        elif cfg.policy_name and tgt == ALL_WORKSPACES:
+            pid = policy.policy_name(cfg.name_prefix, explicit=cfg.policy_name)
         elif tgt != ALL_WORKSPACES:
             pid = policy.policy_name(cfg.name_prefix, workspace_id=int(tgt))
         elif cfg.policy_scope == "current_workspace":

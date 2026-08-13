@@ -123,7 +123,7 @@ def test_ingress_databricks_owned_takes_precedence(monkeypatch, candidates_df):
 
 
 def test_acl_migration_block_only_adds_catch_all():
-    cfg = AclConfig(policy_mode="dry_run", name_prefix="np")
+    cfg = AclConfig(policy_mode="dry_run")
     wc = _FakeWorkspaceClient(acls=[_FakeAcl("blocklist", "BLOCK", True, ["1.2.3.4"])])
     analysis = acl_core.analyze(cfg, wc)
     assert analysis.deny_specs and not analysis.allow_specs

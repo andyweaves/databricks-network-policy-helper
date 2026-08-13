@@ -64,6 +64,19 @@ def title_panel(title: str, subtitle: str | None = None) -> None:
     console.print(Panel(body, border_style="brand", expand=False))
 
 
+def workspace_panel(profile: str, host: str, workspace_id: Any) -> None:
+    """A prominent panel naming the workspace this run will read from and act on (profile / URL /
+    id), so the user is never in doubt about the target before analysis or any write."""
+    body = Text()
+    body.append("This run will analyse and (if you apply) modify:\n\n", style="heading")
+    for label, value in (("profile      ", profile), ("workspace URL", host),
+                         ("workspace id ", workspace_id)):
+        body.append(f"  {label}  ", style="key")
+        body.append(f"{value}\n", style="value")
+    console.print(Panel(body, title="[brand]Target workspace[/brand]", border_style="brand",
+                        expand=False))
+
+
 def decisions_panel(title: str, rows: list[tuple[str, Any, str]]) -> None:
     """Render the run's configuration as a key / value / meaning table inside a panel — the CLI
     equivalent of the notebooks' `_decisions` DataFrame."""

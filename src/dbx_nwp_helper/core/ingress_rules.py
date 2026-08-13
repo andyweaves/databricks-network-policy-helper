@@ -323,6 +323,8 @@ def apply(policies: dict, cfg: IngressConfig, account, account_id: str, this_wor
         add_to_existing = cfg.apply.policy_action == "add_to_existing"
         if add_to_existing:
             single_id = cfg.apply.existing_policy_id
+        elif cfg.policy_name:
+            single_id = policy.policy_name(cfg.name_prefix, explicit=cfg.policy_name)
         elif cfg.policy_scope == "current_workspace":
             single_id = policy.policy_name(cfg.name_prefix, suffix=profile or str(this_workspace_id))
         else:

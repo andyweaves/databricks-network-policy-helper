@@ -82,8 +82,15 @@ class IngressConfig:
     policy_mode: str = "dry_run"
     threat_deny_rules: str = "off"
     name_prefix: str = DEFAULT_NAME_PREFIX
+    # Optional explicit policy id. When set (single-policy scopes only) it overrides the id derived
+    # from name_prefix; blank = auto-derive. Normalised (lowercase, '-'-safe, length-capped).
+    policy_name: str = ""
     ip_acl_handling: str = "migrate_and_enrich"
     deny_denied_ips: bool = False
+    # After creating AND assigning the policy, turn off the workspace's existing IP access lists
+    # (the CBI policy replaces them). Gated by validate_disable_ip_acls so it can't leave the
+    # workspace unprotected.
+    disable_existing_ip_acls: bool = False
     apply: ApplyOptions = field(default_factory=ApplyOptions)
 
     @property
@@ -107,6 +114,7 @@ class EgressConfig:
     enable_rdap: bool = True
     refresh_feeds: bool = False
     name_prefix: str = DEFAULT_NAME_PREFIX
+    policy_name: str = ""   # optional explicit policy id (single-policy scopes); blank = auto-derive
     policy_mode: str = "dry_run"
     policy_scope: str = "current_workspace"
     block_threat_domains: str = "off"
@@ -117,10 +125,16 @@ class EgressConfig:
 @dataclass
 class AclConfig:
     policy_mode: str = "enforce"
-    name_prefix: str = DEFAULT_NAME_PREFIX
+    # Policy id for the new policy. Explicit (--policy-name) or, when left blank, the CLI resolves it
+    # to the profile name (falling back to the workspace id). Slugified + length-capped.
+    policy_name: str = ""
     egress_policy: str = "allow_all"   # allow_all | dry_run | restricted
     auto_assign: bool = True
     create_policy: bool = False
+    # See IngressConfig.disable_existing_ip_acls — same gated behaviour for the migrate command.
+    disable_existing_ip_acls: bool = False
+    # Optional path to write the proposed network-policy JSON (for use with curl / the REST API).
+    export: str = ""
     reviewed: bool = False
 
     @property
@@ -143,4 +157,39 @@ def validate_apply(apply: ApplyOptions, policy_scope: str, other_direction: str)
             "policy_action=add_to_existing updates one supplied policy id, so it can't be used with "
             "--policy-scope per_workspace (which fans out to many policies). Use current_workspace "
             "or all_workspaces, or use create_new for per_workspace."
+        )
+
+
+def validate_policy_name(policy_name: str, policy_scope: str, policy_action: str) -> None:
+    """An explicit --policy-name sets one policy id, so it only makes sense for a single created
+    policy. Reject it with add_to_existing (the id comes from --existing-policy-id) and with
+    per_workspace (which creates one policy per workspace — use --name-prefix there)."""
+    if not policy_name:
+        return
+    if policy_action == "add_to_existing":
+        raise ValueError(
+            "--policy-name is for creating a new policy; with policy_action=add_to_existing the "
+            "target id comes from --existing-policy-id. Drop one of them."
+        )
+    if policy_scope == "per_workspace":
+        raise ValueError(
+            "--policy-name sets a single policy id, so it can't be used with --policy-scope "
+            "per_workspace (which creates one policy per workspace). Use --name-prefix, or a "
+            "single-policy scope (current_workspace / all_workspaces)."
+        )
+
+
+def validate_disable_ip_acls(disable: bool, create_policy: bool, auto_assign: bool) -> None:
+    """--disable-existing-ip-acls turns OFF the workspace's IP access list enforcement, which is a
+    live ingress control. Only permit it when the run will both *create* AND *assign* the
+    replacement CBI policy — otherwise disabling the ACL could leave the workspace with no ingress
+    protection at all."""
+    if not disable:
+        return
+    if not (create_policy and auto_assign):
+        raise ValueError(
+            "--disable-existing-ip-acls turns off the workspace's IP access lists, so it may only be "
+            "used when the run also creates AND assigns the replacement policy (otherwise the "
+            "workspace could be left with no ingress protection). Re-run with --create-policy and "
+            "--auto-assign, or drop --disable-existing-ip-acls."
         )

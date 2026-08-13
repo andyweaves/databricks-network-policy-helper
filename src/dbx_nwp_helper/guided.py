@@ -106,11 +106,15 @@ def _ingress_wizard(conn: Connection) -> IngressConfig:
 
     apply = _apply_wizard(conn, scope, other="egress")
     mode = _mode_wizard() if apply.create_policy else "dry_run"
+    policy_name = _explicit_name_prompt(scope, apply.policy_action)
+    disable_acls = (apply.create_policy and apply.auto_assign
+                    and _confirm("Disable the workspace's existing IP access lists after applying? "
+                                 "(the new CBI policy replaces them)", False))
     return IngressConfig(
         lookback_days=lookback, min_events=min_events, threat_feeds=feeds, enable_rdap=enable_rdap,
         policy_framing=framing, scoping_mode=scoping, policy_scope=scope, policy_mode=mode,
-        threat_deny_rules=threat_deny, name_prefix=name_prefix, ip_acl_handling=acl_handling,
-        apply=apply)
+        threat_deny_rules=threat_deny, name_prefix=name_prefix, policy_name=policy_name,
+        ip_acl_handling=acl_handling, disable_existing_ip_acls=disable_acls, apply=apply)
 
 
 def _egress_wizard(conn: Connection) -> EgressConfig:
@@ -125,22 +129,35 @@ def _egress_wizard(conn: Connection) -> EgressConfig:
 
     apply = _apply_wizard(conn, scope, other="ingress")
     mode = _mode_wizard() if apply.create_policy else "dry_run"
+    policy_name = _explicit_name_prompt(scope, apply.policy_action)
     return EgressConfig(
         lookback_days=lookback, min_events=min_events, source_type_filter=src_filter,
         enable_rdap=enable_rdap, policy_scope=scope, policy_mode=mode, block_threat_domains=block,
-        name_prefix=name_prefix, apply=apply)
+        name_prefix=name_prefix, policy_name=policy_name, apply=apply)
+
+
+def _explicit_name_prompt(scope: str, policy_action: str) -> str:
+    """Offer an explicit policy name only where it's valid — a single created policy (not
+    per_workspace, which fans out; not add_to_existing, which uses --existing-policy-id)."""
+    if scope == "per_workspace" or policy_action == "add_to_existing":
+        return ""
+    return _text("Explicit policy name? (blank = auto-generate from the prefix)")
 
 
 def _acl_wizard(conn: Connection) -> AclConfig:
     console.rule("IP ACL migration questions")
-    name_prefix = _text("Name prefix for the policy?", "dbx-nwp")
+    # The policy name is prompted for centrally in the run flow (blank = profile name), so it isn't
+    # asked here.
     egress_policy = _select("Egress to set on a newly-created policy?", ACL_EGRESS_POLICIES,
                             default="allow_all")
     create = bool(conn.account_id) and _confirm("Create the policy now (needs account admin)?", False)
     mode = _mode_wizard() if create else "enforce"
     auto_assign = _confirm("Bind this workspace to the new policy?", True) if create else True
-    return AclConfig(policy_mode=mode, name_prefix=name_prefix, egress_policy=egress_policy,
-                     auto_assign=auto_assign, create_policy=create)
+    disable_acls = (create and auto_assign
+                    and _confirm("Disable this workspace's IP access lists after applying? "
+                                 "(the new CBI policy replaces them)", False))
+    return AclConfig(policy_mode=mode, egress_policy=egress_policy, auto_assign=auto_assign,
+                     create_policy=create, disable_existing_ip_acls=disable_acls)
 
 
 def _apply_wizard(conn: Connection, scope: str, other: str) -> ApplyOptions:

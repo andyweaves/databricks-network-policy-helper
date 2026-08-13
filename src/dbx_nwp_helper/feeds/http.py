@@ -21,7 +21,7 @@ def http_get(url: str, as_json: bool = False) -> Any | None:
             with urlopen(request, timeout=FEED_TIMEOUT_SECONDS) as response:
                 raw = response.read().decode("utf-8", errors="replace")
             return json.loads(raw) if as_json else raw
-        except (HTTPError, URLError, TimeoutError) as error:
+        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as error:
             last_error = error
             if attempt < 3:
                 time.sleep(delay)
