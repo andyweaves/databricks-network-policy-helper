@@ -213,14 +213,18 @@ def _resolve_acl_policy_name(cfg: AclConfig, conn: Connection, wc, yes: bool) ->
     cfg.policy_name = entered or default
 
 
-def _acl_preflight(account, workspace_id, yes: bool) -> None:
-    """migrate-acl account-level pre-checks (run before any migration). Aborts when migration isn't
-    supported or possible yet:
-      * a PAS (PrivateLink) is attached -> unsupported for now;
-      * the workspace already has an ENFORCED CBI ingress policy -> unsupported for now (a correct
-        migration would need to intersect with it);
-      * the workspace has a DRY-RUN CBI ingress policy -> offer to promote it to enforced, then stop
-        (a migration needs an enforced baseline first)."""
+def _acl_preflight(account, workspace_id, will_assign: bool, yes: bool) -> None:
+    """migrate-acl account-level pre-checks (run before any migration).
+
+    * A PAS (PrivateLink) attached -> always abort (unsupported for now; the produced policy would
+      be incomplete).
+    * An existing assigned CBI ingress policy only matters when this run will **assign** the new
+      policy (assigning would replace the existing one). When assigning:
+        - enforced existing policy -> abort (migrating on top of it isn't supported yet);
+        - dry-run existing policy   -> flag, offer to promote it to enforced, then stop (a migration
+          needs an enforced baseline first).
+      When NOT assigning (propose-only, --export, or --no-auto-assign) the workspace's binding is
+      untouched, so we just warn and let the run create/export the (unbound) policy."""
     import sys
 
     from .core import acl as acl_core
@@ -237,24 +241,58 @@ def _acl_preflight(account, workspace_id, yes: bool) -> None:
                                "supported yet.")
 
     assigned_id, state = acl_core.assigned_ingress_state(account, workspace_id)
+    if state is None:
+        return
+
+    if not will_assign:
+        kind = "an ENFORCED" if state == "enforced" else "a DRY-RUN"
+        console.banner("warn", f"This workspace already has {kind} CBI ingress policy "
+                               f"('{assigned_id}'). This run isn't assigning the new policy, so that "
+                               "one stays in place — the new policy will be created/exported but not "
+                               "bound to the workspace.")
+        return
+
     if state == "enforced":
         console.banner("danger", f"This workspace already has an ENFORCED CBI ingress policy "
                                  f"('{assigned_id}'). Migrating on top of an existing enforced policy "
-                                 "isn't supported yet (it would need to intersect with it) — aborting.")
+                                 "isn't supported yet — aborting.")
         raise typer.Exit(code=1)
-    if state == "dry_run":
-        console.banner("warn", f"This workspace has a DRY-RUN CBI ingress policy ('{assigned_id}') "
-                               "with no enforced ingress. A migration needs an enforced baseline first.")
-        if not yes and sys.stdin.isatty() and typer.confirm(
-                typer.style(f"Promote '{assigned_id}' from dry-run to enforced now?", fg="yellow"),
-                default=False):
-            with console.status("Promoting policy to enforced…"):
-                acl_core.promote_dry_run_to_enforced(
-                    account, assigned_id, note=lambda m: console.banner("info", m))
-            console.banner("info", "Promoted to enforced. Re-run `migrate-acl` to continue the "
-                                   "migration now that an enforced baseline exists.")
-        console.banner("info", "Migration cancelled.")
-        raise typer.Exit(code=0)
+
+    # dry-run only, and we're about to assign a replacement
+    console.banner("warn", f"This workspace has a DRY-RUN CBI ingress policy ('{assigned_id}') with "
+                           "no enforced ingress. A migration needs an enforced baseline first.")
+    if not yes and sys.stdin.isatty() and typer.confirm(
+            typer.style(f"Promote '{assigned_id}' from dry-run to enforced now?", fg="yellow"),
+            default=False):
+        with console.status("Promoting policy to enforced…"):
+            acl_core.promote_dry_run_to_enforced(
+                account, assigned_id, note=lambda m: console.banner("info", m))
+        console.banner("info", "Promoted to enforced. Re-run `migrate-acl` to continue the "
+                               "migration now that an enforced baseline exists.")
+    console.banner("info", "Migration cancelled.")
+    raise typer.Exit(code=0)
+
+
+def _write_json_export(path: str, payload: dict) -> str:
+    """Write `payload` as pretty JSON to `path`, and return the final path written.
+    If `path` is a directory (or ends with a separator), write `<network_policy_id>.json` inside it;
+    create missing parent dirs; and turn write failures into a clean error instead of a traceback."""
+    import json
+    import os
+    from pathlib import Path
+
+    dest = Path(path).expanduser()
+    if dest.is_dir() or path.endswith(("/", os.sep)):
+        name = payload.get("network_policy_id") or "network-policy"
+        dest = dest / f"{name}.json"
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with dest.open("w") as f:
+            json.dump(payload, f, indent=2)
+    except OSError as e:
+        console.banner("danger", f"Couldn't write --export to '{path}': {e}")
+        raise typer.Exit(code=1) from None
+    return str(dest)
 
 
 def _note_policy_name(name_prefix: str, policy_name: str) -> None:
@@ -295,6 +333,18 @@ def _confirm_write(cfg_mode: str, yes: bool) -> bool:
     return typer.confirm(
         typer.style("Review the proposed rules above. Create/apply the policy now?", fg="yellow"),
         default=False)
+
+
+def _checkpoint(yes: bool) -> None:
+    """Step-through pause after a results/preview section: let the user review it and choose whether
+    to continue. Aborts the run cleanly (exit 0) on 'n'. On by default; skipped with --yes and in
+    non-interactive/scripted runs (so scripting and the guided flow are unaffected)."""
+    import sys
+    if yes or not sys.stdin.isatty():
+        return
+    if not typer.confirm(typer.style("Continue to the next step?", fg="yellow"), default=True):
+        console.banner("info", "Stopped — nothing further was done.")
+        raise typer.Exit(code=0)
 
 
 def _maybe_disable_ip_acls(disable: bool, results: list[dict], workspace_client) -> None:
@@ -365,7 +415,10 @@ def ingress(
     policy_action: Action = typer.Option(Action.create_new, help="Create new or add to existing."),
     existing_policy_id: str = typer.Option("", help="Target id for add_to_existing."),
     auto_assign: bool = typer.Option(False, help="Bind the workspace(s) to the policy."),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the interactive review gate."),
+    yes: bool = typer.Option(
+        False, "--yes", "-y",
+        help="Non-interactive mode: skip all prompts — the step-through pauses between sections and "
+             "the review/write gates. Use for scripted runs."),
 ):
     """Build (and optionally apply) a context-based ingress (CBI) allow-list."""
     from .config import THREAT_FEEDS as ALL_FEEDS
@@ -418,7 +471,10 @@ def egress(
     policy_action: Action = typer.Option(Action.create_new, help="Create new or add to existing."),
     existing_policy_id: str = typer.Option("", help="Target id for add_to_existing."),
     auto_assign: bool = typer.Option(False, help="Bind the workspace(s) to the policy."),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the interactive review gate."),
+    yes: bool = typer.Option(
+        False, "--yes", "-y",
+        help="Non-interactive mode: skip all prompts — the step-through pauses between sections and "
+             "the review/write gates. Use for scripted runs."),
 ):
     """Build (and optionally apply) a serverless egress (SEG) allow-list."""
     cfg = EgressConfig(
@@ -440,7 +496,10 @@ def migrate_acl(
     policy_name: str = typer.Option(
         "", help="Policy id for the new policy. If omitted you'll be prompted (blank there = use the "
                  "profile name). Normalised: lowercased, non-alphanumerics → '-', length-capped."),
-    egress_policy: AclEgress = typer.Option(AclEgress.allow_all, help="Egress set on create."),
+    egress_policy: AclEgress = typer.Option(
+        AclEgress.dry_run,
+        help="Egress block set when creating the policy: allow_all (no egress restriction) / dry_run "
+             "(restricted, log-only — default) / restricted (enforced, blocks all egress)."),
     auto_assign: bool = typer.Option(True, help="Bind this workspace to the new policy."),
     disable_existing_ip_acls: bool = typer.Option(
         False, help="After creating AND assigning the policy, disable this workspace's IP access "
@@ -454,7 +513,10 @@ def migrate_acl(
     account_profile: str | None = typer.Option(
         None, help="Profile for account-level calls (apply/identity). Defaults to unified auth."),
     create_policy: bool = typer.Option(False, help="Master switch: write the policy."),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the interactive review gate."),
+    yes: bool = typer.Option(
+        False, "--yes", "-y",
+        help="Non-interactive mode: skip all prompts — the step-through pauses between sections and "
+             "the review/write gates. Use for scripted runs."),
 ):
     """Recreate this workspace's existing IP access list as a CBI policy, verbatim."""
     cfg = AclConfig(
@@ -552,6 +614,7 @@ def _run_ingress(cfg: IngressConfig, conn: Connection, yes: bool) -> None:
         analysis = ing.analyze(cfg, sconn, wc, on_step=_step)
 
     render.ingress_analysis(analysis, cfg)
+    _checkpoint(yes)
 
     identity_resolution = None
     if cfg.scope_identity:
@@ -566,6 +629,7 @@ def _run_ingress(cfg: IngressConfig, conn: Connection, yes: bool) -> None:
     render.ingress_preview(previews, cfg, analysis)
     if previews:
         console.responsibility_warning("source IP addresses / CIDRs")
+    _checkpoint(yes)
 
     if not cfg.apply.create_policy:
         console.banner("info", "Propose-only run (no --create-policy). Nothing was written.")
@@ -616,10 +680,12 @@ def _run_egress(cfg: EgressConfig, conn: Connection, yes: bool) -> None:
         analysis = eg.analyze(cfg, sconn, on_step=_step, this_workspace_id=this_ws)
 
     render.egress_analysis(analysis)
+    _checkpoint(yes)
     previews = eg.preview_blocks(analysis, cfg, note=lambda m: console.banner("warn", m))
     render.egress_preview(previews, cfg)
     if previews:
         console.responsibility_warning("FQDNs and storage destinations")
+    _checkpoint(yes)
 
     if not cfg.apply.create_policy:
         console.banner("info", "Propose-only run (no --create-policy). Nothing was written.")
@@ -664,7 +730,8 @@ def _run_acl(cfg: AclConfig, conn: Connection, yes: bool) -> None:
     _ensure_account_id(conn, "Migrating an IP ACL (checks the workspace's existing policy + PAS)")
     account = auth.account_client(conn)
     ws_id = auth.this_workspace_id(conn)
-    _acl_preflight(account, ws_id, yes)
+    # An existing assigned policy is only replaced if we're going to assign the new one.
+    _acl_preflight(account, ws_id, will_assign=cfg.create_policy and cfg.auto_assign, yes=yes)
 
     analysis = acl_core.analyze(cfg, wc)
     render.acl_analysis(analysis, cfg)
@@ -675,17 +742,17 @@ def _run_acl(cfg: AclConfig, conn: Connection, yes: bool) -> None:
             raise typer.Exit(code=1)
         console.banner("info", msg)
         return
+    _checkpoint(yes)
 
     preview = acl_core.preview_block(analysis, cfg, note=lambda m: console.banner("info", m))
     render.acl_preview(preview, cfg)
+    render.acl_egress_note(cfg.egress_policy)
     console.responsibility_warning("IP access list entries")
 
     if cfg.export:
-        import json
-        payload = acl_core.policy_payload(analysis, cfg, conn.account_id)
-        with open(cfg.export, "w") as f:
-            json.dump(payload, f, indent=2)
-        console.banner("success", f"Wrote proposed network-policy JSON to {cfg.export}.")
+        dest = _write_json_export(cfg.export, acl_core.policy_payload(analysis, cfg, conn.account_id))
+        console.banner("success", f"Wrote proposed network-policy JSON to {dest}.")
+    _checkpoint(yes)
 
     if not cfg.create_policy:
         console.banner("info", "Propose-only run (no --create-policy). Nothing was written.")

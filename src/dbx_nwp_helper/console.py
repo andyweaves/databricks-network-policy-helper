@@ -85,7 +85,8 @@ def decisions_panel(title: str, rows: list[tuple[str, Any, str]]) -> None:
     table.add_column("Value", style="value")
     table.add_column("Meaning", style="muted")
     for name, value, meaning in rows:
-        table.add_row(name, _fmt_value(value), meaning)
+        # Show the dash form (matching the actual CLI flags) so a copied name works as `--<name>`.
+        table.add_row(name.replace("_", "-"), _fmt_value(value), meaning)
     console.print(Panel(table, title=f"[heading]{title}[/heading]", border_style="info"))
 
 

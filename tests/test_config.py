@@ -125,3 +125,8 @@ def test_policy_name_defaults_blank():
     assert IngressConfig().policy_name == ""
     assert EgressConfig().policy_name == ""
     assert AclConfig().policy_name == ""
+
+
+def test_acl_egress_policy_defaults_to_dry_run():
+    from dbx_nwp_helper.config import AclConfig
+    assert AclConfig().egress_policy == "dry_run"

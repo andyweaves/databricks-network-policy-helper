@@ -128,7 +128,7 @@ class AclConfig:
     # Policy id for the new policy. Explicit (--policy-name) or, when left blank, the CLI resolves it
     # to the profile name (falling back to the workspace id). Slugified + length-capped.
     policy_name: str = ""
-    egress_policy: str = "allow_all"   # allow_all | dry_run | restricted
+    egress_policy: str = "dry_run"   # allow_all | dry_run | restricted (dry_run = log-only, safe)
     auto_assign: bool = True
     create_policy: bool = False
     # See IngressConfig.disable_existing_ip_acls — same gated behaviour for the migrate command.
