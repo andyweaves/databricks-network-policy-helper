@@ -92,32 +92,67 @@ def workspace_pas_attached(account, workspace_id) -> bool | None:
         return None
 
 
-def _ingress_restrictive(ingress) -> bool:
-    """True if an ingress block actually restricts traffic — i.e. any of its sub-blocks is in
-    RESTRICTED_ACCESS mode, or carries allow/deny rules. A block whose sub-blocks are all in their
-    permissive defaults (public FULL_ACCESS, private ALLOW_ALL_REGISTERED_ENDPOINTS, cross-workspace
-    FULL_ACCESS/LEGACY_MODE) with no rules is effectively 'allow all' and does NOT count — so an
-    account's baseline `default-policy` (allow-all) never trips the pre-check."""
+def _block_restrictive(blk) -> bool:
+    """True if a single access sub-block restricts traffic — RESTRICTED_ACCESS mode, or any
+    allow/deny rules. Permissive defaults (FULL_ACCESS / ALLOW_ALL_REGISTERED_ENDPOINTS / LEGACY_MODE
+    with no rules) return False."""
+    if blk is None:
+        return False
+    rm = getattr(blk, "restriction_mode", None)
+    if str(getattr(rm, "value", rm) or "") == "RESTRICTED_ACCESS":
+        return True
+    return bool(getattr(blk, "allow_rules", None) or getattr(blk, "deny_rules", None))
+
+
+def public_restrictive(ingress) -> bool:
+    """True if the ingress block's public_access (source-IP) sub-block is restrictive."""
+    return ingress is not None and _block_restrictive(getattr(ingress, "public_access", None))
+
+
+def private_or_xws_restrictive(ingress) -> bool:
+    """True if the ingress block's private_access (PrivateLink) or cross_workspace_access sub-block
+    is restrictive — the parts the public-IP helpers don't build and can't yet preserve."""
     if ingress is None:
         return False
-    for attr in ("public_access", "private_access", "cross_workspace_access"):
-        blk = getattr(ingress, attr, None)
-        if blk is None:
-            continue
-        rm = getattr(blk, "restriction_mode", None)
-        if str(getattr(rm, "value", rm) or "") == "RESTRICTED_ACCESS":
-            return True
-        if getattr(blk, "allow_rules", None) or getattr(blk, "deny_rules", None):
-            return True
-    return False
+    return (_block_restrictive(getattr(ingress, "private_access", None))
+            or _block_restrictive(getattr(ingress, "cross_workspace_access", None)))
 
 
-def assigned_ingress_state(account, workspace_id) -> tuple[str | None, str | None]:
-    """Inspect the network policy currently assigned to the workspace. Returns
-    (assigned_policy_id, ingress_state) where ingress_state is 'enforced' (a *restrictive* enforced
-    ingress block), 'dry_run' (a *restrictive* dry-run ingress block), or None — no policy assigned,
-    or the assigned policy is effectively allow-all (no restrictive rules to preserve, so migrating
-    over it loses nothing). Best-effort."""
+def _ingress_restrictive(ingress) -> bool:
+    """True if an ingress block restricts traffic in any sub-block (public / private / cross-
+    workspace). All-permissive blocks (the account's baseline `default-policy`) return False."""
+    return public_restrictive(ingress) or private_or_xws_restrictive(ingress)
+
+
+def egress_restrictive(egress) -> bool:
+    """True if a policy's egress block restricts outbound traffic — RESTRICTED_ACCESS mode, or any
+    allow/block destination lists. A FULL_ACCESS egress (the permissive default an ingress-only
+    policy carries) — or None — returns False."""
+    if egress is None:
+        return False
+    na = getattr(egress, "network_access", None)
+    if na is None:
+        return False
+    rm = getattr(na, "restriction_mode", None)
+    if str(getattr(rm, "value", rm) or "") == "RESTRICTED_ACCESS":
+        return True
+    return bool(getattr(na, "allowed_internet_destinations", None)
+                or getattr(na, "allowed_storage_destinations", None)
+                or getattr(na, "blocked_internet_destinations", None))
+
+
+def egress_enforced(egress) -> bool:
+    """True if a restrictive egress block is ENFORCED (blocking). A DRY_RUN (or unset) enforcement
+    mode is log-only. Only meaningful alongside egress_restrictive()."""
+    na = getattr(egress, "network_access", None)
+    pe = getattr(na, "policy_enforcement", None) if na is not None else None
+    mode = getattr(pe, "enforcement_mode", None)
+    return str(getattr(mode, "value", mode) or "") == "ENFORCED"
+
+
+def assigned_policy(account, workspace_id) -> tuple[str | None, object | None]:
+    """(assigned_policy_id, full policy object) for the workspace — (id, None) if the policy read
+    failed, (None, None) if nothing is assigned. Best-effort."""
     try:
         opt = account.workspace_network_configuration.get_workspace_network_option_rpc(
             workspace_id=int(workspace_id))
@@ -127,8 +162,19 @@ def assigned_ingress_state(account, workspace_id) -> tuple[str | None, str | Non
     if not policy_id:
         return None, None
     try:
-        pol = account.network_policies.get_network_policy_rpc(network_policy_id=policy_id)
+        return policy_id, account.network_policies.get_network_policy_rpc(network_policy_id=policy_id)
     except Exception:  # noqa: BLE001
+        return policy_id, None
+
+
+def assigned_ingress_state(account, workspace_id) -> tuple[str | None, str | None]:
+    """Inspect the network policy currently assigned to the workspace. Returns
+    (assigned_policy_id, ingress_state) where ingress_state is 'enforced' (a *restrictive* enforced
+    ingress block), 'dry_run' (a *restrictive* dry-run ingress block), or None — no policy assigned,
+    or the assigned policy is effectively allow-all (no restrictive rules to preserve, so migrating
+    over it loses nothing). Best-effort."""
+    policy_id, pol = assigned_policy(account, workspace_id)
+    if pol is None:
         return policy_id, None
     if _ingress_restrictive(getattr(pol, "ingress", None)):
         return policy_id, "enforced"
@@ -175,7 +221,7 @@ def resolve_policy_id(cfg: AclConfig, workspace_id) -> str:
 
 def build_block(analysis: AclAnalysis, cfg: AclConfig, note: Note = lambda _m: None):
     return policy.build_ingress_block(
-        analysis.allow_specs, analysis.deny_specs, cfg.policy_mode, "", note)
+        analysis.allow_specs, analysis.deny_specs, cfg.policy_mode, note)
 
 
 def build_account_policy(analysis: AclAnalysis, cfg: AclConfig, account_id: str, policy_id: str,

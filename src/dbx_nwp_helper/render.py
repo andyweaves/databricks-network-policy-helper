@@ -32,10 +32,10 @@ def ingress_decisions(cfg: IngressConfig) -> None:
          "current_workspace / per_workspace / all_workspaces."),
         ("policy_mode", cfg.policy_mode, "dry_run=log-only; enforce=blocking."),
         ("threat_deny_rules", cfg.threat_deny_rules, "Add deny rules from threat intel."),
-        ("name_prefix", cfg.name_prefix, "Prefix for policy names + rule labels."),
-        ("policy_name", cfg.policy_name, "Explicit policy id (blank = derived from name_prefix)."),
+        ("policy_name", cfg.policy_name,
+         "Policy id (single scope) / prefix (per_workspace); blank = profile name."),
         ("ip_acl_handling", cfg.ip_acl_handling, "Existing IP ACL treatment."),
-        ("deny_denied_ips", cfg.deny_denied_ips, "Deny source IPs currently seen blocked (403)."),
+        ("deny_denied_ips", cfg.deny_denied_ips, "Deny source IPs recently seen blocked (403)."),
         ("disable_existing_ip_acls", cfg.disable_existing_ip_acls,
          "After apply, turn off the workspace's IP access lists (needs create + assign)."),
         ("create_policy", cfg.apply.create_policy, "Master switch: nothing is written unless true."),
@@ -56,8 +56,8 @@ def egress_decisions(cfg: EgressConfig) -> None:
         ("policy_mode", cfg.policy_mode, "dry_run=log-only; enforce=blocking."),
         ("block_threat_domains", cfg.block_threat_domains, "off / matched_only / all."),
         ("threat_feed", cfg.threat_feed, "Threat-domain feed (abuse.ch ThreatFox)."),
-        ("name_prefix", cfg.name_prefix, "Prefix for policy names."),
-        ("policy_name", cfg.policy_name, "Explicit policy id (blank = derived from name_prefix)."),
+        ("policy_name", cfg.policy_name,
+         "Policy id (single scope) / prefix (per_workspace); blank = profile name."),
         ("create_policy", cfg.apply.create_policy, "Master switch: nothing is written unless true."),
         ("policy_action", cfg.apply.policy_action, "create_new or add_to_existing."),
         ("existing_policy_id", cfg.apply.existing_policy_id, "Target id for add_to_existing."),
@@ -110,11 +110,16 @@ def ingress_analysis(analysis: IngressAnalysis, cfg: IngressConfig | None = None
                           "Observed IPs on a threat feed")
 
     if not analysis.denied_requests.empty:
-        console.rule("Currently-denied requests (403 / IpAccessDenied)")
+        console.rule("Recently denied requests (403 / IpAccessDenied)")
         console.dataframe(_trim(analysis.denied_requests,
                                 ["source_ip", "denied_events", "principals", "first_denied",
                                  "last_denied"]),
-                          "Source IPs currently blocked by the IP ACL")
+                          "Source IPs recently blocked by the IP ACL")
+        if cfg is not None and cfg.deny_denied_ips:
+            console.banner("info", "These will be added as deny rules (--deny-denied-ips is on).")
+        else:
+            console.banner("info", "Shown for context — these are NOT added as deny rules. Pass "
+                                   "--deny-denied-ips to block them.")
 
 
 def _explain_empty_candidates(funnel: dict, cfg: IngressConfig | None) -> None:

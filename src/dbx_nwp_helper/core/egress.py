@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 import pandas as pd
 
 from ..config import (
+    DEFAULT_NAME_PREFIX,
     MAX_INTERNET_DESTINATIONS,
     MAX_STORAGE_DESTINATIONS,
     EgressConfig,
@@ -415,6 +416,31 @@ def preview_blocks(analysis: EgressAnalysis, cfg: EgressConfig, note: Note = lam
             for tgt, block in build_blocks(analysis, cfg, note).items()}
 
 
+def _single_policy_id(cfg: EgressConfig, profile, this_workspace_id) -> str:
+    """The policy id for a single-policy scope (current_workspace / all_workspaces): the
+    add_to_existing target, else the resolved policy name (profile/workspace-id default)."""
+    from . import policy
+    if cfg.apply.policy_action == "add_to_existing":
+        return cfg.apply.existing_policy_id
+    name = cfg.policy_name or profile or str(this_workspace_id)
+    return policy.policy_name("", explicit=name)
+
+
+def export_payload(analysis: EgressAnalysis, cfg: EgressConfig, account_id: str, this_workspace_id,
+                   profile: str | None = None) -> dict:
+    """The proposed network policy as a plain dict (for --export / a curl body): the egress block +
+    a permissive FULL_ACCESS ingress default. Single-policy scopes only."""
+    from databricks.sdk.service.settings import AccountNetworkPolicy
+
+    from . import policy
+    blocks = build_blocks(analysis, cfg)
+    egress_block = blocks.get(ALL_WORKSPACES) or (next(iter(blocks.values())) if blocks else None)
+    np = AccountNetworkPolicy(
+        account_id=account_id, network_policy_id=_single_policy_id(cfg, profile, this_workspace_id),
+        ingress=policy.build_full_access_ingress(), egress=egress_block)
+    return np.as_dict()
+
+
 def apply(analysis: EgressAnalysis, cfg: EgressConfig, account, account_id: str,
           this_workspace_id, profile: str | None = None, note: Note = lambda _m: None) -> list[dict]:
     from . import policy
@@ -423,16 +449,13 @@ def apply(analysis: EgressAnalysis, cfg: EgressConfig, account, account_id: str,
     add_to_existing = cfg.apply.policy_action == "add_to_existing"
     results = []
     for tgt in sorted(blocks, key=str):
-        if add_to_existing:
-            pid = cfg.apply.existing_policy_id
-        elif cfg.policy_name and tgt == ALL_WORKSPACES:
-            pid = policy.policy_name(cfg.name_prefix, explicit=cfg.policy_name)
-        elif tgt != ALL_WORKSPACES:
-            pid = policy.policy_name(cfg.name_prefix, workspace_id=int(tgt))
-        elif cfg.policy_scope == "current_workspace":
-            pid = policy.policy_name(cfg.name_prefix, suffix=profile or str(this_workspace_id))
+        # per_workspace fans out to <prefix>-ws-<id>; every single-policy case (incl. add_to_existing
+        # and --policy-name) resolves via _single_policy_id.
+        if tgt == ALL_WORKSPACES:
+            pid = _single_policy_id(cfg, profile, this_workspace_id)
         else:
-            pid = policy.policy_name(cfg.name_prefix)
+            prefix = cfg.policy_name or profile or DEFAULT_NAME_PREFIX
+            pid = policy.policy_name(prefix, workspace_id=int(tgt))
         bind_ws = this_workspace_id if tgt == ALL_WORKSPACES else int(tgt)
         try:
             action, effective_id = policy.apply_egress(

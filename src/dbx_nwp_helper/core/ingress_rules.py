@@ -11,7 +11,7 @@ import ipaddress
 from collections import defaultdict
 from collections.abc import Callable
 
-from ..config import MAX_DENY_CIDRS, MAX_POLICIES_PER_ACCOUNT, IngressConfig
+from ..config import DEFAULT_NAME_PREFIX, MAX_DENY_CIDRS, MAX_POLICIES_PER_ACCOUNT, IngressConfig
 from . import limits, policy
 from .ingress import ALL_WORKSPACES, IngressAnalysis
 
@@ -27,7 +27,7 @@ def _slug(text) -> str:
 
 
 def _group_label(row) -> str:
-    """Owner-grouped allow-rule label (the policy name already carries the name_prefix, so rule
+    """Owner-grouped allow-rule label (the policy name already identifies the policy, so rule
     labels don't repeat it):
       (a) databricks-<cloud>     when the group is Databricks-owned
       (b) <cloud>-<rdap_owner>   when it's in a cloud-provider range
@@ -102,6 +102,7 @@ def build_rules(analysis: IngressAnalysis, cfg: IngressConfig, identity_resoluti
     skipped_ipv6 = 0
     excluded_flagged = 0
     excluded_unresolved = 0
+    identity_scoped_rules = 0
     use_traffic_rules = cfg.ip_acl_handling != "migrate"
 
     if use_traffic_rules and not suggestions.empty:
@@ -147,6 +148,7 @@ def build_rules(analysis: IngressAnalysis, cfg: IngressConfig, identity_resoluti
                 if deduped:
                     spec["identity_type"] = "SELECTED_IDENTITIES"
                     spec["identities"] = deduped
+                    identity_scoped_rules += 1
                 else:
                     # Identity scoping was requested but none of this group's principals resolved
                     # (they've likely left the workspace/org). Falling back to ALL_USERS would open
@@ -189,6 +191,13 @@ def build_rules(analysis: IngressAnalysis, cfg: IngressConfig, identity_resoluti
     if cfg.policy_scope == "per_workspace" and len(policies) > MAX_POLICIES_PER_ACCOUNT:
         note(f"{len(policies)} per-workspace policies > {MAX_POLICIES_PER_ACCOUNT} account limit — "
              "consider all_workspaces or consolidating workspaces.")
+
+    if identity_scoped_rules:
+        note(f"Identity scoping matched specific principals for {identity_scoped_rules} rule(s), but "
+             "the CBI API can't attach per-identity authentication to Apps / Lakebase / "
+             "all-destinations rules — those rules will allow all users & service principals from "
+             "the listed IPs. The IP allow-list still applies, and groups whose principals couldn't "
+             "be resolved were still excluded.")
 
     analysis.excluded_flagged = excluded_flagged
     analysis.excluded_unresolved = excluded_unresolved
@@ -297,6 +306,30 @@ def _threat_deny_specs(analysis: IngressAnalysis, cfg: IngressConfig, note: Note
 
 
 # ------------------------------------------------------------------------------- preview + apply
+def _single_policy_id(cfg: IngressConfig, profile: str | None, this_workspace_id) -> str:
+    """The policy id for a single-policy scope (current_workspace / all_workspaces): the
+    add_to_existing target, else the resolved policy name (profile/workspace-id default)."""
+    if cfg.apply.policy_action == "add_to_existing":
+        return cfg.apply.existing_policy_id
+    name = cfg.policy_name or profile or str(this_workspace_id)
+    return policy.policy_name("", explicit=name)
+
+
+def export_payload(policies: dict, cfg: IngressConfig, account_id: str, this_workspace_id,
+                   profile: str | None = None, note: Note = lambda _m: None) -> dict:
+    """The proposed network policy as a plain dict (for --export / a curl body): the single-policy
+    ingress block + a permissive FULL_ACCESS egress default. Single-policy scopes only."""
+    from databricks.sdk.service.settings import AccountNetworkPolicy
+    mode_label = {"dry_run": "dry-run", "enforce": "enforced"}[cfg.policy_mode]
+    p = policies.get(ALL_WORKSPACES) or next(iter(policies.values()))
+    block = policy.build_ingress_block(p["allow"], p["deny"], mode_label, note)
+    pid = _single_policy_id(cfg, profile, this_workspace_id)
+    np = AccountNetworkPolicy(account_id=account_id, network_policy_id=pid,
+                              egress=policy.build_full_access_egress())
+    setattr(np, cfg.policy_mode_target, block)
+    return np.as_dict()
+
+
 def preview_blocks(policies: dict, cfg: IngressConfig, note: Note = lambda _m: None) -> dict:
     """Build the SDK ingress block per target and return {target -> block_dict} for display."""
     mode_label = {"dry_run": "dry-run", "enforce": "enforced"}[cfg.policy_mode]
@@ -305,7 +338,7 @@ def preview_blocks(policies: dict, cfg: IngressConfig, note: Note = lambda _m: N
         allow, deny = policies[tgt]["allow"], policies[tgt]["deny"]
         if not (allow or deny):
             continue
-        block = policy.build_ingress_block(allow, deny, mode_label, cfg.name_prefix, note)
+        block = policy.build_ingress_block(allow, deny, mode_label, note)
         out[tgt] = {cfg.policy_mode_target: block.as_dict()}
     return out
 
@@ -318,18 +351,11 @@ def apply(policies: dict, cfg: IngressConfig, account, account_id: str, this_wor
     results = []
 
     if cfg.policy_scope != "per_workspace":
-        # A single policy: current_workspace (named <prefix>-<profile>) or all_workspaces (<prefix>).
+        # A single policy named from the resolved policy name (current_workspace / all_workspaces).
         p = policies.get(ALL_WORKSPACES) or next(iter(policies.values()))
         add_to_existing = cfg.apply.policy_action == "add_to_existing"
-        if add_to_existing:
-            single_id = cfg.apply.existing_policy_id
-        elif cfg.policy_name:
-            single_id = policy.policy_name(cfg.name_prefix, explicit=cfg.policy_name)
-        elif cfg.policy_scope == "current_workspace":
-            single_id = policy.policy_name(cfg.name_prefix, suffix=profile or str(this_workspace_id))
-        else:
-            single_id = policy.policy_name(cfg.name_prefix)
-        block = policy.build_ingress_block(p["allow"], p["deny"], mode_label, cfg.name_prefix, note)
+        single_id = _single_policy_id(cfg, profile, this_workspace_id)
+        block = policy.build_ingress_block(p["allow"], p["deny"], mode_label, note)
         action, effective_id, sent = policy.apply_ingress(
             account, account_id, single_id, block, target_attr, must_exist=add_to_existing)
         result = {"target": cfg.policy_scope, "action": action, "policy_id": effective_id, "sent": sent}
@@ -339,10 +365,11 @@ def apply(policies: dict, cfg: IngressConfig, account, account_id: str, this_wor
         results.append(result)
     else:
         ws_targets = sorted(t for t in policies if t != ALL_WORKSPACES and int(t) != 0)
+        prefix = cfg.policy_name or profile or DEFAULT_NAME_PREFIX
         for tgt in ws_targets:
-            pid = policy.policy_name(cfg.name_prefix, workspace_id=tgt)
+            pid = policy.policy_name(prefix, workspace_id=tgt)
             p = policies[tgt]
-            block = policy.build_ingress_block(p["allow"], p["deny"], mode_label, cfg.name_prefix, note)
+            block = policy.build_ingress_block(p["allow"], p["deny"], mode_label, note)
             try:
                 action, effective_id, _ = policy.apply_ingress(
                     account, account_id, pid, block, target_attr)

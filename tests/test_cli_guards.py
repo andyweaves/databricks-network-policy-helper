@@ -242,24 +242,24 @@ def test_confirm_workspace_decline_aborts(monkeypatch):
 
 
 def test_note_policy_name_shows_normalized_id(capsys):
-    cli._note_policy_name("dbx-nwp", "My Policy")
+    cli._note_policy_name("My Policy")
     assert "my-policy" in capsys.readouterr().out
 
 
 def test_note_policy_name_silent_when_clean_or_blank(capsys):
-    cli._note_policy_name("dbx-nwp", "clean-name")   # already normalised -> no notice
-    cli._note_policy_name("dbx-nwp", "")             # not set -> no notice
+    cli._note_policy_name("clean-name")   # already normalised -> no notice
+    cli._note_policy_name("")             # not set -> no notice
     assert capsys.readouterr().out == ""
 
 
-def test_resolve_acl_policy_name_keeps_explicit():
+def test_resolve_policy_name_keeps_explicit():
     from dbx_nwp_helper.config import AclConfig, Connection
     cfg = AclConfig(policy_name="chosen")
-    cli._resolve_acl_policy_name(cfg, Connection(profile="p"), object(), yes=True)
+    cli._resolve_policy_name(cfg, Connection(profile="p"), object(), yes=True)
     assert cfg.policy_name == "chosen"
 
 
-def test_resolve_acl_policy_name_uses_profile_when_blank_and_noninteractive():
+def test_resolve_policy_name_uses_profile_when_blank_and_noninteractive():
     from dbx_nwp_helper.config import AclConfig, Connection
 
     class _WC:
@@ -267,8 +267,29 @@ def test_resolve_acl_policy_name_uses_profile_when_blank_and_noninteractive():
             return 42
 
     cfg = AclConfig()
-    cli._resolve_acl_policy_name(cfg, Connection(profile="myprof"), _WC(), yes=True)
+    cli._resolve_policy_name(cfg, Connection(profile="myprof"), _WC(), yes=True)
     assert cfg.policy_name == "myprof"  # blank -> profile name (no prompt under --yes)
+
+
+def test_resolve_policy_name_skips_add_to_existing():
+    # add_to_existing takes its id from --existing-policy-id, so no name is resolved.
+    from dbx_nwp_helper.config import Connection, IngressConfig
+    cfg = IngressConfig()
+    cfg.apply.policy_action = "add_to_existing"
+    cli._resolve_policy_name(cfg, Connection(profile="myprof"), object(), yes=True)
+    assert cfg.policy_name == ""
+
+
+def test_resolve_policy_name_ingress_defaults_to_profile():
+    from dbx_nwp_helper.config import Connection, IngressConfig
+
+    class _WC:
+        def get_workspace_id(self):
+            return 7
+
+    cfg = IngressConfig(policy_scope="per_workspace")
+    cli._resolve_policy_name(cfg, Connection(profile="egress-prof"), _WC(), yes=True)
+    assert cfg.policy_name == "egress-prof"  # per_workspace uses it as the prefix
 
 
 class _AclWorkspace:
@@ -430,9 +451,147 @@ def test_write_json_export_bad_path_errors_cleanly(tmp_path):
     assert e.value.exit_code == 1
 
 
-def test_ingress_policy_name_with_per_workspace_is_rejected():
+def _fake_pol(ingress=None, dry=None, egress=None):
+    return type("P", (), {"ingress": ingress, "ingress_dry_run": dry, "egress": egress})()
+
+
+def test_ingress_preflight_aborts_on_pas(monkeypatch):
+    import typer
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.workspace_pas_attached", lambda a, w: True)
+    with pytest.raises(typer.Exit) as e:
+        cli._ingress_preflight(object(), 42, "new-id", yes=True)
+    assert e.value.exit_code == 1
+
+
+def test_ingress_preflight_aborts_on_private_config(monkeypatch):
+    import typer
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.workspace_pas_attached", lambda a, w: False)
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.assigned_policy",
+                        lambda a, w: ("p1", _fake_pol(ingress="X")))
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.private_or_xws_restrictive", lambda ing: ing == "X")
+    with pytest.raises(typer.Exit) as e:
+        cli._ingress_preflight(object(), 42, "new-id", yes=True)
+    assert e.value.exit_code == 1
+
+
+def test_ingress_preflight_aborts_on_enforced_public(monkeypatch):
+    import typer
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.workspace_pas_attached", lambda a, w: False)
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.assigned_policy",
+                        lambda a, w: ("p1", _fake_pol(ingress="ENF")))
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.private_or_xws_restrictive", lambda ing: False)
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.public_restrictive", lambda ing: ing == "ENF")
+    with pytest.raises(typer.Exit) as e:
+        cli._ingress_preflight(object(), 42, "new-id", yes=True)
+    assert e.value.exit_code == 1
+
+
+def test_ingress_preflight_warns_on_dry_run_public_then_proceeds(monkeypatch, capsys):
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.workspace_pas_attached", lambda a, w: False)
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.assigned_policy",
+                        lambda a, w: ("p1", _fake_pol(ingress=None, dry="DRY")))
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.private_or_xws_restrictive", lambda ing: False)
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.public_restrictive", lambda ing: ing == "DRY")
+    cli._ingress_preflight(object(), 42, "new-id", yes=True)  # must not raise
+    assert "DRY-RUN" in capsys.readouterr().out
+
+
+def test_ingress_preflight_proceeds_when_clean(monkeypatch):
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.workspace_pas_attached", lambda a, w: False)
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.assigned_policy", lambda a, w: (None, None))
+    cli._ingress_preflight(object(), 42, "new-id", yes=True)  # must not raise
+
+
+def _egr(restricted=True, enforced=True):
+    """A fake egress block matching NetworkPolicyEgress.network_access shape."""
+    import types
+    na = types.SimpleNamespace(
+        restriction_mode="RESTRICTED_ACCESS" if restricted else "FULL_ACCESS",
+        allowed_internet_destinations=None, allowed_storage_destinations=None,
+        blocked_internet_destinations=None,
+        policy_enforcement=types.SimpleNamespace(
+            enforcement_mode="ENFORCED" if enforced else "DRY_RUN"))
+    return types.SimpleNamespace(network_access=na)
+
+
+def test_ingress_preflight_aborts_when_new_id_drops_enforced_egress(monkeypatch):
+    # A new ingress policy id rebinds the workspace to a FULL_ACCESS-egress policy, dropping the
+    # assigned policy's ENFORCED egress -> abort.
+    import typer
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.workspace_pas_attached", lambda a, w: False)
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.private_or_xws_restrictive", lambda ing: False)
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.public_restrictive", lambda ing: False)
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.assigned_policy",
+                        lambda a, w: ("p1", _fake_pol(egress=_egr(True, True))))
+    with pytest.raises(typer.Exit) as e:
+        cli._ingress_preflight(object(), 42, "different-id", yes=True)
+    assert e.value.exit_code == 1
+
+
+def test_ingress_preflight_same_id_keeps_egress(monkeypatch):
+    # Updating the SAME policy id preserves its egress, so an enforced egress must NOT abort.
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.workspace_pas_attached", lambda a, w: False)
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.private_or_xws_restrictive", lambda ing: False)
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.public_restrictive", lambda ing: False)
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.assigned_policy",
+                        lambda a, w: ("p1", _fake_pol(egress=_egr(True, True))))
+    cli._ingress_preflight(object(), 42, "p1", yes=True)  # same id -> must not raise
+
+
+def test_egress_preflight_aborts_on_enforced_egress(monkeypatch):
+    import typer
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.assigned_policy",
+                        lambda a, w: ("p1", _fake_pol(egress=_egr(True, True))))
+    with pytest.raises(typer.Exit) as e:
+        cli._egress_preflight(object(), 42, "new-id", yes=True)
+    assert e.value.exit_code == 1
+
+
+def test_egress_preflight_warns_on_dry_run_egress_then_proceeds(monkeypatch, capsys):
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.assigned_policy",
+                        lambda a, w: ("p1", _fake_pol(egress=_egr(True, enforced=False))))
+    cli._egress_preflight(object(), 42, "p1", yes=True)  # same id -> no opposite-direction check
+    assert "DRY-RUN egress" in capsys.readouterr().out
+
+
+def test_egress_preflight_proceeds_on_full_access(monkeypatch):
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.assigned_policy",
+                        lambda a, w: ("p1", _fake_pol(egress=_egr(restricted=False))))
+    cli._egress_preflight(object(), 42, "new-id", yes=True)  # must not raise
+
+
+def test_egress_preflight_aborts_when_new_id_drops_enforced_ingress(monkeypatch):
+    # New egress policy id rebinds to a FULL_ACCESS-ingress policy, dropping the assigned policy's
+    # enforced ingress -> abort.
+    import typer
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.public_restrictive", lambda ing: ing == "ENF")
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.private_or_xws_restrictive", lambda ing: False)
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.assigned_policy",
+                        lambda a, w: ("p1", _fake_pol(ingress="ENF", egress=_egr(restricted=False))))
+    with pytest.raises(typer.Exit) as e:
+        cli._egress_preflight(object(), 42, "different-id", yes=True)
+    assert e.value.exit_code == 1
+
+
+def test_egress_preflight_same_id_keeps_ingress(monkeypatch):
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.public_restrictive", lambda ing: ing == "ENF")
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.private_or_xws_restrictive", lambda ing: False)
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.assigned_policy",
+                        lambda a, w: ("p1", _fake_pol(ingress="ENF", egress=_egr(restricted=False))))
+    cli._egress_preflight(object(), 42, "p1", yes=True)  # same id -> must not raise
+
+
+def test_egress_preflight_proceeds_when_clean(monkeypatch):
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.assigned_policy", lambda a, w: (None, None))
+    cli._egress_preflight(object(), 42, "new-id", yes=True)  # must not raise
+
+
+def test_ingress_policy_name_with_add_to_existing_is_rejected():
+    # per_workspace + --policy-name is now allowed (name = prefix); add_to_existing still isn't (the
+    # id comes from --existing-policy-id).
     result = runner.invoke(cli.app, [
-        "ingress", "--profile", "test", "--policy-name", "x", "--policy-scope", "per_workspace"])
+        "ingress", "--profile", "test", "--policy-name", "x", "--create-policy",
+        "--policy-action", "add_to_existing", "--existing-policy-id", "some-id"])
     assert result.exit_code == 2
     assert "policy-name" in result.output
 

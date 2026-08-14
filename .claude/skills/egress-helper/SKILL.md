@@ -63,14 +63,31 @@ If the table is empty, no egress policy is logging yet — start with step 1.
 
 - `--lookback-days`, `--min-events`, `--source-type-filter`
 - `--enable-rdap` / `--no-enable-rdap`
-- `--name-prefix`, `--policy-mode` (**dry_run** default / enforce), `--policy-scope`
-  (**current_workspace** default / per_workspace / all_workspaces), `--block-threat-domains`,
-  `--threat-feed`
+- `--policy-name` (prompted if omitted, blank = the profile name; the policy id for single-policy
+  scopes, the prefix → `<name>-ws-<id>` for per_workspace), `--policy-mode`
+  (**dry_run** default / enforce), `--policy-scope` (**current_workspace** default / per_workspace /
+  all_workspaces), `--block-threat-domains`, `--threat-feed`
+- `--export <path>` — write the proposed `AccountNetworkPolicy` JSON (egress block + a `FULL_ACCESS`
+  ingress default) for curl / the REST API; a directory writes `<policy-id>.json` inside it.
+  Single-policy scopes only; works in propose-only mode.
 - `--account-id` (+ account-admin creds) — required to create/assign.
 - `--create-policy` (gate), `--policy-action` (`create_new` / `add_to_existing`),
   `--existing-policy-id`, `--auto-assign`. `add_to_existing` updates only the egress block of the
   supplied policy id (leaving its ingress intact) and needs a single-policy scope
-  (`current_workspace` or `all_workspaces`, not `per_workspace`).
+  (`current_workspace` or `all_workspaces`, not `per_workspace`); a brand-new egress-only policy gets
+  a permissive `FULL_ACCESS` ingress default.
+
+## Pre-checks (create + assign only)
+
+Mirroring the ingress helper, when the run will create **and** assign a single policy the CLI first
+inspects the workspace's currently-assigned policy and **aborts** rather than silently clobbering it:
+if that policy already has an **enforced** restrictive egress (replacing it isn't supported yet); a
+restrictive *dry-run* egress only warns (assigning replaces it). It also guards the **opposite
+direction** — if creating the policy under a **new** id would rebind the workspace and drop an
+existing restrictive **ingress** (the new egress policy carries a `FULL_ACCESS` ingress default), it
+aborts on an enforced ingress (warns on a dry-run one); use `add_to_existing` to keep it. Updating
+the same id in place preserves the other direction. An allow-all (`FULL_ACCESS`) assigned policy — or
+none — is fine. Skipped for `per_workspace` and `add_to_existing`.
 
 ## Limits & safety
 

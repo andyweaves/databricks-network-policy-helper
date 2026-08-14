@@ -2,9 +2,34 @@
 
 from __future__ import annotations
 
+import types
+
 import pandas as pd
 
 from dbx_nwp_helper import render
+
+
+def _analysis_with_denied():
+    empty = pd.DataFrame()
+    denied = pd.DataFrame([{"source_ip": "1.2.3.4", "denied_events": 3, "principals": "a@x.com",
+                            "first_denied": "d1", "last_denied": "d2"}])
+    return types.SimpleNamespace(candidates=empty, funnel=None, suggestions=empty,
+                                 threat_matches=empty, denied_requests=denied)
+
+
+def test_denied_requests_note_says_not_applied_when_flag_off(capsys):
+    from dbx_nwp_helper.config import IngressConfig
+    render.ingress_analysis(_analysis_with_denied(), IngressConfig(deny_denied_ips=False))
+    out = capsys.readouterr().out
+    assert "Recently denied requests" in out
+    assert "recently blocked by the IP ACL" in out
+    assert "NOT added as deny rules" in out
+
+
+def test_denied_requests_note_says_applied_when_flag_on(capsys):
+    from dbx_nwp_helper.config import IngressConfig
+    render.ingress_analysis(_analysis_with_denied(), IngressConfig(deny_denied_ips=True))
+    assert "will be added as deny rules" in capsys.readouterr().out
 
 
 def test_acl_egress_note_explains_each_option(capsys):

@@ -232,6 +232,20 @@ def test_egress_under_internet_limit_does_not_warn():
     assert notes == []
 
 
+def test_egress_export_payload_builds_full_policy():
+    # --export: egress block + a permissive FULL_ACCESS ingress default, single-policy id.
+    a = eg.EgressAnalysis(observed=pd.DataFrame(),
+                          targets={eg.ALL_WORKSPACES: {"s3": {}, "gcs": {}, "azure": {},
+                                                       "internet": {"api.openai.com": 5}}})
+    cfg = EgressConfig(enable_rdap=False, block_threat_domains="off", policy_scope="all_workspaces",
+                       policy_mode="enforce", policy_name="my-egress")
+    payload = eg.export_payload(a, cfg, "acc-1", this_workspace_id=42)
+    assert payload["network_policy_id"] == "my-egress"
+    assert payload["account_id"] == "acc-1"
+    assert "egress" in payload
+    assert payload["ingress"]["public_access"]["restriction_mode"] == "FULL_ACCESS"
+
+
 def test_egress_empty_produces_no_blocks(monkeypatch):
     monkeypatch.setattr("dbx_nwp_helper.sql.query", lambda _c, _t: pd.DataFrame(
         columns=["destination", "destination_type", "events", "workspace_ids", "resolved_ips"]))
@@ -452,6 +466,47 @@ def test_ingress_restrictive_matches_allow_all_vs_rules():
     # any sub-block in RESTRICTED_ACCESS -> restrictive
     assert acl_core._ingress_restrictive(_ingress(public_mode="RESTRICTED_ACCESS")) is True
     assert acl_core._ingress_restrictive(_ingress(private_mode="RESTRICTED_ACCESS")) is True
+
+
+def test_public_vs_private_restrictive_helpers():
+    assert acl_core.public_restrictive(_ingress(public_mode="RESTRICTED_ACCESS")) is True
+    assert acl_core.public_restrictive(_ingress()) is False
+    # private / cross-workspace restrictiveness is independent of public
+    assert acl_core.private_or_xws_restrictive(_ingress(private_mode="RESTRICTED_ACCESS")) is True
+    assert acl_core.private_or_xws_restrictive(_ingress(xws_mode="RESTRICTED_ACCESS")) is True
+    assert acl_core.private_or_xws_restrictive(_ingress()) is False
+    assert acl_core.private_or_xws_restrictive(_ingress(public_mode="RESTRICTED_ACCESS")) is False
+
+
+def _egress(restricted=True, enforced=True, internet=None, storage=None):
+    import types
+    na = types.SimpleNamespace(
+        restriction_mode="RESTRICTED_ACCESS" if restricted else "FULL_ACCESS",
+        allowed_internet_destinations=internet, allowed_storage_destinations=storage,
+        blocked_internet_destinations=None,
+        policy_enforcement=types.SimpleNamespace(
+            enforcement_mode="ENFORCED" if enforced else "DRY_RUN"))
+    return types.SimpleNamespace(network_access=na)
+
+
+def test_egress_restrictive_matches_restricted_mode_and_dest_lists():
+    assert acl_core.egress_restrictive(None) is False
+    assert acl_core.egress_restrictive(_egress(restricted=False)) is False   # FULL_ACCESS
+    assert acl_core.egress_restrictive(_egress(restricted=True)) is True     # RESTRICTED_ACCESS
+    # FULL_ACCESS but with an allow list present -> still restrictive
+    assert acl_core.egress_restrictive(_egress(restricted=False, internet=["x"])) is True
+
+
+def test_egress_enforced_reads_enforcement_mode():
+    assert acl_core.egress_enforced(_egress(enforced=True)) is True
+    assert acl_core.egress_enforced(_egress(enforced=False)) is False        # DRY_RUN
+    assert acl_core.egress_enforced(None) is False
+
+
+def test_assigned_policy_returns_id_and_object():
+    pol = object()
+    assert acl_core.assigned_policy(_policy_account("p1", pol), 42) == ("p1", pol)
+    assert acl_core.assigned_policy(_policy_account(None, None), 42) == (None, None)
 
 
 def test_assigned_ingress_state_none_when_unassigned():

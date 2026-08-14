@@ -81,10 +81,12 @@ class IngressConfig:
     policy_scope: str = "current_workspace"
     policy_mode: str = "dry_run"
     threat_deny_rules: str = "off"
-    name_prefix: str = DEFAULT_NAME_PREFIX
-    # Optional explicit policy id. When set (single-policy scopes only) it overrides the id derived
-    # from name_prefix; blank = auto-derive. Normalised (lowercase, '-'-safe, length-capped).
+    # The policy name. Explicit (--policy-name) or, when left blank, the CLI resolves it to the
+    # profile name (falling back to the workspace id). For single-policy scopes it's the policy id;
+    # for per_workspace it's the prefix (-> <name>-ws-<id>). Slugified + length-capped.
     policy_name: str = ""
+    # Optional path to write the proposed network-policy JSON (single-policy scopes only).
+    export: str = ""
     ip_acl_handling: str = "migrate_and_enrich"
     deny_denied_ips: bool = False
     # After creating AND assigning the policy, turn off the workspace's existing IP access lists
@@ -113,8 +115,9 @@ class EgressConfig:
     source_type_filter: str = ""
     enable_rdap: bool = True
     refresh_feeds: bool = False
-    name_prefix: str = DEFAULT_NAME_PREFIX
-    policy_name: str = ""   # optional explicit policy id (single-policy scopes); blank = auto-derive
+    # See IngressConfig.policy_name — same resolution (explicit / profile / workspace id).
+    policy_name: str = ""
+    export: str = ""        # optional path to write the proposed network-policy JSON (single-policy)
     policy_mode: str = "dry_run"
     policy_scope: str = "current_workspace"
     block_threat_domains: str = "off"
@@ -161,9 +164,9 @@ def validate_apply(apply: ApplyOptions, policy_scope: str, other_direction: str)
 
 
 def validate_policy_name(policy_name: str, policy_scope: str, policy_action: str) -> None:
-    """An explicit --policy-name sets one policy id, so it only makes sense for a single created
-    policy. Reject it with add_to_existing (the id comes from --existing-policy-id) and with
-    per_workspace (which creates one policy per workspace — use --name-prefix there)."""
+    """--policy-name names the created policy: the id for a single-policy scope, or the prefix for
+    per_workspace (-> <name>-ws-<id>). Reject it only with add_to_existing, where the target id comes
+    from --existing-policy-id instead."""
     if not policy_name:
         return
     if policy_action == "add_to_existing":
@@ -171,11 +174,16 @@ def validate_policy_name(policy_name: str, policy_scope: str, policy_action: str
             "--policy-name is for creating a new policy; with policy_action=add_to_existing the "
             "target id comes from --existing-policy-id. Drop one of them."
         )
-    if policy_scope == "per_workspace":
+
+
+def validate_export(export: str, policy_scope: str) -> None:
+    """--export writes a single policy body, so it can't be used with per_workspace (which builds one
+    policy per workspace)."""
+    if export and policy_scope == "per_workspace":
         raise ValueError(
-            "--policy-name sets a single policy id, so it can't be used with --policy-scope "
-            "per_workspace (which creates one policy per workspace). Use --name-prefix, or a "
-            "single-policy scope (current_workspace / all_workspaces)."
+            "--export writes a single network-policy body, so it can't be used with --policy-scope "
+            "per_workspace (which builds one policy per workspace). Use current_workspace or "
+            "all_workspaces."
         )
 
 
