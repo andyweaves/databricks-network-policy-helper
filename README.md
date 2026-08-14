@@ -56,6 +56,182 @@ an account admin** — pass `--account-id` with account-admin credentials (see
 Every option is discoverable with `--help` on any command. The full detail for each tool lives in its
 Claude skill under [`.claude/skills/`](.claude/skills/).
 
+### Key options
+
+**Shared by `ingress` / `egress` / `migrate-acl`:**
+
+| Option | What it does |
+|---|---|
+| `--profile <name>` | Workspace profile (from `~/.databrickscfg`); analysis + warehouse. |
+| `--policy-name <id>` | Policy name — prompted if omitted (blank = profile name); the id for single-policy scopes, the prefix for `per_workspace`. |
+| `--policy-mode dry_run\|enforce` | `dry_run` (default) = log-only; `enforce` = blocking. |
+| `--create-policy` | Master write switch — nothing is written without it (analysis/preview are always side-effect-free). |
+| `--auto-assign` | Bind the workspace(s) to the policy. |
+| `--export <path>` | Write the proposed `AccountNetworkPolicy` JSON (curl / REST-ready) — a directory writes `<policy-id>.json`. **Works in propose-only mode**, single-policy scopes only. |
+| `--account-id` / `--account-profile` | Account-admin auth, required to create/assign (separate from workspace auth). |
+| `--yes` / `-y` | Non-interactive: skip the step-through + review gates (for scripting/CI). |
+
+**`ingress` / `egress` also take** `--policy-scope current_workspace\|per_workspace\|all_workspaces`, `--policy-action create_new\|add_to_existing` + `--existing-policy-id <id>` (compose a combined policy — not on `migrate-acl`), `--lookback-days`, `--min-events`, `--enable-rdap`.
+
+**Command-specific:**
+
+- 📥 **`ingress`**: `--scoping-mode`, `--policy-framing` (minimal/optimal/maximum), `--ip-acl-handling`, `--threat-deny-rules`, `--deny-denied-ips`, `--include-ipv6`, `--include-account-level`, `--disable-existing-ip-acls`.
+- 📤 **`egress`**: `--block-threat-domains` (off/matched_only/all), `--threat-feed`, `--source-type-filter`.
+- 🔁 **`migrate-acl`**: `--egress-policy` (allow_all/dry_run/restricted), `--disable-existing-ip-acls`.
+
+## 🗺️ How each command flows
+
+The decision trees below show the options and paths each command takes — from analysis through the
+review gates to the gated write. All three share the same spine: **confirm workspace → resolve policy
+name → analyse → preview → (`--export`?) → `--create-policy`? → action / scope / mode → pre-checks →
+write → assign**. The interactive **step-through** and **review** gates between stages are omitted for
+clarity — `--yes` skips them all. Nothing is written unless you reach a green *write* node.
+
+### 📥 `ingress`
+
+```mermaid
+flowchart TD
+    A(["dbx-nwp-helper ingress"]) --> B{"Confirm target workspace?<br/>(profile / URL / id)"}
+    B -->|no| X1["Abort — nothing written"]
+    B -->|yes| C["Resolve policy name<br/>--policy-name / prompt; blank = profile"]
+    C --> D["Analyse system.access.audit source IPs<br/>enrich: threat feeds, cloud + Databricks ranges, RDAP"]
+    D --> E["Frame CIDRs: minimal / optimal / maximum"]
+    E --> F{"Scoping mode"}
+    F -->|ip_only| G["One rule set: these CIDRs, all destinations"]
+    F -->|ip_and_destination| G2["Scope to Apps / Lakebase where traffic maps"]
+    F -->|"ip_and_identity / …"| G3["Resolve principals via SCIM<br/>per-identity auth not enforceable on these dests;<br/>unresolved groups excluded"]
+    G --> H
+    G2 --> H
+    G3 --> H
+    H["IP ACL handling: migrate_and_enrich / migrate / ignore<br/>+ threat-deny rules + deny-denied-IPs optional"] --> P["Preview proposed policy"]
+    P --> EXP{"--export?"}
+    EXP -->|yes| EXPW["Write AccountNetworkPolicy JSON"]
+    EXP -->|no| CR{"--create-policy?"}
+    EXPW --> CR
+    CR -->|no| X2["Propose-only — nothing written"]
+    CR -->|yes| ACT{"--policy-action"}
+    ACT -->|add_to_existing| U["Update ingress block of --existing-policy-id<br/>egress left as-is"]
+    ACT -->|create_new| SC{"--policy-scope"}
+    SC -->|per_workspace| PW["One policy per workspace: name-ws-id<br/>no pre-checks"]
+    SC -->|"current / all_workspaces"| PFq{"Assigned policy safe to bind?"}
+    PFq -->|"PAS / private / xws / enforced public ingress"| X3["ABORT"]
+    PFq -->|"new id would drop enforced egress"| X3
+    PFq -->|"dry-run restrictive → warn"| WR["Warn, continue"]
+    PFq -->|"clean / allow-all"| WR
+    WR --> WMODE{"--policy-mode"}
+    U --> WMODE
+    PW --> WMODE
+    WMODE -->|dry_run| WD["Write ingress_dry_run (log-only)"]
+    WMODE -->|enforce| WE["Write ingress (blocking)"]
+    WD --> AS{"--auto-assign?"}
+    WE --> AS
+    AS -->|no| DONE(["Done"])
+    AS -->|yes| ASB["Bind workspace to policy"]
+    ASB --> DIS{"--disable-existing-ip-acls?<br/>needs create + assign"}
+    DIS -->|no| DONE
+    DIS -->|yes| DISB["Set enableIpAccessLists=false"]
+    DISB --> DONE
+    classDef stop fill:#f8d7da,stroke:#b02a37,color:#111
+    classDef done fill:#e2e3e5,stroke:#6c757d,color:#111
+    classDef write fill:#d1e7dd,stroke:#146c43,color:#111
+    classDef warn fill:#fff3cd,stroke:#997404,color:#111
+    class X3 stop
+    class X1,X2,DONE done
+    class WD,WE,ASB,DISB write
+    class WR warn
+```
+
+### 📤 `egress`
+
+```mermaid
+flowchart TD
+    A(["dbx-nwp-helper egress"]) --> B{"Confirm target workspace?"}
+    B -->|no| X1["Abort — nothing written"]
+    B -->|yes| C["Resolve policy name<br/>--policy-name / prompt; blank = profile"]
+    C --> D["Analyse system.access.outbound_network<br/>denied + dry-run denials"]
+    D --> E["Classify: S3 / GCS / Azure storage + internet FQDNs<br/>RDAP owner lookup (context)"]
+    E --> TD{"--block-threat-domains?"}
+    TD -->|"matched_only / all"| TDB["Add blocked_internet_destinations (ThreatFox)"]
+    TD -->|off| LIM["Enforce limits: 100 internet / 100 storage<br/>warn + keep highest-traffic"]
+    TDB --> LIM
+    LIM --> P["Preview proposed egress"]
+    P --> EXP{"--export?"}
+    EXP -->|yes| EXPW["Write AccountNetworkPolicy JSON<br/>egress + FULL_ACCESS ingress default"]
+    EXP -->|no| CR{"--create-policy?"}
+    EXPW --> CR
+    CR -->|no| X2["Propose-only — nothing written"]
+    CR -->|yes| ACT{"--policy-action"}
+    ACT -->|add_to_existing| U["Update egress block of --existing-policy-id<br/>ingress left as-is"]
+    ACT -->|create_new| SC{"--policy-scope"}
+    SC -->|per_workspace| PW["One policy per workspace<br/>no pre-checks"]
+    SC -->|"current / all_workspaces"| PFq{"Assigned policy safe to replace?"}
+    PFq -->|"enforced restrictive egress"| X3["ABORT"]
+    PFq -->|"new id would drop enforced ingress"| X3
+    PFq -->|"dry-run restrictive → warn"| WR["Warn, continue"]
+    PFq -->|"allow-all / none"| WR
+    WR --> WMODE{"--policy-mode"}
+    U --> WMODE
+    PW --> WMODE
+    WMODE -->|dry_run| WD["Egress RESTRICTED_ACCESS, DRY_RUN (log-only)"]
+    WMODE -->|enforce| WE["Egress RESTRICTED_ACCESS, ENFORCED (blocking)"]
+    WD --> AS{"--auto-assign?"}
+    WE --> AS
+    AS -->|no| DONE(["Done"])
+    AS -->|yes| ASB["Bind workspace to policy"]
+    ASB --> DONE
+    classDef stop fill:#f8d7da,stroke:#b02a37,color:#111
+    classDef done fill:#e2e3e5,stroke:#6c757d,color:#111
+    classDef write fill:#d1e7dd,stroke:#146c43,color:#111
+    classDef warn fill:#fff3cd,stroke:#997404,color:#111
+    class X3 stop
+    class X1,X2,DONE done
+    class WD,WE,ASB write
+    class WR warn
+```
+
+### 🔁 `migrate-acl`
+
+```mermaid
+flowchart TD
+    A(["dbx-nwp-helper migrate-acl"]) --> B{"Confirm target workspace?"}
+    B -->|no| X1["Abort — nothing written"]
+    B -->|yes| C["Resolve policy name<br/>--policy-name / prompt; blank = profile"]
+    C --> PAS{"PrivateLink (PAS) attached?"}
+    PAS -->|yes| X2["ABORT — not supported yet"]
+    PAS -->|no| AS0{"Will create AND assign?"}
+    AS0 -->|"yes: existing ENFORCED CBI policy"| X3["ABORT"]
+    AS0 -->|"yes: existing DRY-RUN CBI policy"| PROM["Warn; offer to promote to enforced, then stop"]
+    AS0 -->|"yes: none / allow-all"| RD["Read workspace IP access lists (IPv4)<br/>ALLOW → allow, BLOCK → deny; labels migrated-*<br/>flag if enforcement currently disabled"]
+    AS0 -->|"no: propose-only / --no-auto-assign"| RD
+    RD --> EMPTY{"Any entries?"}
+    EMPTY -->|no| X4["Nothing to migrate — stop"]
+    EMPTY -->|yes| P["Preview + egress_policy note<br/>allow_all / dry_run / restricted"]
+    P --> EXP{"--export?"}
+    EXP -->|yes| EXPW["Write AccountNetworkPolicy JSON"]
+    EXP -->|no| CR{"--create-policy?"}
+    EXPW --> CR
+    CR -->|no| X5["Propose-only — nothing written"]
+    CR -->|yes| WMODE{"--policy-mode"}
+    WMODE -->|enforce| WE["Write ingress (blocking) + egress_policy block"]
+    WMODE -->|dry_run| WD["Write ingress_dry_run (log-only) + egress_policy block"]
+    WE --> AS{"--auto-assign? (default on)"}
+    WD --> AS
+    AS -->|no| DONE(["Done"])
+    AS -->|yes| ASB["Bind workspace to policy"]
+    ASB --> DIS{"--disable-existing-ip-acls?"}
+    DIS -->|no| DONE
+    DIS -->|yes| DISB["Set enableIpAccessLists=false"]
+    DISB --> DONE
+    classDef stop fill:#f8d7da,stroke:#b02a37,color:#111
+    classDef done fill:#e2e3e5,stroke:#6c757d,color:#111
+    classDef write fill:#d1e7dd,stroke:#146c43,color:#111
+    classDef warn fill:#fff3cd,stroke:#997404,color:#111
+    class X2,X3 stop
+    class X1,X4,X5,DONE done
+    class WD,WE,ASB,DISB write
+    class PROM warn
+```
+
 ## 🔒 Safety model
 
 - 🛑 **Nothing is written unless you opt in** — `--create-policy`. Analysis and proposal are always
