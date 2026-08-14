@@ -32,14 +32,33 @@ def test_denied_requests_note_says_applied_when_flag_on(capsys):
     assert "will be added as deny rules" in capsys.readouterr().out
 
 
-def test_acl_egress_note_explains_each_option(capsys):
+def _acl_analysis_obj(disabled=True):
+    import types
+    return types.SimpleNamespace(
+        workspace_id=42,
+        ip_acls=[{"label": "office", "list_type": "ALLOW", "ip_addresses": ["8.8.8.8/32"]}],
+        disabled_acls=([{"label": "old-vpn", "list_type": "ALLOW", "ip_addresses": ["1.2.3.4/32"]}]
+                       if disabled else []))
+
+
+def test_acl_disabled_notice_flags_disabled_rules(capsys):
     from dbx_nwp_helper import render
-    render.acl_egress_note("allow_all")
-    assert "FULL_ACCESS" in capsys.readouterr().out
-    render.acl_egress_note("dry_run")
-    assert "log-only" in capsys.readouterr().out.lower()
-    render.acl_egress_note("restricted")
-    assert "BLOCKS ALL" in capsys.readouterr().out
+    render.acl_disabled_notice(_acl_analysis_obj(disabled=True))
+    out = capsys.readouterr().out
+    assert "old-vpn" in out and "not migrated" in out.lower() and "vet" in out.lower()
+
+
+def test_acl_disabled_notice_silent_when_none(capsys):
+    from dbx_nwp_helper import render
+    render.acl_disabled_notice(_acl_analysis_obj(disabled=False))
+    assert capsys.readouterr().out == ""
+
+
+def test_acl_current_config_shows_enabled_and_disabled(capsys):
+    from dbx_nwp_helper import render
+    render.acl_current_config(_acl_analysis_obj(disabled=True))
+    out = capsys.readouterr().out
+    assert "office" in out and "old-vpn" in out  # both enabled + disabled lists shown
 
 
 def test_decisions_panel_renders_flag_dash_names(capsys):

@@ -68,8 +68,9 @@ If the table is empty, no egress policy is logging yet — start with step 1.
   (**dry_run** default / enforce), `--policy-scope` (**current_workspace** default / per_workspace /
   all_workspaces), `--block-threat-domains`, `--threat-feed`
 - `--export <path>` — write the proposed `AccountNetworkPolicy` JSON (egress block + a `FULL_ACCESS`
-  ingress default) for curl / the REST API; a directory writes `<policy-id>.json` inside it.
-  Single-policy scopes only; works in propose-only mode.
+  ingress default) for curl / the REST API, **and** a sibling best-effort Terraform `.tf`
+  (`databricks_account_network_policy` — review before `terraform apply`); a directory writes
+  `<policy-id>.json` + `<policy-id>.tf` inside it. Single-policy scopes only; works in propose-only mode.
 - `--account-id` (+ account-admin creds) — required to create/assign.
 - `--create-policy` (gate), `--policy-action` (`create_new` / `add_to_existing`),
   `--existing-policy-id`, `--auto-assign`. `add_to_existing` updates only the egress block of the

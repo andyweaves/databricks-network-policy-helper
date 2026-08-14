@@ -13,7 +13,6 @@ import questionary
 
 from . import console
 from .config import (
-    ACL_EGRESS_POLICIES,
     BLOCK_THREAT_DOMAINS,
     IP_ACL_HANDLING,
     POLICY_FRAMINGS,
@@ -139,16 +138,17 @@ def _egress_wizard(conn: Connection) -> EgressConfig:
 def _acl_wizard(conn: Connection) -> AclConfig:
     console.rule("IP ACL migration questions")
     # The policy name is prompted for centrally in the run flow (blank = profile name), so it isn't
-    # asked here.
-    egress_policy = _select("Egress to set on a newly-created policy?", ACL_EGRESS_POLICIES,
-                            default="dry_run")
+    # asked here. The migration recreates the IP ACLs as-is (ingress only), so there's no egress
+    # choice — a created policy carries a permissive FULL_ACCESS egress.
     create = bool(conn.account_id) and _confirm("Create the policy now (needs account admin)?", False)
     mode = _mode_wizard() if create else "enforce"
-    auto_assign = _confirm("Bind this workspace to the new policy?", True) if create else True
+    # auto_assign is only meaningful when creating; forcing it off in propose-only keeps the config
+    # valid (create=false + auto_assign=true is rejected).
+    auto_assign = _confirm("Bind this workspace to the new policy?", True) if create else False
     disable_acls = (create and auto_assign
                     and _confirm("Disable this workspace's IP access lists after applying? "
                                  "(the new CBI policy replaces them)", False))
-    return AclConfig(policy_mode=mode, egress_policy=egress_policy, auto_assign=auto_assign,
+    return AclConfig(policy_mode=mode, auto_assign=auto_assign,
                      create_policy=create, disable_existing_ip_acls=disable_acls)
 
 

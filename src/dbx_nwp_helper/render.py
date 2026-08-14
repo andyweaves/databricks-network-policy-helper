@@ -69,7 +69,6 @@ def acl_decisions(cfg: AclConfig) -> None:
     console.decisions_panel("IP ACL → CBI migration configuration", [
         ("policy_mode", cfg.policy_mode, "enforce (default) or dry_run."),
         ("policy_name", cfg.policy_name, "Policy id for the new policy (from --policy-name / prompt)."),
-        ("egress_policy", cfg.egress_policy, "Egress set on create: allow_all/dry_run/restricted."),
         ("auto_assign", cfg.auto_assign, "Bind this workspace to the new policy."),
         ("disable_existing_ip_acls", cfg.disable_existing_ip_acls,
          "After apply, turn off the workspace's IP access lists (needs create + assign)."),
@@ -250,37 +249,39 @@ def egress_preview(previews: dict, cfg: EgressConfig) -> None:
 
 
 # ---------------------------------------------------------------------------------- acl tables
+def _acl_table(rows: list[dict], title: str) -> None:
+    console.dataframe(
+        pd.DataFrame([{**a, "ip_addresses": ", ".join(a["ip_addresses"])} for a in rows]), title)
+
+
+def acl_current_config(analysis) -> None:
+    """The workspace's *current* IP access list configuration — all lists, enabled and disabled —
+    shown when the workspace toggle is off so the user sees what they'd be enabling."""
+    console.rule("Current IP access list configuration")
+    rows = ([{**a, "enabled": True} for a in analysis.ip_acls]
+            + [{**a, "enabled": False} for a in analysis.disabled_acls])
+    if rows:
+        _acl_table(rows, f"IP access lists on workspace {analysis.workspace_id}")
+
+
 def acl_analysis(analysis, cfg: AclConfig) -> None:
     console.rule("Existing IP access list")
-    if analysis.ip_acls_enforced is False:
-        console.banner("warn", "IP access lists are currently DISABLED on this workspace "
-                               "(enableIpAccessLists=false) — the rules below exist but are NOT being "
-                               "enforced today. Migrating them to an enforced CBI policy will restrict "
-                               "access (which is not being enforced today).")
     if not analysis.ip_acls:
         console.banner("warn", "No enabled IP access lists on this workspace — nothing to migrate.")
         return
-    console.dataframe(
-        pd.DataFrame([{**a, "ip_addresses": ", ".join(a["ip_addresses"])} for a in analysis.ip_acls]),
-        f"IP access lists on workspace {analysis.workspace_id}")
+    _acl_table(analysis.ip_acls, f"Enabled IP access lists on workspace {analysis.workspace_id}")
 
 
-def acl_egress_note(egress_policy: str) -> None:
-    """Tell the user what egress block the new policy will carry, per --egress-policy (the migration
-    only builds ingress rules, so this is the operator's egress choice). Applied on create; an
-    existing policy's egress is left unchanged."""
-    if egress_policy == "allow_all":
-        console.banner("info", "Egress on the new policy: FULL_ACCESS (allow_all) — serverless egress "
-                               "is NOT restricted. Change with --egress-policy.")
-    elif egress_policy == "dry_run":
-        console.banner("info", "Egress on the new policy: restricted, DRY-RUN (log-only) — blocks "
-                               "nothing, but logs would-be egress denials so you can build an "
-                               "allow-list before enforcing. Change with --egress-policy.")
-    else:  # restricted
-        console.banner("warn", "Egress on the new policy: restricted, ENFORCED with no allow-list — "
-                               "this BLOCKS ALL serverless egress once assigned. Add egress allow "
-                               "rules (see the egress helper) first, or workloads lose outbound. "
-                               "Change with --egress-policy.")
+def acl_disabled_notice(analysis) -> None:
+    """Shown in the final printout (below the old + new policy, before the write): flag any disabled
+    IP access list rules that were left out of the migration so the operator can vet them."""
+    if not analysis.disabled_acls:
+        return
+    names = ", ".join(a["label"] for a in analysis.disabled_acls)
+    console.banner("warn", f"{len(analysis.disabled_acls)} rule(s) are disabled in IP access lists "
+                           f"and were NOT migrated: {names}. Make sure you vet these rules — if any "
+                           "should be enabled, exit this tool, enable them, and run the migration "
+                           "again.")
 
 
 def acl_preview(preview: dict, cfg: AclConfig) -> None:

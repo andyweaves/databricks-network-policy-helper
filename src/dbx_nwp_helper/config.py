@@ -20,7 +20,6 @@ IP_ACL_HANDLING = ["migrate_and_enrich", "migrate", "ignore"]
 POLICY_ACTIONS = ["create_new", "add_to_existing"]
 BLOCK_THREAT_DOMAINS = ["off", "matched_only", "all"]
 EGRESS_THREAT_FEEDS = ["threatfox"]
-ACL_EGRESS_POLICIES = ["allow_all", "dry_run", "restricted"]
 
 DEFAULT_ACCOUNT_HOST = "https://accounts.cloud.databricks.com"
 DEFAULT_NAME_PREFIX = "dbx-nwp"
@@ -131,7 +130,6 @@ class AclConfig:
     # Policy id for the new policy. Explicit (--policy-name) or, when left blank, the CLI resolves it
     # to the profile name (falling back to the workspace id). Slugified + length-capped.
     policy_name: str = ""
-    egress_policy: str = "dry_run"   # allow_all | dry_run | restricted (dry_run = log-only, safe)
     auto_assign: bool = True
     create_policy: bool = False
     # See IngressConfig.disable_existing_ip_acls — same gated behaviour for the migrate command.
@@ -200,4 +198,26 @@ def validate_disable_ip_acls(disable: bool, create_policy: bool, auto_assign: bo
             "used when the run also creates AND assigns the replacement policy (otherwise the "
             "workspace could be left with no ingress protection). Re-run with --create-policy and "
             "--auto-assign, or drop --disable-existing-ip-acls."
+        )
+
+
+def validate_acl_apply(create_policy: bool, auto_assign: bool, disable_existing_ip_acls: bool,
+                       policy_mode: str) -> None:
+    """migrate-acl input-combination guards — reject nonsensical / unsafe flag combos up front."""
+    # Can't assign a policy you're not creating.
+    if auto_assign and not create_policy:
+        raise ValueError(
+            "--auto-assign can't be used with --no-create-policy — there's no new policy to bind. "
+            "For a propose-only run pass --no-create-policy --no-auto-assign; otherwise keep "
+            "--create-policy (the default)."
+        )
+    # Disabling the workspace's IP ACLs requires the replacement to be created AND assigned (8a/8b).
+    validate_disable_ip_acls(disable_existing_ip_acls, create_policy, auto_assign)
+    # A dry-run policy enforces nothing, so disabling the old ACLs would leave NO active ingress
+    # control at all.
+    if disable_existing_ip_acls and policy_mode == "dry_run":
+        raise ValueError(
+            "--disable-existing-ip-acls with --policy-mode dry_run would leave the workspace with no "
+            "enforced ingress control (a dry-run policy blocks nothing). Use --policy-mode enforce, "
+            "or drop --disable-existing-ip-acls."
         )
