@@ -280,11 +280,28 @@ def test_acl_analyze_splits_allow_deny_ipv4_only():
     assert a.workspace_id == 42
     assert len(a.allow_specs) == 1 and a.allow_specs[0]["cidrs"] == ["8.8.8.8/32"]  # ipv6 dropped
     assert len(a.deny_specs) == 1 and a.deny_specs[0]["cidrs"] == ["9.9.9.0/24"]
-    # labels are recreated with a `migrated-` prefix over the original ACL label
-    assert a.allow_specs[0]["label"] == "migrated-office"
-    assert a.deny_specs[0]["label"] == "migrated-bad"
-    # _FakeWs has no workspace_conf, so enforcement state is simply unknown (not a crash)
-    assert a.ip_acls_enforced is None
+    # labels are migrated verbatim — the original ACL label, no prefix and no mode suffix
+    assert a.allow_specs[0]["label"] == "office"
+    assert a.deny_specs[0]["label"] == "bad"
+    # the disabled list is surfaced (flagged) but NOT migrated; only enabled lists become specs
+    assert len(a.ip_acls) == 2
+    assert [d["label"] for d in a.disabled_acls] == ["off"]
+
+
+def test_acl_analyze_labels_have_no_mode_suffix():
+    # migrate-acl recreates rules exactly — the built rule label must not carry a "(enforced)" suffix.
+    ws = _FakeWs([_FakeAcl("office", "ALLOW", True, ["8.8.8.8/32"])])
+    cfg = AclConfig(policy_mode="enforce")
+    prev = acl_core.preview_block(acl_core.analyze(cfg, ws), cfg)
+    label = prev["ingress"]["public_access"]["allow_rules"][0]["label"]
+    assert label == "office"
+
+
+def test_acl_analyze_all_disabled_leaves_nothing_to_migrate():
+    ws = _FakeWs([_FakeAcl("off", "ALLOW", False, ["1.1.1.1/32"])])
+    a = acl_core.analyze(AclConfig(), ws)
+    assert a.ip_acls == [] and a.allow_specs == [] and a.deny_specs == []
+    assert [d["label"] for d in a.disabled_acls] == ["off"]
 
 
 class _CreateCapturingAccount:
@@ -331,11 +348,16 @@ def test_acl_apply_falls_back_to_workspace_id_when_no_name():
     assert captured["id"] == "42"
 
 
-def test_acl_build_egress_kinds():
-    for kind, mode in [("allow_all", "FULL_ACCESS"), ("dry_run", "RESTRICTED_ACCESS"),
-                       ("restricted", "RESTRICTED_ACCESS")]:
-        d = acl_core.build_egress(kind).as_dict()["network_access"]
-        assert d["restriction_mode"] == mode
+def test_enable_ip_access_lists_flips_toggle_on():
+    ws = _WsWithConf(initial="false")
+    assert acl_core.enable_ip_access_lists(ws) is True
+    assert ws.workspace_conf.set_calls == [{"enableIpAccessLists": "true"}]
+
+
+def test_enable_ip_access_lists_idempotent_when_already_on():
+    ws = _WsWithConf(initial="true")
+    assert acl_core.enable_ip_access_lists(ws) is False
+    assert ws.workspace_conf.set_calls == []
 
 
 class _FakeWorkspaceConf:
@@ -400,23 +422,12 @@ def test_acl_preview_block_target():
     assert "ingress_dry_run" in prev
 
 
-def test_acl_analyze_flags_enforcement_state():
-    # enableIpAccessLists status is surfaced so the CLI can flag when ACLs aren't actually enforced.
-    class _WsAcls(_WsWithConf):
-        def __init__(self, initial):
-            super().__init__(initial)
-            self._acls = [_FakeAcl("office", "ALLOW", True, ["8.8.8.8/32"])]
-
-        def get_workspace_id(self):
-            return 42
-
-        @property
-        def ip_access_lists(self):
-            acls = self._acls
-            return type("A", (), {"list": lambda self=None: acls})()
-
-    assert acl_core.analyze(AclConfig(), _WsAcls("false")).ip_acls_enforced is False
-    assert acl_core.analyze(AclConfig(), _WsAcls("true")).ip_acls_enforced is True
+def test_ip_acl_enforcement_state_reads_toggle():
+    # The CLI reads this up front to gate migrate-acl when workspace IP ACLs are disabled.
+    assert acl_core.ip_acl_enforcement_state(_WsWithConf("false")) is False
+    assert acl_core.ip_acl_enforcement_state(_WsWithConf("true")) is True
+    # unreadable (no workspace_conf) -> None, not a crash
+    assert acl_core.ip_acl_enforcement_state(_FakeWs([])) is None
 
 
 def _pas_account(pas_id):
@@ -437,6 +448,51 @@ def test_workspace_pas_attached_none_on_error():
             raise RuntimeError("no perms")
     acct = type("Acct", (), {"workspaces": _WS()})()
     assert acl_core.workspace_pas_attached(acct, 42) is None
+
+
+def _vpce_account(network_id, dataplane=None, rest_api=None):
+    ve = type("VE", (), {"dataplane_relay": dataplane, "rest_api": rest_api})()
+
+    class _WS:
+        def get(self, workspace_id):
+            return type("W", (), {"network_id": network_id})()
+
+    class _NW:
+        def get(self, network_id):
+            return type("N", (), {"vpc_endpoints": ve})()
+    return type("Acct", (), {"workspaces": _WS(), "networks": _NW()})()
+
+
+def test_workspace_vpc_endpoint_count():
+    # no network config -> 0 (no VPC endpoints for this workspace)
+    assert acl_core.workspace_vpc_endpoint_count(_vpce_account(None), 42) == 0
+    # back-end endpoints (dataplane_relay + rest_api) are counted
+    acct = _vpce_account("net-1", dataplane=["vpce-a"], rest_api=["vpce-b", "vpce-c"])
+    assert acl_core.workspace_vpc_endpoint_count(acct, 42) == 3
+    # empty lists -> 0
+    assert acl_core.workspace_vpc_endpoint_count(_vpce_account("net-1"), 42) == 0
+
+
+def test_workspace_vpc_endpoint_count_none_on_error():
+    class _WS:
+        def get(self, workspace_id):
+            raise RuntimeError("no perms")
+    acct = type("Acct", (), {"workspaces": _WS()})()
+    assert acl_core.workspace_vpc_endpoint_count(acct, 42) is None
+
+
+def test_policy_exists_true_false():
+    from databricks.sdk.errors import NotFound
+
+    class _NPyes:
+        def get_network_policy_rpc(self, network_policy_id):
+            return object()
+
+    class _NPno:
+        def get_network_policy_rpc(self, network_policy_id):
+            raise NotFound("nope")
+    assert acl_core.policy_exists(type("A", (), {"network_policies": _NPyes()})(), "p") is True
+    assert acl_core.policy_exists(type("A", (), {"network_policies": _NPno()})(), "p") is False
 
 
 def _policy_account(assigned_policy_id, policy_obj):
@@ -548,14 +604,16 @@ def test_promote_dry_run_to_enforced_moves_block():
 
 
 def test_acl_policy_payload_is_curl_ready():
-    # --export builds the full AccountNetworkPolicy (egress + the ingress mode block) as a dict.
+    # --export builds the full AccountNetworkPolicy (ingress mode block + a FULL_ACCESS egress) as a
+    # dict. The migration only recreates IP ACLs (ingress); egress is left unrestricted.
     ws = _FakeWs([_FakeAcl("office", "ALLOW", True, ["8.8.8.8/32"])], ws_id=42)
-    cfg = AclConfig(policy_mode="enforce", policy_name="my-acl", egress_policy="allow_all")
+    cfg = AclConfig(policy_mode="enforce", policy_name="my-acl")
     a = acl_core.analyze(cfg, ws)
     payload = acl_core.policy_payload(a, cfg, account_id="acc-123")
     assert payload["network_policy_id"] == "my-acl"
     assert payload["account_id"] == "acc-123"
-    assert "egress" in payload and "ingress" in payload  # enforce -> ingress (not ingress_dry_run)
+    assert "ingress" in payload  # enforce -> ingress (not ingress_dry_run)
+    assert payload["egress"]["network_access"]["restriction_mode"] == "FULL_ACCESS"
 
 
 # --------------------------------------------------------------------------------- queries

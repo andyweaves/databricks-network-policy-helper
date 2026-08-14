@@ -22,7 +22,14 @@ _DESTINATIONS_WITHOUT_AUTH = {None, "all_destinations", "apps_runtime", "lakebas
 
 
 # --------------------------------------------------------------------------- ingress block builders
-def build_ingress_rule(spec: dict, mode_label: str):
+def _rule_label(spec: dict, mode_label: str | None) -> str:
+    """The rule label. With a mode_label it's suffixed `<label> (<mode>)` (the ingress command, so
+    generated rules are self-describing); with mode_label=None the label is verbatim (migrate-acl,
+    which recreates the IP ACLs exactly)."""
+    return f"{spec['label']} ({mode_label})" if mode_label else spec["label"]
+
+
+def build_ingress_rule(spec: dict, mode_label: str | None):
     from databricks.sdk.service.settings import (  # noqa: I001
         CustomerFacingIngressNetworkPolicyAppsRuntimeDestination as AppsDest,
         CustomerFacingIngressNetworkPolicyAuthentication as Auth,
@@ -63,23 +70,23 @@ def build_ingress_rule(spec: dict, mode_label: str):
         authentication = Auth(
             identity_type=IdentityType.IDENTITY_TYPE_SELECTED_IDENTITIES, identities=identities)
 
-    return Rule(label=f"{spec['label']} ({mode_label})",
+    return Rule(label=_rule_label(spec, mode_label),
                 origin=origin, destination=destination, authentication=authentication)
 
 
-def build_deny_rule(spec: dict, mode_label: str):
+def build_deny_rule(spec: dict, mode_label: str | None):
     from databricks.sdk.service.settings import (  # noqa: I001
         CustomerFacingIngressNetworkPolicyIpRanges as IpRanges,
         CustomerFacingIngressNetworkPolicyPublicIngressRule as Rule,
         CustomerFacingIngressNetworkPolicyPublicRequestOrigin as Origin,
         CustomerFacingIngressNetworkPolicyRequestDestination as Destination,
     )
-    return Rule(label=f"{spec['label']} ({mode_label})",
+    return Rule(label=_rule_label(spec, mode_label),
                 origin=Origin(included_ip_ranges=IpRanges(ip_ranges=list(spec["cidrs"]))),
                 destination=Destination(all_destinations=True))
 
 
-def build_ingress_block(allow: list[dict], deny: list[dict], mode_label: str,
+def build_ingress_block(allow: list[dict], deny: list[dict], mode_label: str | None,
                         note: Note = lambda _m: None):
     """Assemble a CustomerFacingIngressNetworkPolicy from allow specs (+ optional deny specs).
 

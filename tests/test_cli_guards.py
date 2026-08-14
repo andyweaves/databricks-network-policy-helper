@@ -197,12 +197,30 @@ def test_maybe_disable_ip_acls_warns_on_sdk_failure(capsys):
 
 
 def test_migrate_acl_disable_without_create_is_rejected():
-    # --disable-existing-ip-acls without --create-policy must fail up front (before any SDK call),
-    # so the workspace can't be left unprotected.
+    # --disable-existing-ip-acls without a create+assign must fail up front (before any SDK call),
+    # so the workspace can't be left unprotected. (create-policy defaults on, so force it off here.)
     result = runner.invoke(cli.app, [
-        "migrate-acl", "--profile", "test", "--disable-existing-ip-acls"])
+        "migrate-acl", "--profile", "test", "--no-create-policy", "--no-auto-assign",
+        "--disable-existing-ip-acls"])
     assert result.exit_code == 2
     assert "disable-existing-ip-acls" in result.output
+
+
+def test_migrate_acl_assign_without_create_is_rejected():
+    # 8d: auto-assign with --no-create-policy is nonsensical (nothing to bind) -> rejected up front.
+    result = runner.invoke(cli.app, ["migrate-acl", "--profile", "test", "--no-create-policy"])
+    assert result.exit_code == 2
+    assert "auto-assign" in result.output
+
+
+def test_migrate_acl_dry_run_disable_is_rejected():
+    # 8c: disabling the old ACLs while the new policy only logs (dry_run) would leave no enforced
+    # ingress control -> rejected up front.
+    result = runner.invoke(cli.app, [
+        "migrate-acl", "--profile", "test", "--policy-mode", "dry_run",
+        "--disable-existing-ip-acls"])
+    assert result.exit_code == 2
+    assert "dry_run" in result.output or "dry-run" in result.output
 
 
 class _FakeWsClient:
@@ -239,6 +257,145 @@ def test_confirm_workspace_decline_aborts(monkeypatch):
     with pytest.raises(typer.Exit) as exc:
         cli._confirm_workspace(Connection(profile="p"), yes=False)
     assert exc.value.exit_code == 0  # declining the wrong workspace is a clean abort
+
+
+def test_confirm_workspace_bad_profile_exits_cleanly(monkeypatch, capsys):
+    # A mistyped --profile must produce a clean, actionable message (not a raw SDK traceback).
+    import typer
+
+    import dbx_nwp_helper.auth as auth
+    from dbx_nwp_helper.config import Connection
+    monkeypatch.setattr(auth, "workspace_client", lambda conn: (_ for _ in ()).throw(
+        ValueError("resolve: /Users/x/.databrickscfg has no sfe-cloud profile configured")))
+    monkeypatch.setattr(cli, "_available_profiles", lambda: ["sfe-foghorn", "e2-dogfood"])
+    with pytest.raises(typer.Exit) as exc:
+        cli._confirm_workspace(Connection(profile="sfe-cloud"), yes=True)
+    assert exc.value.exit_code == 1
+    out = capsys.readouterr().out
+    assert "sfe-cloud" in out and "sfe-foghorn" in out  # names the bad profile + lists available
+
+
+def test_account_client_bad_profile_exits_cleanly(monkeypatch, capsys):
+    import typer
+
+    import dbx_nwp_helper.auth as auth
+    from dbx_nwp_helper.config import Connection
+    monkeypatch.setattr(auth, "account_client", lambda conn: (_ for _ in ()).throw(
+        ValueError("resolve: /Users/x/.databrickscfg has no acct profile configured")))
+    monkeypatch.setattr(cli, "_available_profiles", lambda: ["acct-admin"])
+    with pytest.raises(typer.Exit) as exc:
+        cli._account_client_or_exit(Connection(account_profile="acct"))
+    assert exc.value.exit_code == 1
+    out = capsys.readouterr().out
+    assert "--account-profile" in out and "acct" in out
+
+
+def test_workspace_client_other_valueerror_still_clean(monkeypatch, capsys):
+    # A non-profile config error should also exit cleanly rather than traceback.
+    import typer
+
+    import dbx_nwp_helper.auth as auth
+    from dbx_nwp_helper.config import Connection
+    monkeypatch.setattr(auth, "workspace_client", lambda conn: (_ for _ in ()).throw(
+        ValueError("default auth: cannot configure default credentials")))
+    with pytest.raises(typer.Exit) as exc:
+        cli._confirm_workspace(Connection(profile=None), yes=True)
+    assert exc.value.exit_code == 1
+    assert "Databricks client" in capsys.readouterr().out
+
+
+def _acl_analysis(enabled=1, disabled=0):
+    import types
+    ip_acls = [{"label": f"a{i}", "list_type": "ALLOW", "ip_addresses": ["8.8.8.8/32"]}
+               for i in range(enabled)]
+    dis = [{"label": f"d{i}", "list_type": "ALLOW", "ip_addresses": ["1.1.1.1/32"]}
+           for i in range(disabled)]
+    return types.SimpleNamespace(workspace_id=42, ip_acls=ip_acls, disabled_acls=dis)
+
+
+def test_acl_ip_gate_proceeds_when_enabled_with_rules(monkeypatch):
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.ip_acl_enforcement_state", lambda wc: True)
+    cli._acl_ip_gate(_acl_analysis(enabled=1), object(), yes=True)  # must not raise
+
+
+def test_acl_ip_gate_enabled_no_rules_exits(monkeypatch, capsys):
+    import typer
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.ip_acl_enforcement_state", lambda wc: True)
+    with pytest.raises(typer.Exit) as e:
+        cli._acl_ip_gate(_acl_analysis(enabled=0), object(), yes=True)
+    assert e.value.exit_code == 0
+    assert "no rules" in capsys.readouterr().out.lower()
+
+
+def test_acl_ip_gate_disabled_no_rules_exits(monkeypatch, capsys):
+    import typer
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.ip_acl_enforcement_state", lambda wc: False)
+    with pytest.raises(typer.Exit) as e:
+        cli._acl_ip_gate(_acl_analysis(enabled=0), object(), yes=True)
+    assert e.value.exit_code == 0
+    out = capsys.readouterr().out.lower()
+    assert "disabled" in out and "no rules" in out
+
+
+def test_acl_ip_gate_disabled_with_rules_noninteractive_aborts(monkeypatch):
+    import typer
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.ip_acl_enforcement_state", lambda wc: False)
+    with pytest.raises(typer.Exit) as e:
+        cli._acl_ip_gate(_acl_analysis(enabled=1), object(), yes=True)  # --yes: no auto re-enable
+    assert e.value.exit_code == 0
+
+
+def test_acl_ip_gate_disabled_with_rules_decline_reenable(monkeypatch):
+    import typer
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.ip_acl_enforcement_state", lambda wc: False)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("typer.confirm", lambda *a, **k: False)
+    called = {"n": 0}
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.enable_ip_access_lists",
+                        lambda *a, **k: called.__setitem__("n", called["n"] + 1))
+    with pytest.raises(typer.Exit) as e:
+        cli._acl_ip_gate(_acl_analysis(enabled=1), object(), yes=False)
+    assert e.value.exit_code == 0
+    assert called["n"] == 0  # declined -> must NOT re-enable
+
+
+def test_acl_ip_gate_disabled_with_rules_accept_reenable_and_continues(monkeypatch, capsys):
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.ip_acl_enforcement_state", lambda wc: False)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("typer.confirm", lambda *a, **k: True)
+    called = {"n": 0}
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.enable_ip_access_lists",
+                        lambda *a, **k: called.__setitem__("n", called["n"] + 1))
+    # accept -> re-enable, then CONTINUE the run (must not raise).
+    cli._acl_ip_gate(_acl_analysis(enabled=1), object(), yes=False)
+    assert called["n"] == 1
+    assert "continuing" in capsys.readouterr().out.lower()
+
+
+def test_ensure_acl_policy_name_unique_reprompts_then_accepts(monkeypatch):
+    from dbx_nwp_helper.config import AclConfig
+    seen = iter([True, False])  # first name exists, second is free
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.policy_exists", lambda a, pid: next(seen))
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+    class _Q:
+        def ask(self):
+            return "fresh-name"
+    monkeypatch.setattr("questionary.text", lambda *a, **k: _Q())
+    cfg = AclConfig(policy_name="taken")
+    cli._ensure_acl_policy_name_unique(cfg, object(), 42, yes=False)
+    assert cfg.policy_name == "fresh-name"
+
+
+def test_ensure_acl_policy_name_unique_noninteractive_aborts(monkeypatch):
+    import typer
+
+    from dbx_nwp_helper.config import AclConfig
+    monkeypatch.setattr("dbx_nwp_helper.core.acl.policy_exists", lambda a, pid: True)
+    cfg = AclConfig(policy_name="taken")
+    with pytest.raises(typer.Exit) as e:
+        cli._ensure_acl_policy_name_unique(cfg, object(), 42, yes=True)
+    assert e.value.exit_code == 1
 
 
 def test_note_policy_name_shows_normalized_id(capsys):
@@ -317,17 +474,24 @@ class _AclWorkspace:
 
 
 class _CleanAclAccount:
-    """Account client that passes migrate-acl preflight: no PAS, no assigned network policy."""
+    """Account client that passes migrate-acl preflight: no PAS, no VPC endpoints, no assigned
+    network policy, and the chosen policy name is free (create-only uniqueness check)."""
     class _WS:
         def get(self, workspace_id):
-            return type("W", (), {"private_access_settings_id": None})()
+            return type("W", (), {"private_access_settings_id": None, "network_id": None})()
 
     class _WNC:
         def get_workspace_network_option_rpc(self, workspace_id):
             return type("O", (), {"network_policy_id": None})()
 
+    class _NP:
+        def get_network_policy_rpc(self, network_policy_id):
+            from databricks.sdk.errors import NotFound
+            raise NotFound("no such policy")
+
     workspaces = _WS()
     workspace_network_configuration = _WNC()
+    network_policies = _NP()
 
 
 def test_migrate_acl_export_writes_json(monkeypatch, tmp_path):
@@ -337,15 +501,43 @@ def test_migrate_acl_export_writes_json(monkeypatch, tmp_path):
     monkeypatch.setattr(auth, "workspace_client", lambda conn: _AclWorkspace())
     monkeypatch.setattr(auth, "account_client", lambda conn: _CleanAclAccount())
     out = tmp_path / "policy.json"
-    # propose-only (no --create-policy) + --yes; migrate-acl now needs --account-id for its
-    # PAS / existing-policy pre-checks, but --export must still write the curl-ready JSON.
+    # propose-only (--no-create-policy --no-auto-assign) + --yes; migrate-acl needs --account-id for
+    # its PAS / VPC-endpoint / existing-policy pre-checks, but --export must still write the JSON.
     result = runner.invoke(cli.app, [
-        "migrate-acl", "--profile", "test", "--account-id", "acc-1", "--export", str(out), "--yes"])
+        "migrate-acl", "--profile", "test", "--account-id", "acc-1", "--export", str(out),
+        "--no-create-policy", "--no-auto-assign", "--yes"])
     assert result.exit_code == 0, result.output
     data = json.loads(out.read_text())
     assert data["network_policy_id"] == "test"       # blank name -> profile name ("test")
     assert data["account_id"] == "acc-1"
     assert "egress" in data and "ingress" in data     # enforce default -> ingress block present
+    # --export also writes a sibling Terraform config.
+    tf = out.with_suffix(".tf")
+    assert tf.exists()
+    assert 'resource "databricks_account_network_policy"' in tf.read_text()
+
+
+def test_write_tf_export_into_directory(tmp_path):
+    payload = {"network_policy_id": "pol-x", "ingress": {"public_access": {"restriction_mode": "X"}}}
+    dest = cli._write_tf_export(str(tmp_path), payload)
+    assert dest.endswith("pol-x.tf")
+    assert 'resource "databricks_account_network_policy" "pol_x"' in (
+        (tmp_path / "pol-x.tf").read_text(encoding="utf-8"))
+
+
+def test_export_writes_utf8_non_ascii_labels(tmp_path):
+    # A non-ASCII rule label must write cleanly on any platform — Windows' default cp1252 would
+    # otherwise raise UnicodeEncodeError, so both writers pin UTF-8.
+    import json
+    from pathlib import Path
+    payload = {"network_policy_id": "pol", "ingress": {"public_access": {
+        "restriction_mode": "RESTRICTED_ACCESS",
+        "allow_rules": [{"label": "café-café", "destination": {"all_destinations": True}}]}}}
+    tf = cli._write_tf_export(str(tmp_path), payload)
+    js = cli._write_json_export(str(tmp_path), payload)
+    assert "café-café" in Path(tf).read_text(encoding="utf-8")
+    loaded = json.loads(Path(js).read_text(encoding="utf-8"))
+    assert loaded["ingress"]["public_access"]["allow_rules"][0]["label"] == "café-café"
 
 
 def test_acl_preflight_aborts_on_pas(monkeypatch):

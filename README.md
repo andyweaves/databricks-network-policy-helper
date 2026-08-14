@@ -65,9 +65,9 @@ Claude skill under [`.claude/skills/`](.claude/skills/).
 | `--profile <name>` | Workspace profile (from `~/.databrickscfg`); analysis + warehouse. |
 | `--policy-name <id>` | Policy name — prompted if omitted (blank = profile name); the id for single-policy scopes, the prefix for `per_workspace`. |
 | `--policy-mode dry_run\|enforce` | `dry_run` (default) = log-only; `enforce` = blocking. |
-| `--create-policy` | Master write switch — nothing is written without it (analysis/preview are always side-effect-free). |
+| `--create-policy` | Master write switch — nothing is written without it (analysis/preview are always side-effect-free). **Exception:** `migrate-acl` defaults it **on** (its job is to create the policy) — an interactive review gate still confirms, and `--no-create-policy --no-auto-assign` gives a propose-only run. |
 | `--auto-assign` | Bind the workspace(s) to the policy. |
-| `--export <path>` | Write the proposed `AccountNetworkPolicy` JSON (curl / REST-ready) — a directory writes `<policy-id>.json`. **Works in propose-only mode**, single-policy scopes only. |
+| `--export <path>` | Write the proposed `AccountNetworkPolicy` as JSON (curl / REST-ready) **and** a sibling best-effort **Terraform** `.tf` — a directory writes `<policy-id>.json` + `.tf` inside it (use `--export .` for the current directory). **Works in propose-only mode**, single-policy scopes only. |
 | `--account-id` / `--account-profile` | Account-admin auth, required to create/assign (separate from workspace auth). |
 | `--yes` / `-y` | Non-interactive: skip the step-through + review gates (for scripting/CI). |
 
@@ -77,7 +77,7 @@ Claude skill under [`.claude/skills/`](.claude/skills/).
 
 - 📥 **`ingress`**: `--scoping-mode`, `--policy-framing` (minimal/optimal/maximum), `--ip-acl-handling`, `--threat-deny-rules`, `--deny-denied-ips`, `--include-ipv6`, `--include-account-level`, `--disable-existing-ip-acls`.
 - 📤 **`egress`**: `--block-threat-domains` (off/matched_only/all), `--threat-feed`, `--source-type-filter`.
-- 🔁 **`migrate-acl`**: `--egress-policy` (allow_all/dry_run/restricted), `--disable-existing-ip-acls`.
+- 🔁 **`migrate-acl`**: `--disable-existing-ip-acls` (migrates IP ACLs verbatim — ingress only; no egress or scope options; **`--create-policy` defaults on**, so use `--no-create-policy --no-auto-assign` for propose-only).
 
 ## 🗺️ How each command flows
 
@@ -105,7 +105,7 @@ flowchart TD
     G3 --> H
     H["IP ACL handling: migrate_and_enrich / migrate / ignore<br/>+ threat-deny rules + deny-denied-IPs optional"] --> P["Preview proposed policy"]
     P --> EXP{"--export?"}
-    EXP -->|yes| EXPW["Write AccountNetworkPolicy JSON"]
+    EXP -->|yes| EXPW["Write JSON + Terraform"]
     EXP -->|no| CR{"--create-policy?"}
     EXPW --> CR
     CR -->|no| X2["Propose-only — nothing written"]
@@ -156,7 +156,7 @@ flowchart TD
     TDB --> LIM
     LIM --> P["Preview proposed egress"]
     P --> EXP{"--export?"}
-    EXP -->|yes| EXPW["Write AccountNetworkPolicy JSON<br/>egress + FULL_ACCESS ingress default"]
+    EXP -->|yes| EXPW["Write JSON + Terraform<br/>egress + FULL_ACCESS ingress default"]
     EXP -->|no| CR{"--create-policy?"}
     EXPW --> CR
     CR -->|no| X2["Propose-only — nothing written"]
@@ -195,25 +195,29 @@ flowchart TD
 flowchart TD
     A(["dbx-nwp-helper migrate-acl"]) --> B{"Confirm target workspace?"}
     B -->|no| X1["Abort — nothing written"]
-    B -->|yes| C["Resolve policy name<br/>--policy-name / prompt; blank = profile"]
-    C --> PAS{"PrivateLink (PAS) attached?"}
+    B -->|yes| GATE{"enableIpAccessLists × rule count<br/>(read IP access lists up front)"}
+    GATE -->|"enabled + 0 rules"| X4["No rules — nothing to migrate, stop"]
+    GATE -->|"disabled + 0 rules"| X4
+    GATE -->|"disabled + rules → enable & continue"| REEN["Set enableIpAccessLists=true — continue"]
+    GATE -->|"disabled + rules → decline / --yes"| X6["Not active — nothing to migrate, stop"]
+    REEN --> PAS
+    GATE -->|"enabled + 1+ rules"| PAS{"PrivateLink? (PAS attached<br/>or workspace VPC endpoints > 0)"}
     PAS -->|yes| X2["ABORT — not supported yet"]
     PAS -->|no| AS0{"Will create AND assign?"}
     AS0 -->|"yes: existing ENFORCED CBI policy"| X3["ABORT"]
     AS0 -->|"yes: existing DRY-RUN CBI policy"| PROM["Warn; offer to promote to enforced, then stop"]
-    AS0 -->|"yes: none / allow-all"| RD["Read workspace IP access lists (IPv4)<br/>ALLOW → allow, BLOCK → deny; labels migrated-*<br/>flag if enforcement currently disabled"]
-    AS0 -->|"no: propose-only / --no-auto-assign"| RD
-    RD --> EMPTY{"Any entries?"}
-    EMPTY -->|no| X4["Nothing to migrate — stop"]
-    EMPTY -->|yes| P["Preview + egress_policy note<br/>allow_all / dry_run / restricted"]
+    AS0 -->|"yes: none / allow-all"| NAME["Resolve policy name (prompt; blank = profile)<br/>must be unique — re-prompt if it exists"]
+    AS0 -->|"no: propose-only"| NAME
+    NAME --> RD["ALLOW → allow, BLOCK → deny (IPv4, ENABLED only)<br/>labels verbatim; disabled lists flagged, not migrated"]
+    RD --> P["Preview proposed policy + disabled-rule notice"]
     P --> EXP{"--export?"}
-    EXP -->|yes| EXPW["Write AccountNetworkPolicy JSON"]
-    EXP -->|no| CR{"--create-policy?"}
+    EXP -->|yes| EXPW["Write JSON + Terraform"]
+    EXP -->|no| CR{"--create-policy? (default on)"}
     EXPW --> CR
-    CR -->|no| X5["Propose-only — nothing written"]
+    CR -->|"no (--no-create-policy)"| X5["Propose-only — nothing written"]
     CR -->|yes| WMODE{"--policy-mode"}
-    WMODE -->|enforce| WE["Write ingress (blocking) + egress_policy block"]
-    WMODE -->|dry_run| WD["Write ingress_dry_run (log-only) + egress_policy block"]
+    WMODE -->|enforce| WE["Create ingress (blocking)<br/>+ FULL_ACCESS egress"]
+    WMODE -->|dry_run| WD["Create ingress_dry_run (log-only)<br/>+ FULL_ACCESS egress"]
     WE --> AS{"--auto-assign? (default on)"}
     WD --> AS
     AS -->|no| DONE(["Done"])
@@ -227,16 +231,18 @@ flowchart TD
     classDef write fill:#d1e7dd,stroke:#146c43,color:#111
     classDef warn fill:#fff3cd,stroke:#997404,color:#111
     class X2,X3 stop
-    class X1,X4,X5,DONE done
+    class X1,X4,X5,X6,DONE done
     class WD,WE,ASB,DISB write
-    class PROM warn
+    class PROM,REEN warn
 ```
 
 ## 🔒 Safety model
 
 - 🛑 **Nothing is written unless you opt in** — `--create-policy`. Analysis and proposal are always
   side-effect-free, and an interactive **review gate** confirms before any write (bypass with `--yes`
-  for scripting).
+  for scripting). (`migrate-acl` is the one exception — its purpose is to create the policy, so
+  `--create-policy` defaults **on**; the review gate still confirms, and `--no-create-policy
+  --no-auto-assign` gives a propose-only run.)
 - 🎯 **You confirm the target workspace.** Before any analysis or write, the CLI shows the exact
   workspace it's pointed at — profile, URL and id — and asks you to confirm, so a mis-set `--profile`
   can't act on the wrong workspace (skip with `--yes`).
@@ -317,7 +323,7 @@ tool's reference doc.
 |---|---|
 | `src/dbx_nwp_helper/cli.py` | 🎛️ The Typer CLI (all commands + flags). |
 | `src/dbx_nwp_helper/guided.py` | 🧭 The interactive Q&A wizard. |
-| `src/dbx_nwp_helper/core/` | 🧠 Engines: ingress, egress, ACL, policy builders, limits. |
+| `src/dbx_nwp_helper/core/` | 🧠 Engines: ingress, egress, ACL, policy builders, limits, Terraform export. |
 | `src/dbx_nwp_helper/feeds/` | 🕵️ Threat-intel / cloud / Databricks range loaders + local cache + RDAP. |
 | `src/dbx_nwp_helper/{auth,sql,queries}.py` | 🔌 Unified auth, SQL-warehouse connection, system-table queries. |
 | `src/dbx_nwp_helper/{console,render}.py` | 🎨 Rich theming + result rendering. |
@@ -366,9 +372,11 @@ covered by fast, network-free unit tests, and CLI flows are exercised via Typer'
   comes from `--existing-policy-id` instead (so `--policy-name` isn't used there). All names are
   normalised to a lowercase, `-`-safe, length-capped id and the CLI prints the result.
 - **`--export <path>`** (on `ingress`, `egress` and `migrate-acl`) writes the proposed
-  `AccountNetworkPolicy` JSON (a curl / REST-ready body) — handy for review or applying out-of-band;
-  a directory writes `<policy-id>.json` inside it, single-policy scopes only, and it works in
-  propose-only mode.
+  `AccountNetworkPolicy` JSON (a curl / REST-ready body) **and** a sibling best-effort **Terraform**
+  `.tf` (`databricks_account_network_policy`; review before `terraform apply` — the provider's
+  attribute names for account network policies may differ by version) — handy for review or applying
+  out-of-band. A directory writes `<policy-id>.json` + `<policy-id>.tf` inside it (use `--export .`
+  for the current directory), single-policy scopes only, and it works in propose-only mode.
 - **Pre-checks (create + assign).** Before creating and assigning a single policy, each command
   inspects the workspace's currently-assigned policy and aborts (or warns) rather than silently
   clobbering it. **Ingress** aborts on PrivateLink (a PAS), private-access / cross-workspace rules,

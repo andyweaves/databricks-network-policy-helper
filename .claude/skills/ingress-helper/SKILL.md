@@ -103,8 +103,10 @@ normalised to an id-safe slug (lowercased, non-alphanumerics → `-`, length-cap
 the resulting id.
 
 `--export <path>` writes the proposed network policy as a curl / REST-ready `AccountNetworkPolicy`
-JSON (ingress block + a `FULL_ACCESS` egress default); a directory writes `<policy-id>.json` inside
-it. Single-policy scopes only (refused for `per_workspace`); works in propose-only mode too.
+JSON (ingress block + a `FULL_ACCESS` egress default) **and** a sibling best-effort Terraform `.tf`
+(`databricks_account_network_policy` — review before `terraform apply`); a directory writes
+`<policy-id>.json` + `<policy-id>.tf` inside it. Single-policy scopes only (refused for
+`per_workspace`); works in propose-only mode too.
 
 Before any analysis or write, the CLI shows the **target workspace** (profile / URL / id) and asks
 you to confirm it — so a mis-set `--profile` can't act on the wrong workspace (skip with `--yes`).
