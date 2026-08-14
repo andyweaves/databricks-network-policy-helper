@@ -20,6 +20,7 @@ import typer
 
 from . import console, render
 from .config import (
+    DEFAULT_NAME_PREFIX,
     MAX_POLICY_ID_LEN,
     AclConfig,
     ApplyOptions,
@@ -28,6 +29,7 @@ from .config import (
     IngressConfig,
     validate_apply,
     validate_disable_ip_acls,
+    validate_export,
     validate_policy_name,
 )
 
@@ -193,17 +195,22 @@ def _confirm_workspace(conn: Connection, yes: bool):
     return wc
 
 
-def _resolve_acl_policy_name(cfg: AclConfig, conn: Connection, wc, yes: bool) -> None:
-    """migrate-acl names the new policy from --policy-name; if that wasn't given, prompt for one
-    (blank = use the profile name, falling back to the workspace id). Mutates cfg.policy_name."""
+def _resolve_policy_name(cfg, conn: Connection, wc, yes: bool) -> None:
+    """Resolve the policy name once, centrally (all three commands). An explicit --policy-name is
+    kept as-is; otherwise prompt for one (blank = the profile name, falling back to the workspace
+    id). Skipped when the run adds to an existing policy (the id comes from --existing-policy-id).
+    Mutates cfg.policy_name. For single-policy scopes the name is the policy id; for per_workspace
+    it's the prefix (-> <name>-ws-<id>)."""
     import sys
     if cfg.policy_name:
+        return
+    if getattr(getattr(cfg, "apply", None), "policy_action", "create_new") == "add_to_existing":
         return
     try:
         ws_id = wc.get_workspace_id()
     except Exception:  # noqa: BLE001
         ws_id = None
-    default = conn.profile or (str(ws_id) if ws_id is not None else "migrated-policy")
+    default = conn.profile or (str(ws_id) if ws_id is not None else DEFAULT_NAME_PREFIX)
     if yes or not sys.stdin.isatty():
         cfg.policy_name = default
         return
@@ -295,13 +302,127 @@ def _write_json_export(path: str, payload: dict) -> str:
     return str(dest)
 
 
-def _note_policy_name(name_prefix: str, policy_name: str) -> None:
-    """When an explicit --policy-name is given, show the id it normalises to (so the user sees the
-    real id when case/characters/length were adjusted)."""
+def _ingress_preflight(account, workspace_id, new_policy_id: str, yes: bool) -> None:
+    """ingress create-and-assign pre-checks. Aborts when we can't safely stand up a public-IP CBI
+    policy for the workspace:
+      * PrivateLink (PAS) configured on the workspace;
+      * the assigned policy has private-access / cross-workspace rules (which this command doesn't
+        build and can't yet preserve);
+      * the assigned policy already ENFORCES restrictive public ingress;
+      * assigning a *new* policy (a different id) would drop an existing restrictive egress on the
+        assigned policy (the new policy carries a FULL_ACCESS egress default).
+    A restrictive *dry-run* public ingress (or egress we'd drop) just warns. Called only when the run
+    will create AND assign a single policy — never for per_workspace or add_to_existing."""
+    from .core import acl as acl_core
+
+    pas = acl_core.workspace_pas_attached(account, workspace_id)
+    if pas is True:
+        console.banner("danger", "This workspace has PrivateLink (a PAS object) configured. Building "
+                                 "a CBI ingress policy for a PrivateLink workspace is NOT supported "
+                                 "yet - aborting.")
+        raise typer.Exit(code=1)
+    if pas is None:
+        console.banner("warn", "Couldn't verify whether PrivateLink (PAS) is configured (account "
+                               "read failed). If this workspace uses PrivateLink, this is NOT "
+                               "supported yet.")
+
+    pid, pol = acl_core.assigned_policy(account, workspace_id)
+    if pol is None:
+        return
+    ing = getattr(pol, "ingress", None)
+    dry = getattr(pol, "ingress_dry_run", None)
+    if acl_core.private_or_xws_restrictive(ing) or acl_core.private_or_xws_restrictive(dry):
+        console.banner("danger", f"The policy assigned to this workspace ('{pid}') has private-access "
+                                 "or cross-workspace rules, which this command can't preserve yet - "
+                                 "aborting.")
+        raise typer.Exit(code=1)
+    if acl_core.public_restrictive(ing):
+        console.banner("danger", f"This workspace already has an ENFORCED restrictive CBI ingress "
+                                 f"policy ('{pid}'). Replacing it is NOT supported yet - aborting.")
+        raise typer.Exit(code=1)
+    if acl_core.public_restrictive(dry):
+        console.banner("warn", f"The policy assigned to this workspace ('{pid}') has a restrictive "
+                               "DRY-RUN public ingress (not enforced) — assigning the new policy will "
+                               "replace it.")
+    # Opposite direction: a new policy id rebinds the workspace, dropping the assigned policy's egress
+    # (the new policy defaults to FULL_ACCESS egress). Updating the *same* id preserves it, so skip.
+    if new_policy_id and new_policy_id != pid:
+        _warn_or_abort_dropped_egress(acl_core, pid, getattr(pol, "egress", None), "ingress")
+
+
+def _warn_or_abort_dropped_egress(acl_core, pid, egress, this_direction: str) -> None:
+    """Shared by both preflights: when create-and-assign of a NEW policy id would rebind the
+    workspace away from an assigned policy that has a restrictive egress, abort if that egress is
+    ENFORCED (real protection lost) or warn if it's DRY-RUN. `this_direction` is the command running
+    ('ingress' / 'egress'), used only for the message."""
+    if not acl_core.egress_restrictive(egress):
+        return
+    if acl_core.egress_enforced(egress):
+        console.banner("danger",
+                       f"The policy assigned to this workspace ('{pid}') has an ENFORCED restrictive "
+                       f"egress; creating a new {this_direction} policy would rebind the workspace "
+                       f"and drop it - aborting. Use --policy-action add_to_existing "
+                       f"--existing-policy-id {pid} to keep the egress and add {this_direction} to it.")
+        raise typer.Exit(code=1)
+    console.banner("warn",
+                   f"The policy assigned to this workspace ('{pid}') has a restrictive DRY-RUN egress "
+                   f"(not enforced) — creating a new {this_direction} policy will drop it.")
+
+
+def _egress_preflight(account, workspace_id, new_policy_id: str, yes: bool) -> None:
+    """egress create-and-assign pre-check — the egress-direction mirror of _ingress_preflight.
+    Aborts if the policy already assigned to the workspace has an ENFORCED restrictive egress
+    (replacing it isn't supported yet); warns if it's a restrictive DRY-RUN egress (assigning
+    replaces it). Also guards the opposite direction: assigning a *new* policy id drops the assigned
+    policy's ingress (the new policy defaults to FULL_ACCESS ingress), so abort/warn on a restrictive
+    ingress there. Allow-all (FULL_ACCESS) blocks — or no assigned policy — are fine. Called only when
+    the run will create AND assign a single policy."""
+    from .core import acl as acl_core
+
+    pid, pol = acl_core.assigned_policy(account, workspace_id)
+    if pol is None:
+        return
+    egr = getattr(pol, "egress", None)
+    if acl_core.egress_restrictive(egr):
+        if acl_core.egress_enforced(egr):
+            console.banner("danger", "This workspace already has an ENFORCED restrictive egress "
+                                     f"policy ('{pid}'). Replacing it is NOT supported yet - "
+                                     "aborting.")
+            raise typer.Exit(code=1)
+        console.banner("warn", f"The policy assigned to this workspace ('{pid}') has a restrictive "
+                               "DRY-RUN egress (not enforced) — assigning the new policy will replace "
+                               "it.")
+    # Opposite direction: a new policy id rebinds the workspace, dropping the assigned policy's
+    # ingress (the new egress policy defaults to FULL_ACCESS ingress). Same-id updates preserve it.
+    if new_policy_id and new_policy_id != pid:
+        ing = getattr(pol, "ingress", None)
+        dry = getattr(pol, "ingress_dry_run", None)
+
+        def _ing_restrictive(blk):
+            return (acl_core.public_restrictive(blk)
+                    or acl_core.private_or_xws_restrictive(blk))
+
+        if _ing_restrictive(ing):
+            console.banner("danger",
+                           f"The policy assigned to this workspace ('{pid}') has an ENFORCED "
+                           "restrictive ingress; creating a new egress policy would rebind the "
+                           "workspace and drop it - aborting. Use --policy-action add_to_existing "
+                           f"--existing-policy-id {pid} to keep the ingress and add egress to it.")
+            raise typer.Exit(code=1)
+        if _ing_restrictive(dry):
+            console.banner("warn", f"The policy assigned to this workspace ('{pid}') has a "
+                                   "restrictive DRY-RUN ingress (not enforced) — creating a new "
+                                   "egress policy will drop it.")
+
+
+def _note_policy_name(policy_name: str) -> None:
+    """Show the id the resolved policy name normalises to (so the user sees the real id when
+    case/characters/length were adjusted). For per_workspace the name is a prefix, so callers skip
+    this there."""
     if not policy_name:
         return
     from .core import policy
-    normalized = policy.policy_name(name_prefix, explicit=policy_name)
+    normalized = policy.policy_name("", explicit=policy_name)
     if normalized != policy_name:
         console.banner("info", f"Using policy id '{normalized}' (names are normalised: lowercased, "
                                f"non-alphanumerics become '-', capped at {MAX_POLICY_ID_LEN} chars).")
@@ -396,13 +517,17 @@ def ingress(
              "one per workspace seen; all_workspaces: a single policy from all workspaces' traffic."),
     policy_mode: Mode = typer.Option(Mode.dry_run, help="dry_run=log-only; enforce=blocking."),
     threat_deny_rules: ThreatDeny = typer.Option(ThreatDeny.off, help="Threat-intel deny rules."),
-    name_prefix: str = typer.Option("dbx-nwp", help="Prefix for policy names/labels."),
     policy_name: str = typer.Option(
-        "", help="Explicit policy id (single-policy scopes only). Blank = derive from --name-prefix. "
-                 "Normalised: lowercased, non-alphanumerics → '-', length-capped."),
+        "", help="Policy name. If omitted you'll be prompted (blank there = the profile name). The "
+                 "policy id for single-policy scopes; the prefix (→ <name>-ws-<id>) for "
+                 "per_workspace. Normalised: lowercased, non-alphanumerics → '-', length-capped."),
     ip_acl_handling: AclHandling = typer.Option(
         AclHandling.migrate_and_enrich, help="How to treat an existing IP ACL."),
     deny_denied_ips: bool = typer.Option(False, help="Deny currently-denied (403) source IPs."),
+    export: str = typer.Option(
+        "", help="Write the proposed network-policy JSON to this path (for curl / the REST API); a "
+                 "directory writes <policy-id>.json inside it. Single-policy scopes only. Works in "
+                 "propose-only mode too."),
     disable_existing_ip_acls: bool = typer.Option(
         False, help="After creating AND assigning the policy, disable this workspace's existing IP "
                     "access lists (enableIpAccessLists=false). Requires --create-policy and "
@@ -432,7 +557,8 @@ def ingress(
         refresh_feeds=refresh_feeds, policy_framing=policy_framing.value,
         scoping_mode=scoping_mode.value, policy_scope=policy_scope.value,
         policy_mode=policy_mode.value, threat_deny_rules=threat_deny_rules.value,
-        name_prefix=name_prefix, policy_name=policy_name, ip_acl_handling=ip_acl_handling.value,
+        policy_name=policy_name, export=export,
+        ip_acl_handling=ip_acl_handling.value,
         deny_denied_ips=deny_denied_ips, disable_existing_ip_acls=disable_existing_ip_acls,
         apply=ApplyOptions(create_policy=create_policy, policy_action=policy_action.value,
                            existing_policy_id=existing_policy_id, auto_assign=auto_assign),
@@ -459,10 +585,14 @@ def egress(
     block_threat_domains: ThreatDeny = typer.Option(
         ThreatDeny.off, help="Block known-bad domains: off/matched_only/all."),
     threat_feed: str = typer.Option("threatfox", help="Threat-domain feed."),
-    name_prefix: str = typer.Option("dbx-nwp", help="Prefix for policy names/labels."),
     policy_name: str = typer.Option(
-        "", help="Explicit policy id (single-policy scopes only). Blank = derive from --name-prefix. "
-                 "Normalised: lowercased, non-alphanumerics → '-', length-capped."),
+        "", help="Policy name. If omitted you'll be prompted (blank there = the profile name). The "
+                 "policy id for single-policy scopes; the prefix (→ <name>-ws-<id>) for "
+                 "per_workspace. Normalised: lowercased, non-alphanumerics → '-', length-capped."),
+    export: str = typer.Option(
+        "", help="Write the proposed network-policy JSON to this path (for curl / the REST API); a "
+                 "directory writes <policy-id>.json inside it. Single-policy scopes only. Works in "
+                 "propose-only mode too."),
     account_id: str | None = typer.Option(None, help="Databricks account_id (apply)."),
     account_host: str = typer.Option("https://accounts.cloud.databricks.com", help="Account host."),
     account_profile: str | None = typer.Option(
@@ -479,8 +609,9 @@ def egress(
     """Build (and optionally apply) a serverless egress (SEG) allow-list."""
     cfg = EgressConfig(
         lookback_days=lookback_days, min_events=min_events, source_type_filter=source_type_filter,
-        enable_rdap=enable_rdap, refresh_feeds=refresh_feeds, name_prefix=name_prefix,
-        policy_name=policy_name, policy_mode=policy_mode.value, policy_scope=policy_scope.value,
+        enable_rdap=enable_rdap, refresh_feeds=refresh_feeds,
+        policy_name=policy_name, export=export,
+        policy_mode=policy_mode.value, policy_scope=policy_scope.value,
         block_threat_domains=block_threat_domains.value, threat_feed=threat_feed,
         apply=ApplyOptions(create_policy=create_policy, policy_action=policy_action.value,
                            existing_policy_id=existing_policy_id, auto_assign=auto_assign),
@@ -593,14 +724,17 @@ def _run_ingress(cfg: IngressConfig, conn: Connection, yes: bool) -> None:
         validate_disable_ip_acls(cfg.disable_existing_ip_acls, cfg.apply.create_policy,
                                  cfg.apply.auto_assign)
         validate_policy_name(cfg.policy_name, cfg.policy_scope, cfg.apply.policy_action)
+        validate_export(cfg.export, cfg.policy_scope)
     except ValueError as e:
         raise typer.BadParameter(str(e)) from None
 
     console.title_panel("Context-Based Ingress (CBI) Helper",
                         "Propose a CBI allow-list from real audit-log source IPs.")
     wc = _confirm_workspace(conn, yes)
+    _resolve_policy_name(cfg, conn, wc, yes)
     render.ingress_decisions(cfg)
-    _note_policy_name(cfg.name_prefix, cfg.policy_name)
+    if cfg.policy_scope != "per_workspace":
+        _note_policy_name(cfg.policy_name)
     _confirm_params(yes)
 
     # Account-level work (apply, or identity scoping via SCIM) needs an account_id — prompt for it up
@@ -629,6 +763,15 @@ def _run_ingress(cfg: IngressConfig, conn: Connection, yes: bool) -> None:
     render.ingress_preview(previews, cfg, analysis)
     if previews:
         console.responsibility_warning("source IP addresses / CIDRs")
+
+    if cfg.export:
+        if previews:
+            payload = rules.export_payload(policies, cfg, conn.account_id or "",
+                                           auth.this_workspace_id(conn), profile=conn.profile)
+            dest = _write_json_export(cfg.export, payload)
+            console.banner("success", f"Wrote proposed network-policy JSON to {dest}.")
+        else:
+            console.banner("warn", "Nothing to export — the analysis produced no ingress rules.")
     _checkpoint(yes)
 
     if not cfg.apply.create_policy:
@@ -639,12 +782,20 @@ def _run_ingress(cfg: IngressConfig, conn: Connection, yes: bool) -> None:
                                  "policy can be created. Review the candidate funnel above (try "
                                  "--lookback-days / --min-events / --include-account-level).")
         raise typer.Exit(code=1)
+
+    account = auth.account_client(conn)
+    this_ws = auth.this_workspace_id(conn)
+    # Pre-check the workspace we'd bind — but only when creating AND assigning a single new policy
+    # (per_workspace fans out; add_to_existing targets a chosen policy on purpose).
+    if (cfg.apply.auto_assign and cfg.apply.policy_action == "create_new"
+            and cfg.policy_scope in ("current_workspace", "all_workspaces")):
+        new_id = rules._single_policy_id(cfg, conn.profile, this_ws)
+        _ingress_preflight(account, this_ws, new_id, yes)
+
     if not _confirm_write(cfg.policy_mode, yes):
         console.banner("info", "Aborted — nothing written.")
         return
 
-    account = auth.account_client(conn)
-    this_ws = auth.this_workspace_id(conn)
     with console.status("Applying policy…"):
         results = rules.apply(policies, cfg, account, conn.account_id, this_ws,
                               profile=conn.profile, note=lambda m: console.banner("info", m))
@@ -659,14 +810,17 @@ def _run_egress(cfg: EgressConfig, conn: Connection, yes: bool) -> None:
     try:
         validate_apply(cfg.apply, cfg.policy_scope, other_direction="ingress")
         validate_policy_name(cfg.policy_name, cfg.policy_scope, cfg.apply.policy_action)
+        validate_export(cfg.export, cfg.policy_scope)
     except ValueError as e:
         raise typer.BadParameter(str(e)) from None
 
     console.title_panel("Egress Policy Helper (serverless egress / SEG)",
                         "Propose an egress allow-list from observed outbound traffic.")
-    _confirm_workspace(conn, yes)
+    wc = _confirm_workspace(conn, yes)
+    _resolve_policy_name(cfg, conn, wc, yes)
     render.egress_decisions(cfg)
-    _note_policy_name(cfg.name_prefix, cfg.policy_name)
+    if cfg.policy_scope != "per_workspace":
+        _note_policy_name(cfg.policy_name)
     _confirm_params(yes)
 
     if cfg.apply.create_policy:
@@ -685,6 +839,16 @@ def _run_egress(cfg: EgressConfig, conn: Connection, yes: bool) -> None:
     render.egress_preview(previews, cfg)
     if previews:
         console.responsibility_warning("FQDNs and storage destinations")
+
+    if cfg.export:
+        if previews:
+            # this_ws is set for current_workspace (the only scope whose name uses it); None otherwise.
+            payload = eg.export_payload(analysis, cfg, conn.account_id or "", this_ws,
+                                        profile=conn.profile)
+            dest = _write_json_export(cfg.export, payload)
+            console.banner("success", f"Wrote proposed network-policy JSON to {dest}.")
+        else:
+            console.banner("warn", "Nothing to export — no egress destinations were classified.")
     _checkpoint(yes)
 
     if not cfg.apply.create_policy:
@@ -695,13 +859,21 @@ def _run_egress(cfg: EgressConfig, conn: Connection, yes: bool) -> None:
                                  "policy can be created. Confirm outbound_network has data for this "
                                  "window (stand up a dry_run egress policy first to populate it).")
         raise typer.Exit(code=1)
-    if not _confirm_write(cfg.policy_mode, yes):
-        console.banner("info", "Aborted — nothing written.")
-        return
 
     account = auth.account_client(conn)
     if this_ws is None:
         this_ws = auth.this_workspace_id(conn)
+    # Pre-check the workspace we'd bind — but only when creating AND assigning a single new policy
+    # (per_workspace fans out; add_to_existing targets a chosen policy on purpose).
+    if (cfg.apply.auto_assign and cfg.apply.policy_action == "create_new"
+            and cfg.policy_scope in ("current_workspace", "all_workspaces")):
+        new_id = eg._single_policy_id(cfg, conn.profile, this_ws)
+        _egress_preflight(account, this_ws, new_id, yes)
+
+    if not _confirm_write(cfg.policy_mode, yes):
+        console.banner("info", "Aborted — nothing written.")
+        return
+
     with console.status("Applying egress policy…"):
         results = eg.apply(analysis, cfg, account, conn.account_id, this_ws,
                            profile=conn.profile, note=lambda m: console.banner("info", m))
@@ -720,9 +892,9 @@ def _run_acl(cfg: AclConfig, conn: Connection, yes: bool) -> None:
     console.title_panel("IP Access List → CBI migration",
                         "Recreate this workspace's IP ACL as a CBI policy, verbatim.")
     wc = _confirm_workspace(conn, yes)
-    _resolve_acl_policy_name(cfg, conn, wc, yes)
+    _resolve_policy_name(cfg, conn, wc, yes)
     render.acl_decisions(cfg)
-    _note_policy_name("", cfg.policy_name)
+    _note_policy_name(cfg.policy_name)
     _confirm_params(yes)
 
     # migrate-acl always needs account access now: the pre-checks below (PAS + existing CBI policy)

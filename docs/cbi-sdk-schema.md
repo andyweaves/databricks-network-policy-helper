@@ -72,6 +72,11 @@ AuthenticationIdentity
   SCIM (`AccountClient.users.list(filter='userName eq "..."')` /
   `service_principals.list(filter='applicationId eq "..."')`, taking `.id`).
 - **No groups** — only USER and SERVICE_PRINCIPAL principal types exist.
+- **`authentication` is rejected on Apps / Lakebase / `all_destinations` rules** — those destinations
+  implicitly allow all users + service principals, so a `SELECTED_IDENTITIES` block returns
+  `InvalidParameterValue` ("omit the authentication block"). These are the only destination shapes
+  the CLI emits, so per-identity scoping can't be attached today; `build_ingress_rule` omits the
+  block and the ingress engine warns (`core/policy.py`, `core/ingress_rules.py`).
 - **Dry-run vs enforce are separate blocks**, not an enforcement flag: write `ingress_dry_run` to
   trial (log-only), `ingress` to enforce (blocking). Update replaces the whole policy, so the CLI
   reads the existing policy and re-sends the untouched blocks (`core/policy.py`).

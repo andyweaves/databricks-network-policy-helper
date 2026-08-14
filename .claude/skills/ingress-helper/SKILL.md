@@ -79,25 +79,55 @@ The CLI is a uv project. From a checkout: `uv sync`, then run via `uv run dbx-nw
   SCIM; account admin required). Groups are **not** supported — only users and service principals.
 - `ip_identity_and_destination` — both.
 
+> **CBI API limit on per-identity rules.** The API rejects an `authentication` block on
+> Apps / Lakebase / all-destinations rules (they allow all users + service principals) — the only
+> destination shapes this tool emits. So identity scoping today does **not** pin a rule to the
+> selected principals; its real effect is to **exclude** CIDR groups whose principals couldn't be
+> resolved (narrowing the allow-list to identifiable traffic). The CLI **warns** when identity
+> scoping is requested so this isn't a surprise.
+
 ## Policy scope (`--policy-scope`) & limits
 
-- `current_workspace` (default) — one policy built from **this** workspace's traffic, named
-  `<name_prefix>-<profile>`, bound to this workspace on `--auto-assign`.
-- `per_workspace` — a tailored policy per workspace seen, named `<name_prefix>-ws-<id>`.
-- `all_workspaces` — a single policy built from **all** workspaces' traffic, named `<name_prefix>`.
+- `current_workspace` (default) — one policy built from **this** workspace's traffic, named `<name>`,
+  bound to this workspace on `--auto-assign`.
+- `per_workspace` — a tailored policy per workspace seen, named `<name>-ws-<id>` (the name is the
+  prefix here).
+- `all_workspaces` — a single policy built from **all** workspaces' traffic, named `<name>`.
 
 Audit `workspace_id = 0` is account-level, excluded unless `--include-account-level`.
 
-Names are derived from `--name-prefix` as above. To set the policy id yourself instead, pass
-`--policy-name <id>` (single-policy scopes only — not `per_workspace`, and not `add_to_existing`,
-which uses `--existing-policy-id`). It's normalised to an id-safe slug (lowercased, non-alphanumerics
-→ `-`, length-capped) and the CLI prints the resulting id.
+`<name>` is the policy name: the CLI **prompts** for it (blank = the profile name, falling back to
+the workspace id), or takes `--policy-name` non-interactively. With `--policy-action add_to_existing`
+the id comes from `--existing-policy-id` instead, so `--policy-name` isn't used there. The name is
+normalised to an id-safe slug (lowercased, non-alphanumerics → `-`, length-capped) and the CLI prints
+the resulting id.
+
+`--export <path>` writes the proposed network policy as a curl / REST-ready `AccountNetworkPolicy`
+JSON (ingress block + a `FULL_ACCESS` egress default); a directory writes `<policy-id>.json` inside
+it. Single-policy scopes only (refused for `per_workspace`); works in propose-only mode too.
 
 Before any analysis or write, the CLI shows the **target workspace** (profile / URL / id) and asks
 you to confirm it — so a mis-set `--profile` can't act on the wrong workspace (skip with `--yes`).
 
+**Pre-checks (create + assign only).** When the run will create **and** assign a single policy, the
+CLI first checks the target workspace and **aborts** if it can't safely stand up a public-IP policy:
+PrivateLink (a PAS) is configured; the assigned policy has **private-access / cross-workspace** rules
+(which this command doesn't build and can't yet preserve); or it already **enforces** restrictive
+public ingress. A restrictive *dry-run* public policy only warns (assigning replaces it), and an
+allow-all policy (e.g. the account's `default-policy`) is fine. It also guards the **opposite
+direction**: if creating the policy under a **new** id would rebind the workspace and drop an
+existing restrictive **egress** on the assigned policy (the new policy carries a `FULL_ACCESS` egress
+default), it aborts on an enforced egress (warns on a dry-run one) — use `add_to_existing` to keep
+it. Updating the same id in place preserves the other direction. Skipped for `per_workspace` and
+`add_to_existing`.
+
+`add_to_existing` updates only the ingress block and **leaves an existing egress as-is**; a brand-new
+policy gets a permissive `FULL_ACCESS` egress default (and, symmetrically, the egress helper leaves
+an existing ingress alone and defaults a missing one) — so composing ingress + egress never clobbers
+the other direction.
+
 Applying: **`--create-policy`** is the master switch; **`--policy-action`** chooses `create_new`
-(a fresh policy from `--name-prefix`) or `add_to_existing` (update `--existing-policy-id`, replacing
+(a fresh policy named as above) or `add_to_existing` (update `--existing-policy-id`, replacing
 only its ingress block and leaving egress intact — needs a single-policy scope, i.e.
 `current_workspace` or `all_workspaces`, not `per_workspace`);
 **`--auto-assign`** binds the workspace(s). `add_to_existing` is how you layer ingress onto a policy

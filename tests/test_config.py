@@ -28,12 +28,14 @@ def test_include_account_level_defaults_false():
     assert IngressConfig().include_account_level is False
 
 
-def test_name_prefix_default_aligns_with_command():
-    # migrate-acl no longer has a name_prefix (it names the policy directly); ingress/egress keep it.
+def test_no_command_carries_name_prefix():
+    # No command carries a name_prefix any more — the policy name is resolved centrally (from
+    # --policy-name or the profile name). DEFAULT_NAME_PREFIX is only the final fallback when there's
+    # neither a profile nor a workspace id.
     from dbx_nwp_helper.config import DEFAULT_NAME_PREFIX, EgressConfig
     assert DEFAULT_NAME_PREFIX == "dbx-nwp"
-    assert IngressConfig().name_prefix == "dbx-nwp"
-    assert EgressConfig().name_prefix == "dbx-nwp"
+    assert not hasattr(IngressConfig(), "name_prefix")
+    assert not hasattr(EgressConfig(), "name_prefix")
 
 
 def test_policy_scope_defaults_to_current_workspace():
@@ -110,9 +112,9 @@ def test_validate_policy_name_rejects_add_to_existing():
         validate_policy_name("my-pol", "current_workspace", "add_to_existing")
 
 
-def test_validate_policy_name_rejects_per_workspace():
-    with pytest.raises(ValueError, match="per_workspace"):
-        validate_policy_name("my-pol", "per_workspace", "create_new")
+def test_validate_policy_name_allows_per_workspace():
+    # per_workspace now uses the name as a prefix (-> <name>-ws-<id>), so it's valid.
+    validate_policy_name("my-pol", "per_workspace", "create_new")
 
 
 def test_validate_policy_name_ok_single_scope_create_new():
@@ -130,3 +132,20 @@ def test_policy_name_defaults_blank():
 def test_acl_egress_policy_defaults_to_dry_run():
     from dbx_nwp_helper.config import AclConfig
     assert AclConfig().egress_policy == "dry_run"
+
+
+def test_validate_export_rejects_per_workspace():
+    from dbx_nwp_helper.config import validate_export
+    with pytest.raises(ValueError, match="per_workspace"):
+        validate_export("out.json", "per_workspace")
+
+
+def test_validate_export_ok_when_blank_or_single_scope():
+    from dbx_nwp_helper.config import validate_export
+    validate_export("", "per_workspace")  # not requested -> no validation
+    for scope in ("current_workspace", "all_workspaces"):
+        validate_export("out.json", scope)
+
+
+def test_ingress_export_defaults_blank():
+    assert IngressConfig().export == ""

@@ -102,18 +102,18 @@ def _ingress_wizard(conn: Connection) -> IngressConfig:
     acl_handling = _select("How should an existing IP ACL be treated?", IP_ACL_HANDLING,
                            default="migrate_and_enrich")
     threat_deny = _select("Add threat-intel deny rules?", THREAT_DENY_RULES, default="off")
-    name_prefix = _text("Name prefix for the policy?", "dbx-nwp")
 
     apply = _apply_wizard(conn, scope, other="egress")
     mode = _mode_wizard() if apply.create_policy else "dry_run"
-    policy_name = _explicit_name_prompt(scope, apply.policy_action)
     disable_acls = (apply.create_policy and apply.auto_assign
                     and _confirm("Disable the workspace's existing IP access lists after applying? "
                                  "(the new CBI policy replaces them)", False))
+    # The policy name is prompted for centrally in the run flow (blank = profile name), so it isn't
+    # asked here.
     return IngressConfig(
         lookback_days=lookback, min_events=min_events, threat_feeds=feeds, enable_rdap=enable_rdap,
         policy_framing=framing, scoping_mode=scoping, policy_scope=scope, policy_mode=mode,
-        threat_deny_rules=threat_deny, name_prefix=name_prefix, policy_name=policy_name,
+        threat_deny_rules=threat_deny,
         ip_acl_handling=acl_handling, disable_existing_ip_acls=disable_acls, apply=apply)
 
 
@@ -125,23 +125,15 @@ def _egress_wizard(conn: Connection) -> EgressConfig:
     scope = _select("Policy scope?", POLICY_SCOPES, default="current_workspace")
     enable_rdap = _confirm("Look up the cloud owner of internet FQDNs?", True)
     block = _select("Block known-bad domains from a threat feed?", BLOCK_THREAT_DOMAINS, default="off")
-    name_prefix = _text("Name prefix for the policy?", "dbx-nwp")
 
     apply = _apply_wizard(conn, scope, other="ingress")
     mode = _mode_wizard() if apply.create_policy else "dry_run"
-    policy_name = _explicit_name_prompt(scope, apply.policy_action)
+    # The policy name is prompted for centrally in the run flow (blank = profile name), so it isn't
+    # asked here.
     return EgressConfig(
         lookback_days=lookback, min_events=min_events, source_type_filter=src_filter,
         enable_rdap=enable_rdap, policy_scope=scope, policy_mode=mode, block_threat_domains=block,
-        name_prefix=name_prefix, policy_name=policy_name, apply=apply)
-
-
-def _explicit_name_prompt(scope: str, policy_action: str) -> str:
-    """Offer an explicit policy name only where it's valid — a single created policy (not
-    per_workspace, which fans out; not add_to_existing, which uses --existing-policy-id)."""
-    if scope == "per_workspace" or policy_action == "add_to_existing":
-        return ""
-    return _text("Explicit policy name? (blank = auto-generate from the prefix)")
+        apply=apply)
 
 
 def _acl_wizard(conn: Connection) -> AclConfig:

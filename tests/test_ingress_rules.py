@@ -128,6 +128,21 @@ def test_identity_scoping_unresolved_group_excluded():
     assert a.excluded_unresolved == 1
 
 
+def test_identity_scoping_warns_and_built_block_omits_authentication():
+    # The CBI API rejects a per-identity auth block on all/Apps/Lakebase destinations, so identity
+    # scoping warns and the built block carries no authentication (would otherwise 400 on apply).
+    a = _analysis([_suggestion(principal_emails=["a@x.com"], subject_names=[],
+                               minimal_cidrs=["1.1.1.1/32"])])
+    ident = {"a@x.com": {"principal_id": 42, "principal_type": "USER"}}
+    notes = []
+    cfg = IngressConfig(scoping_mode="ip_and_identity")
+    pols = rules.build_rules(a, cfg, identity_resolution=ident, note=notes.append)
+    assert any("per-identity authentication" in n for n in notes)
+    prev = rules.preview_blocks(pols, cfg)
+    rule = prev[ALL_WORKSPACES]["ingress_dry_run"]["public_access"]["allow_rules"][0]
+    assert "authentication" not in rule
+
+
 # ------------------------------------------------------------------------------- ACL handling
 def _acl(label, list_type, ips, enabled=True):
     return {"label": label, "list_type": list_type, "enabled": enabled, "ip_addresses": ips}
@@ -280,7 +295,7 @@ def test_resolve_identities_maps_users():
 
 def test_apply_single_create_new_no_assign():
     a = _analysis([_suggestion(minimal_cidrs=["1.1.1.1/32"])])
-    cfg = IngressConfig(scoping_mode="ip_only", name_prefix="np-smoke", policy_scope="all_workspaces")
+    cfg = IngressConfig(scoping_mode="ip_only", policy_name="np-smoke", policy_scope="all_workspaces")
     cfg.apply.create_policy = True
     pols = rules.build_rules(a, cfg)
     acct = _FakeAccount()
@@ -293,7 +308,7 @@ def test_apply_single_create_new_no_assign():
 
 def test_apply_single_auto_assign_binds_workspace():
     a = _analysis([_suggestion(minimal_cidrs=["1.1.1.1/32"])])
-    cfg = IngressConfig(scoping_mode="ip_only", name_prefix="np", policy_scope="all_workspaces")
+    cfg = IngressConfig(scoping_mode="ip_only", policy_name="np", policy_scope="all_workspaces")
     cfg.apply.create_policy = True
     cfg.apply.auto_assign = True
     pols = rules.build_rules(a, cfg)
@@ -303,22 +318,39 @@ def test_apply_single_auto_assign_binds_workspace():
     assert acct.workspace_network_configuration.bound == [555]
 
 
-def test_apply_current_workspace_names_policy_with_profile():
+def test_apply_current_workspace_names_policy_from_profile_when_name_blank():
+    # With no explicit policy_name, the single-policy id defaults to the profile name (the central
+    # resolver's default) — no prefix any more.
     a = _analysis([_suggestion(minimal_cidrs=["1.1.1.1/32"])])
-    cfg = IngressConfig(scoping_mode="ip_only", name_prefix="np", policy_scope="current_workspace")
+    cfg = IngressConfig(scoping_mode="ip_only", policy_scope="current_workspace")
     cfg.apply.create_policy = True
     pols = rules.build_rules(a, cfg)
     acct = _FakeAccount()
     results = rules.apply(pols, cfg, acct, account_id="acc", this_workspace_id=555, profile="sfe-plain")
-    assert results[0]["policy_id"] == "np-sfe-plain"
+    assert results[0]["policy_id"] == "sfe-plain"
     assert results[0]["target"] == "current_workspace"
 
 
 def test_apply_current_workspace_falls_back_to_ws_id_without_profile():
     a = _analysis([_suggestion(minimal_cidrs=["1.1.1.1/32"])])
-    cfg = IngressConfig(scoping_mode="ip_only", name_prefix="np", policy_scope="current_workspace")
+    cfg = IngressConfig(scoping_mode="ip_only", policy_scope="current_workspace")
     cfg.apply.create_policy = True
     pols = rules.build_rules(a, cfg)
     acct = _FakeAccount()
     results = rules.apply(pols, cfg, acct, account_id="acc", this_workspace_id=555, profile=None)
-    assert results[0]["policy_id"] == "np-555"
+    assert results[0]["policy_id"] == "555"
+
+
+def test_export_payload_builds_full_single_policy():
+    # --export produces the full AccountNetworkPolicy: ingress mode block + FULL_ACCESS egress.
+    spec = {"label": "office", "cidrs": ["1.2.3.4/32"], "destination": "all_destinations",
+            "identity_type": "ALL_USERS", "identities": []}
+    policies = {ALL_WORKSPACES: {"allow": [spec], "deny": []}}
+    cfg = IngressConfig(policy_scope="all_workspaces", policy_mode="enforce",
+                        policy_name="my-ingress")
+    payload = rules.export_payload(policies, cfg, "acc-1", this_workspace_id=42)
+    assert payload["network_policy_id"] == "my-ingress"
+    assert payload["account_id"] == "acc-1"
+    assert "egress" in payload                       # FULL_ACCESS egress default added
+    assert "ingress" in payload                      # enforce -> ingress (not ingress_dry_run)
+    assert payload["ingress"]["public_access"]["allow_rules"]

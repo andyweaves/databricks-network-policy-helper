@@ -14,6 +14,12 @@ from ..config import MAX_POLICY_ID_LEN
 
 Note = Callable[[str], None]
 
+# Destinations the CBI API forbids an authentication block on — they implicitly allow all users +
+# service principals, so a SELECTED_IDENTITIES block is rejected. These are the only destination
+# shapes this tool currently emits (see core/ingress.py), so per-identity auth is effectively
+# unsupported today; the ingress engine warns when identity scoping is requested.
+_DESTINATIONS_WITHOUT_AUTH = {None, "all_destinations", "apps_runtime", "lakebase_runtime"}
+
 
 # --------------------------------------------------------------------------- ingress block builders
 def build_ingress_rule(spec: dict, mode_label: str):
@@ -40,8 +46,12 @@ def build_ingress_rule(spec: dict, mode_label: str):
     else:
         destination = Destination(all_destinations=True)
 
+    # The CBI API rejects an authentication block on the broad "runtime"/"all" destinations
+    # (Apps / Lakebase / all_destinations support only all users + service principals). Only attach
+    # per-identity authentication where the destination can carry it.
     authentication = None
-    if spec.get("identity_type") == "SELECTED_IDENTITIES" and spec.get("identities"):
+    if (spec.get("destination") not in _DESTINATIONS_WITHOUT_AUTH
+            and spec.get("identity_type") == "SELECTED_IDENTITIES" and spec.get("identities")):
         identities = [
             Identity(
                 principal_id=i["principal_id"],
@@ -69,7 +79,7 @@ def build_deny_rule(spec: dict, mode_label: str):
                 destination=Destination(all_destinations=True))
 
 
-def build_ingress_block(allow: list[dict], deny: list[dict], mode_label: str, name_prefix: str,
+def build_ingress_block(allow: list[dict], deny: list[dict], mode_label: str,
                         note: Note = lambda _m: None):
     """Assemble a CustomerFacingIngressNetworkPolicy from allow specs (+ optional deny specs).
 
@@ -107,6 +117,17 @@ def build_full_access_egress():
     return NetworkPolicyEgress(network_access=EgressAccess(restriction_mode=EgressRestriction.FULL_ACCESS))
 
 
+def build_full_access_ingress():
+    """A permissive (public FULL_ACCESS) ingress block — used when an egress-only helper creates a
+    new policy so it doesn't leave the policy without a defined (non-restrictive) ingress."""
+    from databricks.sdk.service.settings import (  # noqa: I001
+        CustomerFacingIngressNetworkPolicy as IngressPolicy,
+        CustomerFacingIngressNetworkPolicyPublicAccess as PublicAccess,
+        CustomerFacingIngressNetworkPolicyPublicAccessRestrictionMode as RestrictionMode,
+    )
+    return IngressPolicy(public_access=PublicAccess(restriction_mode=RestrictionMode.FULL_ACCESS))
+
+
 # --------------------------------------------------------------------------------- policy id naming
 def _slug(text: str) -> str:
     """Normalise a free-form label (e.g. a profile name) into a policy-id-safe slug."""
@@ -125,14 +146,15 @@ def policy_name(name_prefix: str, workspace_id: int | None = None, suffix: str |
     id-safe form and capped, falling back to the prefix if it slugs away to nothing."""
     if explicit:
         return (_slug(explicit) or _slug(name_prefix) or "policy")[:MAX_POLICY_ID_LEN]
+    prefix = _slug(name_prefix) or "policy"
     if workspace_id is not None:
         tail = f"-ws-{workspace_id}"
     elif suffix:
         tail = f"-{_slug(suffix)}"
     else:
-        return name_prefix[:MAX_POLICY_ID_LEN]
+        return prefix[:MAX_POLICY_ID_LEN]
     room = MAX_POLICY_ID_LEN - len(tail)
-    return f"{name_prefix[:max(room, 1)].rstrip('-')}{tail}"
+    return f"{prefix[:max(room, 1)].rstrip('-')}{tail}"
 
 
 # ----------------------------------------------------------------------------------- apply (writes)
@@ -153,11 +175,14 @@ def apply_ingress(account, account_id: str, policy_id: str, block, target_attr: 
                 f"policy_action=add_to_existing but no network policy '{policy_id}' was found. "
                 "Check --existing-policy-id (create it first, or use create_new)."
             ) from None
-        existing = AccountNetworkPolicy(
-            account_id=account_id, network_policy_id=policy_id, egress=build_full_access_egress())
+        existing = AccountNetworkPolicy(account_id=account_id, network_policy_id=policy_id)
         action = "created"
 
     setattr(existing, target_attr, block)
+    # Ensure the opposite direction is defined but never clobbered: only add a permissive egress
+    # default when the policy has none (a fresh policy, or one somehow created without egress).
+    if getattr(existing, "egress", None) is None:
+        existing.egress = build_full_access_egress()
     if action == "created":
         result = account.network_policies.create_network_policy_rpc(network_policy=existing)
         effective_id = result.network_policy_id or policy_id
@@ -190,6 +215,10 @@ def apply_egress(account, account_id: str, policy_id: str, egress_block,
         action = "created"
 
     existing.egress = egress_block
+    # Ensure the opposite direction is defined but never clobbered: only add a permissive ingress
+    # default when the policy has no ingress at all (leave an existing ingress / dry-run untouched).
+    if getattr(existing, "ingress", None) is None and getattr(existing, "ingress_dry_run", None) is None:
+        existing.ingress = build_full_access_ingress()
     if action == "created":
         result = account.network_policies.create_network_policy_rpc(network_policy=existing)
         effective_id = result.network_policy_id or policy_id

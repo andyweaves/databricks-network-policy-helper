@@ -183,14 +183,25 @@ covered by fast, network-free unit tests, and CLI flows are exercised via Typer'
 
 ## 📝 Notes & caveats
 
-- **Policy naming.** For `ingress`/`egress`, policies are named from `--name-prefix` (e.g.
-  `dbx-nwp-<profile>` / `dbx-nwp-ws-<id>` / `dbx-nwp`); pass `--policy-name <id>` to set the id
-  yourself (single-policy scopes only — not `per_workspace` or `add_to_existing`). `migrate-acl` has
-  no `--name-prefix`: it **prompts** for the policy name (blank = the profile name), or takes
-  `--policy-name`. All explicit names are normalised to a lowercase, `-`-safe, length-capped id and
-  the CLI prints the result.
-- **`migrate-acl --export <path>`** writes the proposed `AccountNetworkPolicy` JSON to a file (a
-  curl / REST-ready body) — handy for review or applying out-of-band; works in propose-only mode.
+- **Policy naming.** All three commands (`ingress` / `egress` / `migrate-acl`) name the policy the
+  same way: they **prompt** for a name (blank = the profile name, falling back to the workspace id),
+  or take `--policy-name` non-interactively. For single-policy scopes the name is the policy id; for
+  `per_workspace` it's the prefix (→ `<name>-ws-<id>`); with `--policy-action add_to_existing` the id
+  comes from `--existing-policy-id` instead (so `--policy-name` isn't used there). All names are
+  normalised to a lowercase, `-`-safe, length-capped id and the CLI prints the result.
+- **`--export <path>`** (on `ingress`, `egress` and `migrate-acl`) writes the proposed
+  `AccountNetworkPolicy` JSON (a curl / REST-ready body) — handy for review or applying out-of-band;
+  a directory writes `<policy-id>.json` inside it, single-policy scopes only, and it works in
+  propose-only mode.
+- **Pre-checks (create + assign).** Before creating and assigning a single policy, each command
+  inspects the workspace's currently-assigned policy and aborts (or warns) rather than silently
+  clobbering it. **Ingress** aborts on PrivateLink (a PAS), private-access / cross-workspace rules,
+  or an enforced restrictive public ingress. **Egress** aborts on an enforced restrictive egress
+  (warns on a dry-run one). Both also guard the *opposite* direction: when creating a policy under a
+  **new** id (which rebinds the workspace, dropping the old policy's other block via the permissive
+  default), they abort if that would drop an enforced restrictive block — pointing you at
+  `--policy-action add_to_existing --existing-policy-id <id>` to keep it. An allow-all assigned
+  policy, or updating the same id in place, is fine.
 - Requires `databricks-sdk>=0.113.0` for the network-policy dataclasses (pinned in `pyproject.toml`).
 - **Applying a policy needs account-level auth**, which is separate from workspace auth — a workspace
   OAuth session can't call the account API. Use `--account-profile <name>` pointing at an account
