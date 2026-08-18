@@ -9,7 +9,7 @@ from __future__ import annotations
 import pandas as pd
 
 from . import console
-from .config import AclConfig, EgressConfig, IngressConfig
+from .config import EgressConfig, IngressConfig
 from .core import egress as egress_core
 from .core.egress import EgressAnalysis
 from .core.ingress import ALL_WORKSPACES, IngressAnalysis
@@ -62,18 +62,6 @@ def egress_decisions(cfg: EgressConfig) -> None:
         ("policy_action", cfg.apply.policy_action, "create_new or add_to_existing."),
         ("existing_policy_id", cfg.apply.existing_policy_id, "Target id for add_to_existing."),
         ("auto_assign", cfg.apply.auto_assign, "Bind the workspace(s) to the policy."),
-    ])
-
-
-def acl_decisions(cfg: AclConfig) -> None:
-    console.decisions_panel("IP ACL → CBI migration configuration", [
-        ("policy_mode", cfg.policy_mode, "enforce (default) or dry_run."),
-        ("policy_name", cfg.policy_name, "Policy id for the new policy (from --policy-name / prompt)."),
-        ("auto_assign", cfg.auto_assign, "Bind this workspace to the new policy."),
-        ("disable_existing_ip_acls", cfg.disable_existing_ip_acls,
-         "After apply, turn off the workspace's IP access lists (needs create + assign)."),
-        ("export", cfg.export, "Write the proposed policy JSON to this path (blank = don't)."),
-        ("create_policy", cfg.create_policy, "Master switch: nothing is written unless true."),
     ])
 
 
@@ -246,48 +234,6 @@ def egress_preview(previews: dict, cfg: EgressConfig) -> None:
     for tgt in sorted(previews, key=str):
         label = _target_label(tgt, cfg.policy_scope, egress_core.ALL_WORKSPACES)
         console.json_panel(f"{label} — egress block", previews[tgt])
-
-
-# ---------------------------------------------------------------------------------- acl tables
-def _acl_table(rows: list[dict], title: str) -> None:
-    console.dataframe(
-        pd.DataFrame([{**a, "ip_addresses": ", ".join(a["ip_addresses"])} for a in rows]), title)
-
-
-def acl_current_config(analysis) -> None:
-    """The workspace's *current* IP access list configuration — all lists, enabled and disabled —
-    shown when the workspace toggle is off so the user sees what they'd be enabling."""
-    console.rule("Current IP access list configuration")
-    rows = ([{**a, "enabled": True} for a in analysis.ip_acls]
-            + [{**a, "enabled": False} for a in analysis.disabled_acls])
-    if rows:
-        _acl_table(rows, f"IP access lists on workspace {analysis.workspace_id}")
-
-
-def acl_analysis(analysis, cfg: AclConfig) -> None:
-    console.rule("Existing IP access list")
-    if not analysis.ip_acls:
-        console.banner("warn", "No enabled IP access lists on this workspace — nothing to migrate.")
-        return
-    _acl_table(analysis.ip_acls, f"Enabled IP access lists on workspace {analysis.workspace_id}")
-
-
-def acl_disabled_notice(analysis) -> None:
-    """Shown in the final printout (below the old + new policy, before the write): flag any disabled
-    IP access list rules that were left out of the migration so the operator can vet them."""
-    if not analysis.disabled_acls:
-        return
-    names = ", ".join(a["label"] for a in analysis.disabled_acls)
-    console.banner("warn", f"{len(analysis.disabled_acls)} rule(s) are disabled in IP access lists "
-                           f"and were NOT migrated: {names}. Make sure you vet these rules — if any "
-                           "should be enabled, exit this tool, enable them, and run the migration "
-                           "again.")
-
-
-def acl_preview(preview: dict, cfg: AclConfig) -> None:
-    console.rule("Proposed policy — JSON preview")
-    console.mode_banner(cfg.policy_mode)
-    console.json_panel(f"`{cfg.policy_mode_target}` block", preview)
 
 
 # ------------------------------------------------------------------------------- apply results

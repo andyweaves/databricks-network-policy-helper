@@ -124,25 +124,6 @@ class EgressConfig:
     apply: ApplyOptions = field(default_factory=ApplyOptions)
 
 
-@dataclass
-class AclConfig:
-    policy_mode: str = "enforce"
-    # Policy id for the new policy. Explicit (--policy-name) or, when left blank, the CLI resolves it
-    # to the profile name (falling back to the workspace id). Slugified + length-capped.
-    policy_name: str = ""
-    auto_assign: bool = True
-    create_policy: bool = False
-    # See IngressConfig.disable_existing_ip_acls — same gated behaviour for the migrate command.
-    disable_existing_ip_acls: bool = False
-    # Optional path to write the proposed network-policy JSON (for use with curl / the REST API).
-    export: str = ""
-    reviewed: bool = False
-
-    @property
-    def policy_mode_target(self) -> str:
-        return {"dry_run": "ingress_dry_run", "enforce": "ingress"}[self.policy_mode]
-
-
 def validate_apply(apply: ApplyOptions, policy_scope: str, other_direction: str) -> None:
     """Validate the add_to_existing invariants early with an actionable message (mirrors the
     notebooks' upfront checks). `other_direction` names the helper that created the target policy."""
@@ -198,26 +179,4 @@ def validate_disable_ip_acls(disable: bool, create_policy: bool, auto_assign: bo
             "used when the run also creates AND assigns the replacement policy (otherwise the "
             "workspace could be left with no ingress protection). Re-run with --create-policy and "
             "--auto-assign, or drop --disable-existing-ip-acls."
-        )
-
-
-def validate_acl_apply(create_policy: bool, auto_assign: bool, disable_existing_ip_acls: bool,
-                       policy_mode: str) -> None:
-    """migrate-acl input-combination guards — reject nonsensical / unsafe flag combos up front."""
-    # Can't assign a policy you're not creating.
-    if auto_assign and not create_policy:
-        raise ValueError(
-            "--auto-assign can't be used with --no-create-policy — there's no new policy to bind. "
-            "For a propose-only run pass --no-create-policy --no-auto-assign; otherwise keep "
-            "--create-policy (the default)."
-        )
-    # Disabling the workspace's IP ACLs requires the replacement to be created AND assigned (8a/8b).
-    validate_disable_ip_acls(disable_existing_ip_acls, create_policy, auto_assign)
-    # A dry-run policy enforces nothing, so disabling the old ACLs would leave NO active ingress
-    # control at all.
-    if disable_existing_ip_acls and policy_mode == "dry_run":
-        raise ValueError(
-            "--disable-existing-ip-acls with --policy-mode dry_run would leave the workspace with no "
-            "enforced ingress control (a dry-run policy blocks nothing). Use --policy-mode enforce, "
-            "or drop --disable-existing-ip-acls."
         )

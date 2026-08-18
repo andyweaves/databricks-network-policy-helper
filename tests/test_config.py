@@ -97,41 +97,8 @@ def test_validate_disable_ip_acls_ok_with_create_and_assign():
     validate_disable_ip_acls(True, create_policy=True, auto_assign=True)
 
 
-def test_validate_acl_apply_rejects_assign_without_create():
-    from dbx_nwp_helper.config import validate_acl_apply
-    with pytest.raises(ValueError, match="auto-assign"):
-        validate_acl_apply(create_policy=False, auto_assign=True,
-                           disable_existing_ip_acls=False, policy_mode="enforce")
-
-
-def test_validate_acl_apply_rejects_dry_run_disable():
-    from dbx_nwp_helper.config import validate_acl_apply
-    with pytest.raises(ValueError, match="dry_run"):
-        validate_acl_apply(create_policy=True, auto_assign=True,
-                           disable_existing_ip_acls=True, policy_mode="dry_run")
-
-
-def test_validate_acl_apply_rejects_disable_without_create_assign():
-    from dbx_nwp_helper.config import validate_acl_apply
-    with pytest.raises(ValueError, match="creates AND assigns"):
-        validate_acl_apply(create_policy=False, auto_assign=False,
-                           disable_existing_ip_acls=True, policy_mode="enforce")
-
-
-def test_validate_acl_apply_ok_defaults():
-    from dbx_nwp_helper.config import validate_acl_apply
-    # create + assign + enforce, no disable — the default happy path.
-    validate_acl_apply(create_policy=True, auto_assign=True,
-                       disable_existing_ip_acls=False, policy_mode="enforce")
-    # valid propose-only combo.
-    validate_acl_apply(create_policy=False, auto_assign=False,
-                       disable_existing_ip_acls=False, policy_mode="enforce")
-
-
 def test_disable_existing_ip_acls_defaults_false():
-    from dbx_nwp_helper.config import AclConfig
     assert IngressConfig().disable_existing_ip_acls is False
-    assert AclConfig().disable_existing_ip_acls is False
 
 
 def test_validate_policy_name_noop_when_blank():
@@ -154,10 +121,9 @@ def test_validate_policy_name_ok_single_scope_create_new():
 
 
 def test_policy_name_defaults_blank():
-    from dbx_nwp_helper.config import AclConfig, EgressConfig
+    from dbx_nwp_helper.config import EgressConfig
     assert IngressConfig().policy_name == ""
     assert EgressConfig().policy_name == ""
-    assert AclConfig().policy_name == ""
 
 
 def test_validate_export_rejects_per_workspace():

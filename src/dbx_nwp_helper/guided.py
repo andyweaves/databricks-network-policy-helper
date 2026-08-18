@@ -1,10 +1,12 @@
 """The guided Q&A wizard.
 
 `dbx-nwp-helper guided` — point it at a workspace (a profile, optionally a warehouse) and it walks the
-user through building an ingress / egress / ACL-migration policy with questionary prompts, using the
-same choice sets as the flags (config.py) and the same run flow as the flag commands (cli._run_*). It
-always ends propose-only by default; the user opts into a write and mode via prompts, then the shared
-review gate confirms before anything is sent.
+user through building an ingress / egress policy with questionary prompts, using the same choice sets
+as the flags (config.py) and the same run flow as the flag commands (cli._run_*). It always ends
+propose-only by default; the user opts into a write and mode via prompts, then the shared review gate
+confirms before anything is sent.
+
+(The verbatim IP-ACL → CBI migration now has its own tool, `dbx-migrate-ip-acls`.)
 """
 
 from __future__ import annotations
@@ -21,7 +23,6 @@ from .config import (
     SCOPING_MODES,
     THREAT_DENY_RULES,
     THREAT_FEEDS,
-    AclConfig,
     ApplyOptions,
     Connection,
     EgressConfig,
@@ -60,7 +61,7 @@ def _int(message: str, default: int) -> int:
 
 
 def run_wizard(conn: Connection) -> None:
-    from .cli import _run_acl, _run_egress, _run_ingress
+    from .cli import _run_egress, _run_ingress
 
     console.title_panel("dbx-nwp-helper — guided setup",
                         "Answer a few questions; I'll analyse traffic and propose a policy.")
@@ -68,8 +69,7 @@ def run_wizard(conn: Connection) -> None:
     direction = _select(
         "What would you like to build?",
         ["Ingress (CBI) — who may connect IN, by source IP",
-         "Egress (SEG) — where workloads may connect OUT",
-         "Migrate an existing IP access list into a CBI policy"])
+         "Egress (SEG) — where workloads may connect OUT"])
     if direction is None:
         return
 
@@ -81,10 +81,8 @@ def run_wizard(conn: Connection) -> None:
 
     if direction.startswith("Ingress"):
         _run_ingress(_ingress_wizard(conn), conn, yes=False)
-    elif direction.startswith("Egress"):
-        _run_egress(_egress_wizard(conn), conn, yes=False)
     else:
-        _run_acl(_acl_wizard(conn), conn, yes=False)
+        _run_egress(_egress_wizard(conn), conn, yes=False)
 
 
 def _ingress_wizard(conn: Connection) -> IngressConfig:
@@ -133,23 +131,6 @@ def _egress_wizard(conn: Connection) -> EgressConfig:
         lookback_days=lookback, min_events=min_events, source_type_filter=src_filter,
         enable_rdap=enable_rdap, policy_scope=scope, policy_mode=mode, block_threat_domains=block,
         apply=apply)
-
-
-def _acl_wizard(conn: Connection) -> AclConfig:
-    console.rule("IP ACL migration questions")
-    # The policy name is prompted for centrally in the run flow (blank = profile name), so it isn't
-    # asked here. The migration recreates the IP ACLs as-is (ingress only), so there's no egress
-    # choice — a created policy carries a permissive FULL_ACCESS egress.
-    create = bool(conn.account_id) and _confirm("Create the policy now (needs account admin)?", False)
-    mode = _mode_wizard() if create else "enforce"
-    # auto_assign is only meaningful when creating; forcing it off in propose-only keeps the config
-    # valid (create=false + auto_assign=true is rejected).
-    auto_assign = _confirm("Bind this workspace to the new policy?", True) if create else False
-    disable_acls = (create and auto_assign
-                    and _confirm("Disable this workspace's IP access lists after applying? "
-                                 "(the new CBI policy replaces them)", False))
-    return AclConfig(policy_mode=mode, auto_assign=auto_assign,
-                     create_policy=create, disable_existing_ip_acls=disable_acls)
 
 
 def _apply_wizard(conn: Connection, scope: str, other: str) -> ApplyOptions:
