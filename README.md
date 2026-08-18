@@ -1,7 +1,7 @@
 # 🛡️ Databricks Network Policy Helper
 
 > Build Databricks **account network policies** from *real observed traffic* — not guesswork.
-> **Migrating an existing IP access list** into a CBI policy, verbatim (no traffic analysis)?
+> 💡 **Migrating an existing IP access list** into a CBI policy, verbatim (no traffic analysis)?
 > That lives in its own focused tool:
 > **[databricks-migrate-ip-acls](https://github.com/andyweaves/databricks-migrate-ip-acls)**
 > (`dbx-migrate-ip-acls`)
