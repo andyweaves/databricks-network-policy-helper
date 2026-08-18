@@ -196,33 +196,6 @@ def test_maybe_disable_ip_acls_warns_on_sdk_failure(capsys):
     assert "manually" in out.lower()
 
 
-def test_migrate_acl_disable_without_create_is_rejected():
-    # --disable-existing-ip-acls without a create+assign must fail up front (before any SDK call),
-    # so the workspace can't be left unprotected. (create-policy defaults on, so force it off here.)
-    result = runner.invoke(cli.app, [
-        "migrate-acl", "--profile", "test", "--no-create-policy", "--no-auto-assign",
-        "--disable-existing-ip-acls"])
-    assert result.exit_code == 2
-    assert "disable-existing-ip-acls" in result.output
-
-
-def test_migrate_acl_assign_without_create_is_rejected():
-    # 8d: auto-assign with --no-create-policy is nonsensical (nothing to bind) -> rejected up front.
-    result = runner.invoke(cli.app, ["migrate-acl", "--profile", "test", "--no-create-policy"])
-    assert result.exit_code == 2
-    assert "auto-assign" in result.output
-
-
-def test_migrate_acl_dry_run_disable_is_rejected():
-    # 8c: disabling the old ACLs while the new policy only logs (dry_run) would leave no enforced
-    # ingress control -> rejected up front.
-    result = runner.invoke(cli.app, [
-        "migrate-acl", "--profile", "test", "--policy-mode", "dry_run",
-        "--disable-existing-ip-acls"])
-    assert result.exit_code == 2
-    assert "dry_run" in result.output or "dry-run" in result.output
-
-
 class _FakeWsClient:
     class _Cfg:
         host = "https://ws.cloud.databricks.com"
@@ -304,100 +277,6 @@ def test_workspace_client_other_valueerror_still_clean(monkeypatch, capsys):
     assert "Databricks client" in capsys.readouterr().out
 
 
-def _acl_analysis(enabled=1, disabled=0):
-    import types
-    ip_acls = [{"label": f"a{i}", "list_type": "ALLOW", "ip_addresses": ["8.8.8.8/32"]}
-               for i in range(enabled)]
-    dis = [{"label": f"d{i}", "list_type": "ALLOW", "ip_addresses": ["1.1.1.1/32"]}
-           for i in range(disabled)]
-    return types.SimpleNamespace(workspace_id=42, ip_acls=ip_acls, disabled_acls=dis)
-
-
-def test_acl_ip_gate_proceeds_when_enabled_with_rules(monkeypatch):
-    monkeypatch.setattr("dbx_nwp_helper.core.acl.ip_acl_enforcement_state", lambda wc: True)
-    cli._acl_ip_gate(_acl_analysis(enabled=1), object(), yes=True)  # must not raise
-
-
-def test_acl_ip_gate_enabled_no_rules_exits(monkeypatch, capsys):
-    import typer
-    monkeypatch.setattr("dbx_nwp_helper.core.acl.ip_acl_enforcement_state", lambda wc: True)
-    with pytest.raises(typer.Exit) as e:
-        cli._acl_ip_gate(_acl_analysis(enabled=0), object(), yes=True)
-    assert e.value.exit_code == 0
-    assert "no rules" in capsys.readouterr().out.lower()
-
-
-def test_acl_ip_gate_disabled_no_rules_exits(monkeypatch, capsys):
-    import typer
-    monkeypatch.setattr("dbx_nwp_helper.core.acl.ip_acl_enforcement_state", lambda wc: False)
-    with pytest.raises(typer.Exit) as e:
-        cli._acl_ip_gate(_acl_analysis(enabled=0), object(), yes=True)
-    assert e.value.exit_code == 0
-    out = capsys.readouterr().out.lower()
-    assert "disabled" in out and "no rules" in out
-
-
-def test_acl_ip_gate_disabled_with_rules_noninteractive_aborts(monkeypatch):
-    import typer
-    monkeypatch.setattr("dbx_nwp_helper.core.acl.ip_acl_enforcement_state", lambda wc: False)
-    with pytest.raises(typer.Exit) as e:
-        cli._acl_ip_gate(_acl_analysis(enabled=1), object(), yes=True)  # --yes: no auto re-enable
-    assert e.value.exit_code == 0
-
-
-def test_acl_ip_gate_disabled_with_rules_decline_reenable(monkeypatch):
-    import typer
-    monkeypatch.setattr("dbx_nwp_helper.core.acl.ip_acl_enforcement_state", lambda wc: False)
-    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
-    monkeypatch.setattr("typer.confirm", lambda *a, **k: False)
-    called = {"n": 0}
-    monkeypatch.setattr("dbx_nwp_helper.core.acl.enable_ip_access_lists",
-                        lambda *a, **k: called.__setitem__("n", called["n"] + 1))
-    with pytest.raises(typer.Exit) as e:
-        cli._acl_ip_gate(_acl_analysis(enabled=1), object(), yes=False)
-    assert e.value.exit_code == 0
-    assert called["n"] == 0  # declined -> must NOT re-enable
-
-
-def test_acl_ip_gate_disabled_with_rules_accept_reenable_and_continues(monkeypatch, capsys):
-    monkeypatch.setattr("dbx_nwp_helper.core.acl.ip_acl_enforcement_state", lambda wc: False)
-    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
-    monkeypatch.setattr("typer.confirm", lambda *a, **k: True)
-    called = {"n": 0}
-    monkeypatch.setattr("dbx_nwp_helper.core.acl.enable_ip_access_lists",
-                        lambda *a, **k: called.__setitem__("n", called["n"] + 1))
-    # accept -> re-enable, then CONTINUE the run (must not raise).
-    cli._acl_ip_gate(_acl_analysis(enabled=1), object(), yes=False)
-    assert called["n"] == 1
-    assert "continuing" in capsys.readouterr().out.lower()
-
-
-def test_ensure_acl_policy_name_unique_reprompts_then_accepts(monkeypatch):
-    from dbx_nwp_helper.config import AclConfig
-    seen = iter([True, False])  # first name exists, second is free
-    monkeypatch.setattr("dbx_nwp_helper.core.acl.policy_exists", lambda a, pid: next(seen))
-    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
-
-    class _Q:
-        def ask(self):
-            return "fresh-name"
-    monkeypatch.setattr("questionary.text", lambda *a, **k: _Q())
-    cfg = AclConfig(policy_name="taken")
-    cli._ensure_acl_policy_name_unique(cfg, object(), 42, yes=False)
-    assert cfg.policy_name == "fresh-name"
-
-
-def test_ensure_acl_policy_name_unique_noninteractive_aborts(monkeypatch):
-    import typer
-
-    from dbx_nwp_helper.config import AclConfig
-    monkeypatch.setattr("dbx_nwp_helper.core.acl.policy_exists", lambda a, pid: True)
-    cfg = AclConfig(policy_name="taken")
-    with pytest.raises(typer.Exit) as e:
-        cli._ensure_acl_policy_name_unique(cfg, object(), 42, yes=True)
-    assert e.value.exit_code == 1
-
-
 def test_note_policy_name_shows_normalized_id(capsys):
     cli._note_policy_name("My Policy")
     assert "my-policy" in capsys.readouterr().out
@@ -407,25 +286,6 @@ def test_note_policy_name_silent_when_clean_or_blank(capsys):
     cli._note_policy_name("clean-name")   # already normalised -> no notice
     cli._note_policy_name("")             # not set -> no notice
     assert capsys.readouterr().out == ""
-
-
-def test_resolve_policy_name_keeps_explicit():
-    from dbx_nwp_helper.config import AclConfig, Connection
-    cfg = AclConfig(policy_name="chosen")
-    cli._resolve_policy_name(cfg, Connection(profile="p"), object(), yes=True)
-    assert cfg.policy_name == "chosen"
-
-
-def test_resolve_policy_name_uses_profile_when_blank_and_noninteractive():
-    from dbx_nwp_helper.config import AclConfig, Connection
-
-    class _WC:
-        def get_workspace_id(self):
-            return 42
-
-    cfg = AclConfig()
-    cli._resolve_policy_name(cfg, Connection(profile="myprof"), _WC(), yes=True)
-    assert cfg.policy_name == "myprof"  # blank -> profile name (no prompt under --yes)
 
 
 def test_resolve_policy_name_skips_add_to_existing():
@@ -449,74 +309,6 @@ def test_resolve_policy_name_ingress_defaults_to_profile():
     assert cfg.policy_name == "egress-prof"  # per_workspace uses it as the prefix
 
 
-class _AclWorkspace:
-    class _Cfg:
-        host = "https://ws.cloud.databricks.com"
-
-    config = _Cfg()
-
-    def get_workspace_id(self):
-        return 42
-
-    class _Acls:
-        def list(self):
-            lt = type("LT", (), {"value": "ALLOW"})()
-            return [type("A", (), {"label": "office", "enabled": True, "list_type": lt,
-                                   "ip_addresses": ["8.8.8.8/32"]})()]
-
-    ip_access_lists = _Acls()
-
-    class _Conf:
-        def get_status(self, keys):
-            return {"enableIpAccessLists": "true"}
-
-    workspace_conf = _Conf()
-
-
-class _CleanAclAccount:
-    """Account client that passes migrate-acl preflight: no PAS, no VPC endpoints, no assigned
-    network policy, and the chosen policy name is free (create-only uniqueness check)."""
-    class _WS:
-        def get(self, workspace_id):
-            return type("W", (), {"private_access_settings_id": None, "network_id": None})()
-
-    class _WNC:
-        def get_workspace_network_option_rpc(self, workspace_id):
-            return type("O", (), {"network_policy_id": None})()
-
-    class _NP:
-        def get_network_policy_rpc(self, network_policy_id):
-            from databricks.sdk.errors import NotFound
-            raise NotFound("no such policy")
-
-    workspaces = _WS()
-    workspace_network_configuration = _WNC()
-    network_policies = _NP()
-
-
-def test_migrate_acl_export_writes_json(monkeypatch, tmp_path):
-    import json
-
-    import dbx_nwp_helper.auth as auth
-    monkeypatch.setattr(auth, "workspace_client", lambda conn: _AclWorkspace())
-    monkeypatch.setattr(auth, "account_client", lambda conn: _CleanAclAccount())
-    out = tmp_path / "policy.json"
-    # propose-only (--no-create-policy --no-auto-assign) + --yes; migrate-acl needs --account-id for
-    # its PAS / VPC-endpoint / existing-policy pre-checks, but --export must still write the JSON.
-    result = runner.invoke(cli.app, [
-        "migrate-acl", "--profile", "test", "--account-id", "acc-1", "--export", str(out),
-        "--no-create-policy", "--no-auto-assign", "--yes"])
-    assert result.exit_code == 0, result.output
-    data = json.loads(out.read_text())
-    assert data["network_policy_id"] == "test"       # blank name -> profile name ("test")
-    assert data["account_id"] == "acc-1"
-    assert "egress" in data and "ingress" in data     # enforce default -> ingress block present
-    # --export also writes a sibling Terraform config.
-    tf = out.with_suffix(".tf")
-    assert tf.exists()
-    assert 'resource "databricks_account_network_policy"' in tf.read_text()
-
-
 def test_write_tf_export_into_directory(tmp_path):
     payload = {"network_policy_id": "pol-x", "ingress": {"public_access": {"restriction_mode": "X"}}}
     dest = cli._write_tf_export(str(tmp_path), payload)
@@ -538,84 +330,6 @@ def test_export_writes_utf8_non_ascii_labels(tmp_path):
     assert "café-café" in Path(tf).read_text(encoding="utf-8")
     loaded = json.loads(Path(js).read_text(encoding="utf-8"))
     assert loaded["ingress"]["public_access"]["allow_rules"][0]["label"] == "café-café"
-
-
-def test_acl_preflight_aborts_on_pas(monkeypatch):
-    import typer
-    monkeypatch.setattr("dbx_nwp_helper.core.acl.workspace_pas_attached", lambda a, w: True)
-    with pytest.raises(typer.Exit) as e:
-        cli._acl_preflight(object(), 42, will_assign=True, yes=True)
-    assert e.value.exit_code == 1
-
-
-def test_acl_preflight_aborts_on_existing_enforced_policy_when_assigning(monkeypatch):
-    import typer
-    monkeypatch.setattr("dbx_nwp_helper.core.acl.workspace_pas_attached", lambda a, w: False)
-    monkeypatch.setattr("dbx_nwp_helper.core.acl.assigned_ingress_state",
-                        lambda a, w: ("p1", "enforced"))
-    with pytest.raises(typer.Exit) as e:
-        cli._acl_preflight(object(), 42, will_assign=True, yes=True)
-    assert e.value.exit_code == 1
-
-
-def test_acl_preflight_enforced_warns_and_proceeds_when_not_assigning(monkeypatch, capsys):
-    # not assigning -> existing enforced policy stays put; warn and continue (no abort).
-    monkeypatch.setattr("dbx_nwp_helper.core.acl.workspace_pas_attached", lambda a, w: False)
-    monkeypatch.setattr("dbx_nwp_helper.core.acl.assigned_ingress_state",
-                        lambda a, w: ("p1", "enforced"))
-    cli._acl_preflight(object(), 42, will_assign=False, yes=True)  # must not raise
-    assert "isn't assigning" in capsys.readouterr().out
-
-
-def test_acl_preflight_dry_run_warns_and_proceeds_when_not_assigning(monkeypatch):
-    # not assigning -> no promote prompt, no cancel; just warn and continue.
-    monkeypatch.setattr("dbx_nwp_helper.core.acl.workspace_pas_attached", lambda a, w: False)
-    monkeypatch.setattr("dbx_nwp_helper.core.acl.assigned_ingress_state",
-                        lambda a, w: ("p1", "dry_run"))
-    monkeypatch.setattr("dbx_nwp_helper.core.acl.promote_dry_run_to_enforced",
-                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not promote")))
-    cli._acl_preflight(object(), 42, will_assign=False, yes=True)  # must not raise
-
-
-def test_acl_preflight_dry_run_cancels_without_promote_noninteractive(monkeypatch):
-    import typer
-    monkeypatch.setattr("dbx_nwp_helper.core.acl.workspace_pas_attached", lambda a, w: False)
-    monkeypatch.setattr("dbx_nwp_helper.core.acl.assigned_ingress_state",
-                        lambda a, w: ("p1", "dry_run"))
-    promoted = {"n": 0}
-    monkeypatch.setattr("dbx_nwp_helper.core.acl.promote_dry_run_to_enforced",
-                        lambda *a, **k: promoted.__setitem__("n", promoted["n"] + 1))
-    with pytest.raises(typer.Exit) as e:
-        cli._acl_preflight(object(), 42, will_assign=True, yes=True)  # --yes -> no prompt/promotion
-    assert e.value.exit_code == 0 and promoted["n"] == 0
-
-
-def test_acl_preflight_dry_run_promotes_when_confirmed(monkeypatch):
-    import typer
-    monkeypatch.setattr("dbx_nwp_helper.core.acl.workspace_pas_attached", lambda a, w: False)
-    monkeypatch.setattr("dbx_nwp_helper.core.acl.assigned_ingress_state",
-                        lambda a, w: ("p1", "dry_run"))
-    promoted = {"n": 0}
-    monkeypatch.setattr("dbx_nwp_helper.core.acl.promote_dry_run_to_enforced",
-                        lambda *a, **k: promoted.__setitem__("n", promoted["n"] + 1))
-    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
-    monkeypatch.setattr("typer.confirm", lambda *a, **k: True)
-    with pytest.raises(typer.Exit) as e:
-        cli._acl_preflight(object(), 42, will_assign=True, yes=False)
-    assert e.value.exit_code == 0 and promoted["n"] == 1  # promoted, then migration cancelled
-
-
-def test_acl_preflight_passes_when_clean(monkeypatch):
-    monkeypatch.setattr("dbx_nwp_helper.core.acl.workspace_pas_attached", lambda a, w: False)
-    monkeypatch.setattr("dbx_nwp_helper.core.acl.assigned_ingress_state", lambda a, w: (None, None))
-    cli._acl_preflight(object(), 42, will_assign=True, yes=True)  # must not raise
-
-
-def test_acl_preflight_warns_but_proceeds_when_pas_unknown(monkeypatch, capsys):
-    monkeypatch.setattr("dbx_nwp_helper.core.acl.workspace_pas_attached", lambda a, w: None)
-    monkeypatch.setattr("dbx_nwp_helper.core.acl.assigned_ingress_state", lambda a, w: (None, None))
-    cli._acl_preflight(object(), 42, will_assign=True, yes=True)  # must not raise
-    assert "couldn't verify" in capsys.readouterr().out.lower()
 
 
 def test_write_json_export_to_directory_uses_policy_id_filename(tmp_path):

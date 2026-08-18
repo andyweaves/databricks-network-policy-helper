@@ -3,9 +3,11 @@
 Commands:
   ingress       Build/apply a context-based ingress (CBI) allow-list from audit-log source IPs.
   egress        Build/apply a serverless egress (SEG) allow-list from observed outbound traffic.
-  migrate-acl   Recreate this workspace's IP access list as a CBI policy, verbatim.
   guided        Interactive Q&A wizard — point it at a workspace and it walks you through a policy.
   feeds         Manage the local threat-intel / cloud-range feed cache.
+
+The verbatim IP-ACL → CBI migration lives in its own tool now: `dbx-migrate-ip-acls`
+(https://github.com/andyweaves/databricks-migrate-ip-acls).
 
 Every notebook widget maps to a flag here; the guided command exposes the same choices as prompts.
 Nothing is written unless --create-policy is set, and an interactive review gate (or --yes) guards
@@ -22,12 +24,10 @@ from . import console, render
 from .config import (
     DEFAULT_NAME_PREFIX,
     MAX_POLICY_ID_LEN,
-    AclConfig,
     ApplyOptions,
     Connection,
     EgressConfig,
     IngressConfig,
-    validate_acl_apply,
     validate_apply,
     validate_disable_ip_acls,
     validate_export,
@@ -247,77 +247,6 @@ def _resolve_policy_name(cfg, conn: Connection, wc, yes: bool) -> None:
     entered = (questionary.text(
         f"Policy name for the new network policy? (blank = use '{default}')").ask() or "").strip()
     cfg.policy_name = entered or default
-
-
-def _acl_preflight(account, workspace_id, will_assign: bool, yes: bool) -> None:
-    """migrate-acl account-level pre-checks (run before any migration).
-
-    * A PAS (PrivateLink) attached -> always abort (unsupported for now; the produced policy would
-      be incomplete).
-    * An existing assigned CBI ingress policy only matters when this run will **assign** the new
-      policy (assigning would replace the existing one). When assigning:
-        - enforced existing policy -> abort (migrating on top of it isn't supported yet);
-        - dry-run existing policy   -> flag, offer to promote it to enforced, then stop (a migration
-          needs an enforced baseline first).
-      When NOT assigning (propose-only, --export, or --no-auto-assign) the workspace's binding is
-      untouched, so we just warn and let the run create/export the (unbound) policy."""
-    import sys
-
-    from .core import acl as acl_core
-
-    pas = acl_core.workspace_pas_attached(account, workspace_id)
-    if pas is True:
-        console.banner("danger", "This workspace has a Private Access Settings (PAS) object attached "
-                                 "(PrivateLink). Migrating a PAS/PrivateLink workspace to CBI is NOT "
-                                 "supported yet - aborting.")
-        raise typer.Exit(code=1)
-    if pas is None:
-        console.banner("warn", "Couldn't verify whether a PAS/PrivateLink is attached (account read "
-                               "failed). If this workspace uses PrivateLink, migration is NOT "
-                               "supported yet.")
-
-    vpce = acl_core.workspace_vpc_endpoint_count(account, workspace_id)
-    if vpce:
-        console.banner("danger", f"This workspace has {vpce} registered VPC (PrivateLink) "
-                                 "endpoint(s). Migrating a PrivateLink workspace to CBI is NOT "
-                                 "supported yet - aborting.")
-        raise typer.Exit(code=1)
-    if vpce is None:
-        console.banner("warn", "Couldn't verify the workspace's registered VPC endpoints (account "
-                               "read failed). If this workspace uses PrivateLink, migration is NOT "
-                               "supported yet.")
-
-    assigned_id, state = acl_core.assigned_ingress_state(account, workspace_id)
-    if state is None:
-        return
-
-    if not will_assign:
-        kind = "an ENFORCED" if state == "enforced" else "a DRY-RUN"
-        console.banner("warn", f"This workspace already has {kind} CBI ingress policy "
-                               f"('{assigned_id}'). This run isn't assigning the new policy, so that "
-                               "one stays in place — the new policy will be created/exported but not "
-                               "bound to the workspace.")
-        return
-
-    if state == "enforced":
-        console.banner("danger", f"This workspace already has an ENFORCED CBI ingress policy "
-                                 f"('{assigned_id}'). Migrating on top of an existing enforced policy "
-                                 "is NOT supported yet - aborting.")
-        raise typer.Exit(code=1)
-
-    # dry-run only, and we're about to assign a replacement
-    console.banner("warn", f"This workspace has a DRY-RUN CBI ingress policy ('{assigned_id}') with "
-                           "no enforced ingress. A migration needs an enforced baseline first.")
-    if not yes and sys.stdin.isatty() and typer.confirm(
-            typer.style(f"Promote '{assigned_id}' from dry-run to enforced now?", fg="yellow"),
-            default=False):
-        with console.status("Promoting policy to enforced…"):
-            acl_core.promote_dry_run_to_enforced(
-                account, assigned_id, note=lambda m: console.banner("info", m))
-        console.banner("info", "Promoted to enforced. Re-run `migrate-acl` to continue the "
-                               "migration now that an enforced baseline exists.")
-    console.banner("info", "Migration cancelled.")
-    raise typer.Exit(code=0)
 
 
 def _write_json_export(path: str, payload: dict) -> str:
@@ -693,43 +622,6 @@ def egress(
     _run_egress(cfg, conn, yes)
 
 
-@app.command("migrate-acl")
-def migrate_acl(
-    profile: str | None = typer.Option(None, help="Databricks CLI/config profile."),
-    policy_mode: Mode = typer.Option(Mode.enforce, help="enforce (default) or dry_run."),
-    policy_name: str = typer.Option(
-        "", help="Policy id for the new policy. If omitted you'll be prompted (blank there = use the "
-                 "profile name). Normalised: lowercased, non-alphanumerics → '-', length-capped."),
-    auto_assign: bool = typer.Option(True, help="Bind this workspace to the new policy."),
-    disable_existing_ip_acls: bool = typer.Option(
-        False, help="After creating AND assigning the policy, disable this workspace's IP access "
-                    "lists (enableIpAccessLists=false). Requires --create-policy (assign is on by "
-                    "default)."),
-    export: str = typer.Option(
-        "", help="Write the proposed network-policy JSON to this file (for use with curl / the REST "
-                 "API). Works in propose-only mode too."),
-    account_id: str | None = typer.Option(None, help="Databricks account_id (apply)."),
-    account_host: str = typer.Option("https://accounts.cloud.databricks.com", help="Account host."),
-    account_profile: str | None = typer.Option(
-        None, help="Profile for account-level calls (apply/identity). Defaults to unified auth."),
-    create_policy: bool = typer.Option(
-        True, help="Write the policy (default). For a propose-only run pass --no-create-policy "
-                   "--no-auto-assign. An interactive review gate still confirms before any write."),
-    yes: bool = typer.Option(
-        False, "--yes", "-y",
-        help="Non-interactive mode: skip all prompts — the step-through pauses between sections and "
-             "the review/write gates. Use for scripted runs."),
-):
-    """Recreate this workspace's existing IP access list as a CBI policy, verbatim."""
-    cfg = AclConfig(
-        policy_mode=policy_mode.value, policy_name=policy_name,
-        auto_assign=auto_assign, create_policy=create_policy,
-        disable_existing_ip_acls=disable_existing_ip_acls, export=export,
-    )
-    conn = _conn(profile, None, account_id, account_host, account_profile)
-    _run_acl(cfg, conn, yes)
-
-
 @app.command()
 def guided(
     profile: str | None = typer.Option(None, help="Databricks CLI/config profile."),
@@ -740,7 +632,7 @@ def guided(
     account_profile: str | None = typer.Option(
         None, help="Profile for account-level calls (apply/identity). Defaults to unified auth."),
 ):
-    """Interactive Q&A wizard — walks you through building an ingress/egress/ACL policy."""
+    """Interactive Q&A wizard — walks you through building an ingress/egress policy."""
     from .guided import run_wizard
     conn = _conn(profile, warehouse_http_path, account_id, account_host, account_profile)
     run_wizard(conn)
@@ -947,137 +839,6 @@ def _run_egress(cfg: EgressConfig, conn: Connection, yes: bool) -> None:
         results = eg.apply(analysis, cfg, account, conn.account_id, this_ws,
                            profile=conn.profile, note=lambda m: console.banner("info", m))
     render.apply_results(results, conn.account_host, conn.account_id)
-
-
-def _acl_ip_gate(analysis, wc, yes: bool) -> None:
-    """Right after the workspace is chosen, decide whether there's anything to migrate, based on the
-    workspace-wide `enableIpAccessLists` toggle × the number of IP access lists:
-      * disabled + 0 rules  → nothing to migrate (exit);
-      * disabled + 1+ rules → print the current config, offer to re-enable (interactively); either
-        way exit so the migration re-runs against active rules;
-      * enabled  + 0 rules  → nothing to migrate (exit);
-      * enabled  + 1+ rules → proceed.
-    A read failure on the toggle (None) just warns and proceeds. All exits are clean (code 0)."""
-    import sys
-
-    from .core import acl as acl_core
-
-    toggle = acl_core.ip_acl_enforcement_state(wc)
-    total = len(analysis.ip_acls) + len(analysis.disabled_acls)
-
-    if toggle is False:
-        if total == 0:
-            console.banner("info", "This workspace's IP access lists are disabled and have no rules. "
-                                   "There is nothing to migrate.")
-            raise typer.Exit(code=0)
-        console.banner("warn", "This workspace's IP access lists are disabled, so there are no "
-                               "enabled rules to migrate.")
-        render.acl_current_config(analysis)
-        if yes or not sys.stdin.isatty():
-            console.banner("info", "Re-run interactively to enable them, or set "
-                                   "enableIpAccessLists=true manually, then re-run — aborting.")
-            raise typer.Exit(code=0)
-        if typer.confirm(
-                typer.style("Would you like to first enable your IP access lists?", fg="yellow"),
-                default=False):
-            acl_core.enable_ip_access_lists(wc, note=lambda m: console.banner("info", m))
-            console.banner("info", "Enabled — continuing with the migration of the now-active rules.")
-            return  # proceed with the run
-        console.banner("info", "Nothing to migrate — the IP access lists are not active. Aborting.")
-        raise typer.Exit(code=0)
-
-    # toggle is True or None (unknown).
-    if total == 0:
-        console.banner("info", "This workspace's IP access lists have no rules. There is nothing to "
-                               "migrate.")
-        raise typer.Exit(code=0)
-    if toggle is None:
-        console.banner("warn", "Couldn't read this workspace's IP access list enforcement state — "
-                               "proceeding.")
-
-
-def _ensure_acl_policy_name_unique(cfg: AclConfig, account, workspace_id, yes: bool) -> None:
-    """migrate-acl only *creates* new policies, so the chosen name must not already exist. If it does,
-    re-prompt for a new one (interactively) or abort (non-interactive). Mutates cfg.policy_name."""
-    import sys
-
-    from .core import acl as acl_core
-
-    while acl_core.policy_exists(account, acl_core.resolve_policy_id(cfg, workspace_id)):
-        pid = acl_core.resolve_policy_id(cfg, workspace_id)
-        if yes or not sys.stdin.isatty():
-            console.banner("danger", f"A network policy named '{pid}' already exists. migrate-acl "
-                                     "only creates new policies — choose a different --policy-name.")
-            raise typer.Exit(code=1)
-        console.banner("warn", f"A network policy named '{pid}' already exists — enter a different "
-                               "name.")
-        import questionary
-        entered = (questionary.text("New policy name:").ask() or "").strip()
-        if not entered:
-            raise typer.Abort()
-        cfg.policy_name = entered
-
-
-def _run_acl(cfg: AclConfig, conn: Connection, yes: bool) -> None:
-    from .core import acl as acl_core
-
-    try:
-        validate_acl_apply(cfg.create_policy, cfg.auto_assign, cfg.disable_existing_ip_acls,
-                           cfg.policy_mode)
-    except ValueError as e:
-        raise typer.BadParameter(str(e)) from None
-
-    console.title_panel("IP Access List → CBI migration",
-                        "Recreate this workspace's IP ACL as a CBI policy, verbatim.")
-    wc = _confirm_workspace(conn, yes)
-
-    # Read the workspace's IP access lists + enforcement state up front, and decide whether there's
-    # anything to migrate at all (the quadrant gate may exit cleanly).
-    analysis = acl_core.analyze(cfg, wc)
-    _acl_ip_gate(analysis, wc, yes)
-    if not (analysis.allow_specs or analysis.deny_specs):
-        console.banner("info", "This workspace's IP access lists are all individually disabled — "
-                               "there are no enabled rules to migrate.")
-        raise typer.Exit(code=0)
-
-    # migrate-acl always needs account access: the pre-checks (PAS / VPC endpoints / existing policy)
-    # and the name-uniqueness check are account-level, and applying needs it anyway.
-    _ensure_account_id(conn, "Migrating an IP ACL (checks PrivateLink + the existing assigned policy)")
-    account = _account_client_or_exit(conn)
-    ws_id = analysis.workspace_id
-    # An existing assigned policy is only replaced if we're going to assign the new one.
-    _acl_preflight(account, ws_id, will_assign=cfg.create_policy and cfg.auto_assign, yes=yes)
-
-    _resolve_policy_name(cfg, conn, wc, yes)
-    _ensure_acl_policy_name_unique(cfg, account, ws_id, yes)
-    render.acl_decisions(cfg)
-    _note_policy_name(cfg.policy_name)
-    _confirm_params(yes)
-
-    render.acl_analysis(analysis, cfg)
-    _checkpoint(yes)
-
-    preview = acl_core.preview_block(analysis, cfg, note=lambda m: console.banner("info", m))
-    render.acl_preview(preview, cfg)
-    render.acl_disabled_notice(analysis)   # below [old]/[new], before create: vet disabled rules
-    console.responsibility_warning("IP access list entries")
-
-    if cfg.export:
-        _export_policy(cfg.export, acl_core.policy_payload(analysis, cfg, conn.account_id))
-    _checkpoint(yes)
-
-    if not cfg.create_policy:
-        console.banner("info", "Propose-only run (--no-create-policy). Nothing was written.")
-        return
-    if not _confirm_write(cfg.policy_mode, yes):
-        console.banner("info", "Aborted — nothing written.")
-        return
-
-    with console.status("Applying policy…"):
-        result = acl_core.apply(analysis, cfg, account, conn.account_id,
-                                note=lambda m: console.banner("info", m))
-    render.apply_results([result], conn.account_host, conn.account_id)
-    _maybe_disable_ip_acls(cfg.disable_existing_ip_acls, [result], wc)
 
 
 if __name__ == "__main__":

@@ -9,17 +9,10 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from dbx_nwp_helper.config import AclConfig, EgressConfig, IngressConfig
-from dbx_nwp_helper.core import acl as acl_core
+from dbx_nwp_helper.config import EgressConfig, IngressConfig
 from dbx_nwp_helper.core import egress as eg
 from dbx_nwp_helper.core import ingress as ing
 from dbx_nwp_helper.core import ingress_rules as rules
-
-
-class _FakeAcl:
-    def __init__(self, label, list_type, enabled, ips):
-        self.label, self.enabled, self.ip_addresses = label, enabled, ips
-        self.list_type = type("LT", (), {"value": list_type})()
 
 
 class _FakeIpAclApi:
@@ -120,18 +113,6 @@ def test_ingress_databricks_owned_takes_precedence(monkeypatch, candidates_df):
     recs = {r["rdap_owner"]: r for _, r in analysis.suggestions.iterrows()}
     dbx_group = [r for r in recs.values() if r["databricks_owned"]]
     assert dbx_group and dbx_group[0]["recommendation"] == "ALLOW — Databricks-owned"
-
-
-def test_acl_migration_block_only_adds_catch_all():
-    cfg = AclConfig(policy_mode="dry_run")
-    wc = _FakeWorkspaceClient(acls=[_FakeAcl("blocklist", "BLOCK", True, ["1.2.3.4"])])
-    analysis = acl_core.analyze(cfg, wc)
-    assert analysis.deny_specs and not analysis.allow_specs
-    preview = acl_core.preview_block(analysis, cfg)
-    pub = preview["ingress_dry_run"]["public_access"]
-    # catch-all allow injected because only BLOCK lists exist
-    assert pub["allow_rules"][0]["origin"].get("all_ip_ranges") is True
-    assert pub["deny_rules"]
 
 
 def test_egress_classification_and_block(monkeypatch):
