@@ -1,6 +1,10 @@
 # 🛡️ Databricks Network Policy Helper
 
 > Build Databricks **account network policies** from *real observed traffic* — not guesswork.
+ 🔁 **Migrating an existing IP access list** into a CBI policy, verbatim (no traffic analysis)?
+> That lives in its own focused tool:
+> **[databricks-migrate-ip-acls](https://github.com/andyweaves/databricks-migrate-ip-acls)**
+> (`dbx-migrate-ip-acls`)
 
 `dbx-nwp-helper` is a visually engaging CLI that turns the Databricks system tables into proposed
 **account network policies**, with a dry-run-first, review-gated apply path. Both directions are
@@ -11,11 +15,6 @@ covered:
 
 🔗 Each direction can either **create a new policy** *or* **add its rules to an existing** one — so
 run them one after the other, pointed at the same policy, for a combined ingress + egress policy.
-
-> 🔁 **Migrating an existing IP access list** into a CBI policy, verbatim (no traffic analysis)?
-> That lives in its own focused tool now:
-> **[databricks-migrate-ip-acls](https://github.com/andyweaves/databricks-migrate-ip-acls)**
-> (`dbx-migrate-ip-acls`), split out from this repo.
 
 ## ⚠️ Warning
 - A network policy controls access to/from your Databricks environment.
