@@ -34,35 +34,79 @@ class _FakeWorkspaceClient:
 
 @pytest.fixture
 def candidates_df():
-    return pd.DataFrame([
-        {"public_ip": "203.0.55.10", "ip_version": 4, "events": 100, "principals": 2, "services": 1,
-         "actions": 3, "active_days": 5, "sessions": 4, "first_active_date": "2026-01-01",
-         "last_active_date": "2026-01-05", "principal_list": ["a@x.com"],
-         "principal_emails": ["a@x.com"], "subject_names": [], "service_list": ["apps"],
-         "workspace_ids": [123]},
-        {"public_ip": "8.8.8.8", "ip_version": 4, "events": 5, "principals": 1, "services": 1,
-         "actions": 1, "active_days": 1, "sessions": 1, "first_active_date": "2026-01-02",
-         "last_active_date": "2026-01-02", "principal_list": ["b@x.com"],
-         "principal_emails": ["b@x.com"], "subject_names": [], "service_list": ["jobs"],
-         "workspace_ids": [123]},
-    ])
+    return pd.DataFrame(
+        [
+            {
+                "public_ip": "203.0.55.10",
+                "ip_version": 4,
+                "events": 100,
+                "principals": 2,
+                "services": 1,
+                "actions": 3,
+                "active_days": 5,
+                "sessions": 4,
+                "first_active_date": "2026-01-01",
+                "last_active_date": "2026-01-05",
+                "principal_list": ["a@x.com"],
+                "principal_emails": ["a@x.com"],
+                "subject_names": [],
+                "service_list": ["apps"],
+                "workspace_ids": [123],
+            },
+            {
+                "public_ip": "8.8.8.8",
+                "ip_version": 4,
+                "events": 5,
+                "principals": 1,
+                "services": 1,
+                "actions": 1,
+                "active_days": 1,
+                "sessions": 1,
+                "first_active_date": "2026-01-02",
+                "last_active_date": "2026-01-02",
+                "principal_list": ["b@x.com"],
+                "principal_emails": ["b@x.com"],
+                "subject_names": [],
+                "service_list": ["jobs"],
+                "workspace_ids": [123],
+            },
+        ]
+    )
 
 
 def _patch_feeds(monkeypatch, threat_rows=None, cloud_rows=None, dbx_rows=None):
     from dbx_nwp_helper.feeds import loaders
-    monkeypatch.setattr(loaders, "threat_intel", lambda feeds, refresh=False: pd.DataFrame(
-        threat_rows or [], columns=["cidr", "source_feed", "threat_type", "confidence",
-                                    "source_url", "loaded_at"]))
-    monkeypatch.setattr(loaders, "cloud_ranges", lambda refresh=False: pd.DataFrame(
-        cloud_rows or [], columns=["cidr", "provider", "service", "region", "loaded_at"]))
-    monkeypatch.setattr(loaders, "databricks_ranges", lambda refresh=False: pd.DataFrame(
-        dbx_rows or [], columns=["cidr", "platform", "region", "direction", "loaded_at"]))
+
+    monkeypatch.setattr(
+        loaders,
+        "threat_intel",
+        lambda feeds, refresh=False: pd.DataFrame(
+            threat_rows or [],
+            columns=["cidr", "source_feed", "threat_type", "confidence", "source_url", "loaded_at"],
+        ),
+    )
+    monkeypatch.setattr(
+        loaders,
+        "cloud_ranges",
+        lambda refresh=False: pd.DataFrame(
+            cloud_rows or [], columns=["cidr", "provider", "service", "region", "loaded_at"]
+        ),
+    )
+    monkeypatch.setattr(
+        loaders,
+        "databricks_ranges",
+        lambda refresh=False: pd.DataFrame(
+            dbx_rows or [], columns=["cidr", "platform", "region", "direction", "loaded_at"]
+        ),
+    )
 
 
 def test_ingress_ip_only_dry_run(monkeypatch, candidates_df):
     # 8.8.8.8 is on a threat feed -> excluded from allow rules; 203.0.55.10 stays.
-    _patch_feeds(monkeypatch, threat_rows=[
-        ("8.8.8.0/24", "ipsum", "aggregated_blocklist", 1, "http://x", "2026-01-01")])
+    _patch_feeds(
+        monkeypatch,
+        threat_rows=[("8.8.8.0/24", "ipsum", "aggregated_blocklist", 1, "http://x", "2026-01-01")],
+    )
 
     # Stub sql.query to return our candidates / empty denied.
     import dbx_nwp_helper.sql as sqlmod
@@ -73,10 +117,16 @@ def test_ingress_ip_only_dry_run(monkeypatch, candidates_df):
         if "IpAccessDenied" in text:
             return pd.DataFrame(columns=["source_ip"])
         return candidates_df
+
     monkeypatch.setattr(sqlmod, "query", fake_query)
 
-    cfg = IngressConfig(min_events=1, enable_rdap=False, policy_framing="minimal",
-                        scoping_mode="ip_only", policy_scope="all_workspaces")
+    cfg = IngressConfig(
+        min_events=1,
+        enable_rdap=False,
+        policy_framing="minimal",
+        scoping_mode="ip_only",
+        policy_scope="all_workspaces",
+    )
     analysis = ing.analyze(cfg, sql_conn=None, workspace_client=_FakeWorkspaceClient())
     assert not analysis.suggestions.empty
     # threat match table should include 8.8.8.8
@@ -106,8 +156,12 @@ def test_ingress_databricks_owned_takes_precedence(monkeypatch, candidates_df):
         dbx_rows=[("8.8.8.0/24", "aws", "us", "inbound", "2026-01-01")],
     )
     import dbx_nwp_helper.sql as sqlmod
-    monkeypatch.setattr(sqlmod, "query", lambda _c, t: (
-        pd.DataFrame(columns=["source_ip"]) if "IpAccessDenied" in t else candidates_df))
+
+    monkeypatch.setattr(
+        sqlmod,
+        "query",
+        lambda _c, t: (pd.DataFrame(columns=["source_ip"]) if "IpAccessDenied" in t else candidates_df),
+    )
     cfg = IngressConfig(enable_rdap=False, scoping_mode="ip_only", policy_scope="all_workspaces")
     analysis = ing.analyze(cfg, None, _FakeWorkspaceClient())
     recs = {r["rdap_owner"]: r for _, r in analysis.suggestions.iterrows()}
@@ -116,13 +170,26 @@ def test_ingress_databricks_owned_takes_precedence(monkeypatch, candidates_df):
 
 
 def test_egress_classification_and_block(monkeypatch):
-    observed = pd.DataFrame([
-        {"destination": "mybucket.s3.us-west-2.amazonaws.com", "destination_type": "DNS",
-         "events": 10, "workspace_ids": [123], "resolved_ips": []},
-        {"destination": "api.openai.com", "destination_type": "DNS", "events": 4,
-         "workspace_ids": [123], "resolved_ips": ["1.2.3.4"]},
-    ])
+    observed = pd.DataFrame(
+        [
+            {
+                "destination": "mybucket.s3.us-west-2.amazonaws.com",
+                "destination_type": "DNS",
+                "events": 10,
+                "workspace_ids": [123],
+                "resolved_ips": [],
+            },
+            {
+                "destination": "api.openai.com",
+                "destination_type": "DNS",
+                "events": 4,
+                "workspace_ids": [123],
+                "resolved_ips": ["1.2.3.4"],
+            },
+        ]
+    )
     import dbx_nwp_helper.sql as sqlmod
+
     monkeypatch.setattr(sqlmod, "query", lambda _c, _t: observed)
     cfg = EgressConfig(enable_rdap=False, block_threat_domains="off", policy_scope="all_workspaces")
     analysis = eg.analyze(cfg, None)

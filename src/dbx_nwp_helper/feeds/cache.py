@@ -45,8 +45,9 @@ def store(name: str, df: pd.DataFrame) -> None:
     df.to_parquet(_path(name), index=False)
 
 
-def get_or_build(name: str, builder: Callable[[], pd.DataFrame], refresh: bool = False,
-                 ttl: int = CACHE_TTL_SECONDS) -> pd.DataFrame:
+def get_or_build(
+    name: str, builder: Callable[[], pd.DataFrame], refresh: bool = False, ttl: int = CACHE_TTL_SECONDS
+) -> pd.DataFrame:
     """Return the cached feed table, (re)building via `builder` when missing/stale/forced.
 
     An empty result is NOT cached: an empty feed almost always means the download failed (network /

@@ -66,6 +66,7 @@ def load_cloud_ranges() -> pd.DataFrame:
                     rows.append((cidr, "azure", props.get("systemService"), props.get("region"), now))
     else:
         from ..console import banner
+
         banner("warn", "Azure Service Tags unavailable this run — continuing without them")
 
     rows = dedupe(rows, (0, 1))

@@ -27,5 +27,6 @@ def http_get(url: str, as_json: bool = False) -> Any | None:
                 time.sleep(delay)
                 delay *= 2
     from ..console import banner
+
     banner("warn", f"feed fetch failed for {url}: {last_error}")
     return None

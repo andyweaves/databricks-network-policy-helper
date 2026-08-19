@@ -32,8 +32,13 @@ def test_unknown_role_ranks_between_known_and_abuse():
 
 
 def test_nested_entities_are_included():
-    entities = [{"roles": ["registrar"], "vcardArray": ["vcard", [["fn", {}, "text", "Parent Registrar"]]],
-                 "entities": [_entity("Nested Org", ["registrant"])]}]
+    entities = [
+        {
+            "roles": ["registrar"],
+            "vcardArray": ["vcard", [["fn", {}, "text", "Parent Registrar"]]],
+            "entities": [_entity("Nested Org", ["registrant"])],
+        }
+    ]
     names = rdap._extract_entity_names(entities)
     assert "Parent Registrar" in names and "Nested Org" in names
 

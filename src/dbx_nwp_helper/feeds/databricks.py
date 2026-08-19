@@ -24,13 +24,14 @@ def load_databricks_ranges() -> pd.DataFrame:
     data = http_get(DATABRICKS_IP_RANGES_URL, as_json=True)
     if not data:
         from ..console import banner
+
         banner("warn", "Databricks IP ranges unavailable this run — continuing without them")
         return pd.DataFrame(rows, columns=DATABRICKS_COLUMNS)
     for entry in data.get("prefixes", []):
         platform = entry.get("platform")
         region = entry.get("region")
         direction = entry.get("type")  # inbound | outbound
-        for cidr_raw in (entry.get("ipv4Prefixes", []) + entry.get("ipv6Prefixes", [])):
+        for cidr_raw in entry.get("ipv4Prefixes", []) + entry.get("ipv6Prefixes", []):
             cidr = valid_cidr(cidr_raw)
             if cidr:
                 rows.append((cidr, platform, region, direction, now))

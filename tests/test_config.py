@@ -33,6 +33,7 @@ def test_no_command_carries_name_prefix():
     # --policy-name or the profile name). DEFAULT_NAME_PREFIX is only the final fallback when there's
     # neither a profile nor a workspace id.
     from dbx_nwp_helper.config import DEFAULT_NAME_PREFIX, EgressConfig
+
     assert DEFAULT_NAME_PREFIX == "dbx-nwp"
     assert not hasattr(IngressConfig(), "name_prefix")
     assert not hasattr(EgressConfig(), "name_prefix")
@@ -40,6 +41,7 @@ def test_no_command_carries_name_prefix():
 
 def test_policy_scope_defaults_to_current_workspace():
     from dbx_nwp_helper.config import EgressConfig
+
     assert IngressConfig().policy_scope == "current_workspace"
     assert EgressConfig().policy_scope == "current_workspace"
 
@@ -51,23 +53,26 @@ def test_policy_mode_target_maps_to_block():
 
 def test_validate_apply_noop_when_not_creating():
     # propose-only, or create_new — nothing to validate.
-    validate_apply(ApplyOptions(create_policy=False, policy_action="add_to_existing"),
-                   "per_workspace", "egress")
-    validate_apply(ApplyOptions(create_policy=True, policy_action="create_new"),
-                   "per_workspace", "egress")
+    validate_apply(
+        ApplyOptions(create_policy=False, policy_action="add_to_existing"), "per_workspace", "egress"
+    )
+    validate_apply(ApplyOptions(create_policy=True, policy_action="create_new"), "per_workspace", "egress")
 
 
 def test_validate_apply_requires_existing_id():
     with pytest.raises(ValueError, match="existing-policy-id"):
-        validate_apply(ApplyOptions(create_policy=True, policy_action="add_to_existing"),
-                       "current_workspace", "egress")
+        validate_apply(
+            ApplyOptions(create_policy=True, policy_action="add_to_existing"), "current_workspace", "egress"
+        )
 
 
 def test_validate_apply_rejects_per_workspace():
     with pytest.raises(ValueError, match="per_workspace"):
         validate_apply(
             ApplyOptions(create_policy=True, policy_action="add_to_existing", existing_policy_id="p"),
-            "per_workspace", "egress")
+            "per_workspace",
+            "egress",
+        )
 
 
 def test_validate_apply_ok_single_scopes_with_id():
@@ -75,7 +80,9 @@ def test_validate_apply_ok_single_scopes_with_id():
     for scope in ("current_workspace", "all_workspaces"):
         validate_apply(
             ApplyOptions(create_policy=True, policy_action="add_to_existing", existing_policy_id="p"),
-            scope, "egress")
+            scope,
+            "egress",
+        )
 
 
 def test_validate_disable_ip_acls_noop_when_disabled():
@@ -122,18 +129,21 @@ def test_validate_policy_name_ok_single_scope_create_new():
 
 def test_policy_name_defaults_blank():
     from dbx_nwp_helper.config import EgressConfig
+
     assert IngressConfig().policy_name == ""
     assert EgressConfig().policy_name == ""
 
 
 def test_validate_export_rejects_per_workspace():
     from dbx_nwp_helper.config import validate_export
+
     with pytest.raises(ValueError, match="per_workspace"):
         validate_export("out.json", "per_workspace")
 
 
 def test_validate_export_ok_when_blank_or_single_scope():
     from dbx_nwp_helper.config import validate_export
+
     validate_export("", "per_workspace")  # not requested -> no validation
     for scope in ("current_workspace", "all_workspaces"):
         validate_export("out.json", scope)

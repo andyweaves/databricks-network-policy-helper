@@ -18,33 +18,50 @@ from dbx_nwp_helper.core.ingress import ALL_WORKSPACES, IngressAnalysis
 
 def _suggestion(**kw):
     base = {
-        "policy_target": ALL_WORKSPACES, "rdap_owner": "Acme", "distinct_ips": 1, "total_events": 10,
-        "principals": [], "principal_emails": [], "subject_names": [],
+        "policy_target": ALL_WORKSPACES,
+        "rdap_owner": "Acme",
+        "distinct_ips": 1,
+        "total_events": 10,
+        "principals": [],
+        "principal_emails": [],
+        "subject_names": [],
         "scoped_destination": "all_destinations",
-        "minimal_cidrs": ["203.0.55.10/32"], "optimal_cidrs": ["203.0.55.10/32"], "maximum_cidrs": None,
-        "threat_feeds": None, "cloud_provider": None, "databricks_owned": None,
+        "minimal_cidrs": ["203.0.55.10/32"],
+        "optimal_cidrs": ["203.0.55.10/32"],
+        "maximum_cidrs": None,
+        "threat_feeds": None,
+        "cloud_provider": None,
+        "databricks_owned": None,
         "recommendation": "candidate",
     }
     base.update(kw)
     return base
 
 
-def _analysis(suggestion_rows=None, ip_acls=None, denied=None, threat_match_rows=None,
-              threat_ranges=None):
+def _analysis(suggestion_rows=None, ip_acls=None, denied=None, threat_match_rows=None, threat_ranges=None):
     rows = suggestion_rows or []
     sugg = pd.DataFrame(rows) if rows else pd.DataFrame()
     return IngressAnalysis(
-        candidates=pd.DataFrame(), suggestions=sugg, threat_matches=pd.DataFrame(),
+        candidates=pd.DataFrame(),
+        suggestions=sugg,
+        threat_matches=pd.DataFrame(),
         denied_requests=denied if denied is not None else pd.DataFrame(columns=["source_ip"]),
-        ip_acls=ip_acls or [], suggestion_rows=rows, threat_match_rows=threat_match_rows or [],
-        threat_ranges=threat_ranges or [])
+        ip_acls=ip_acls or [],
+        suggestion_rows=rows,
+        threat_match_rows=threat_match_rows or [],
+        threat_ranges=threat_ranges or [],
+    )
 
 
 # ------------------------------------------------------------------- scoping / framing / grouping
 def test_owner_groups_become_separate_labeled_rules():
     # Every owner group is its own labeled allow rule now (no single blanket collapse), even ip_only.
-    a = _analysis([_suggestion(rdap_owner="Acme Corp", minimal_cidrs=["1.1.1.1/32"]),
-                   _suggestion(rdap_owner="Beta LLC", minimal_cidrs=["2.2.2.2/32"])])
+    a = _analysis(
+        [
+            _suggestion(rdap_owner="Acme Corp", minimal_cidrs=["1.1.1.1/32"]),
+            _suggestion(rdap_owner="Beta LLC", minimal_cidrs=["2.2.2.2/32"]),
+        ]
+    )
     pols = rules.build_rules(a, IngressConfig(scoping_mode="ip_only", policy_framing="minimal"))
     allow = pols[ALL_WORKSPACES]["allow"]
     assert len(allow) == 2
@@ -56,9 +73,11 @@ def test_owner_groups_become_separate_labeled_rules():
 
 def test_cloud_owned_included_with_cloud_label():
     # (b) cloud-provider-owned groups are now INCLUDED, labeled <cloud>-<owner>.
-    a = _analysis([
-        _suggestion(rdap_owner="Palo Alto", cloud_provider=["aws"], minimal_cidrs=["8.8.8.8/32"]),
-    ])
+    a = _analysis(
+        [
+            _suggestion(rdap_owner="Palo Alto", cloud_provider=["aws"], minimal_cidrs=["8.8.8.8/32"]),
+        ]
+    )
     pols = rules.build_rules(a, IngressConfig(scoping_mode="ip_only"))
     labels = [s["label"] for s in pols[ALL_WORKSPACES]["allow"]]
     assert "aws-Palo-Alto" in labels
@@ -66,11 +85,13 @@ def test_cloud_owned_included_with_cloud_label():
 
 
 def test_only_threat_groups_excluded():
-    a = _analysis([
-        _suggestion(rdap_owner="clean", minimal_cidrs=["1.1.1.1/32"]),
-        _suggestion(rdap_owner="bad", threat_feeds=["ipsum"], minimal_cidrs=["9.9.9.9/32"]),
-        _suggestion(rdap_owner="cloud", cloud_provider=["aws"], minimal_cidrs=["8.8.8.8/32"]),
-    ])
+    a = _analysis(
+        [
+            _suggestion(rdap_owner="clean", minimal_cidrs=["1.1.1.1/32"]),
+            _suggestion(rdap_owner="bad", threat_feeds=["ipsum"], minimal_cidrs=["9.9.9.9/32"]),
+            _suggestion(rdap_owner="cloud", cloud_provider=["aws"], minimal_cidrs=["8.8.8.8/32"]),
+        ]
+    )
     pols = rules.build_rules(a, IngressConfig(scoping_mode="ip_only"))
     all_cidrs = {c for s in pols[ALL_WORKSPACES]["allow"] for c in s["cidrs"]}
     assert all_cidrs == {"1.1.1.1/32", "8.8.8.8/32"}  # clean + cloud kept; threat excluded
@@ -78,8 +99,16 @@ def test_only_threat_groups_excluded():
 
 
 def test_databricks_owned_included_despite_cloud_flag():
-    a = _analysis([_suggestion(rdap_owner="dbx", cloud_provider=["aws"],
-                               databricks_owned=["aws"], minimal_cidrs=["4.4.4.4/32"])])
+    a = _analysis(
+        [
+            _suggestion(
+                rdap_owner="dbx",
+                cloud_provider=["aws"],
+                databricks_owned=["aws"],
+                minimal_cidrs=["4.4.4.4/32"],
+            )
+        ]
+    )
     pols = rules.build_rules(a, IngressConfig(scoping_mode="ip_and_destination"))
     labels = [s["label"] for s in pols[ALL_WORKSPACES]["allow"]]
     # (a) databricks-owned -> databricks-<cloud>
@@ -88,8 +117,9 @@ def test_databricks_owned_included_despite_cloud_flag():
 
 
 def test_destination_scoping_applied_for_non_databricks():
-    a = _analysis([_suggestion(rdap_owner="apps", scoped_destination="apps_runtime",
-                               minimal_cidrs=["5.5.5.5/32"])])
+    a = _analysis(
+        [_suggestion(rdap_owner="apps", scoped_destination="apps_runtime", minimal_cidrs=["5.5.5.5/32"])]
+    )
     pols = rules.build_rules(a, IngressConfig(scoping_mode="ip_and_destination"))
     spec = pols[ALL_WORKSPACES]["allow"][0]
     assert spec["destination"] == "apps_runtime"
@@ -111,8 +141,7 @@ def test_ipv6_cidrs_skipped_and_counted():
 
 # --------------------------------------------------------------------------- identity scoping
 def test_identity_scoping_selected_identities():
-    a = _analysis([_suggestion(principal_emails=["a@x.com"], subject_names=[],
-                               minimal_cidrs=["1.1.1.1/32"])])
+    a = _analysis([_suggestion(principal_emails=["a@x.com"], subject_names=[], minimal_cidrs=["1.1.1.1/32"])])
     ident = {"a@x.com": {"principal_id": 42, "principal_type": "USER"}}
     pols = rules.build_rules(a, IngressConfig(scoping_mode="ip_and_identity"), identity_resolution=ident)
     spec = pols[ALL_WORKSPACES]["allow"][0]
@@ -131,8 +160,7 @@ def test_identity_scoping_unresolved_group_excluded():
 def test_identity_scoping_warns_and_built_block_omits_authentication():
     # The CBI API rejects a per-identity auth block on all/Apps/Lakebase destinations, so identity
     # scoping warns and the built block carries no authentication (would otherwise 400 on apply).
-    a = _analysis([_suggestion(principal_emails=["a@x.com"], subject_names=[],
-                               minimal_cidrs=["1.1.1.1/32"])])
+    a = _analysis([_suggestion(principal_emails=["a@x.com"], subject_names=[], minimal_cidrs=["1.1.1.1/32"])])
     ident = {"a@x.com": {"principal_id": 42, "principal_type": "USER"}}
     notes = []
     cfg = IngressConfig(scoping_mode="ip_and_identity")
@@ -149,19 +177,20 @@ def _acl(label, list_type, ips, enabled=True):
 
 
 def test_acl_migrate_and_enrich_adds_acl_allow_to_traffic():
-    a = _analysis([_suggestion(minimal_cidrs=["1.1.1.1/32"])],
-                  ip_acls=[_acl("office", "ALLOW", ["8.8.8.8/32"])])
-    pols = rules.build_rules(a, IngressConfig(scoping_mode="ip_only",
-                                              ip_acl_handling="migrate_and_enrich"))
+    a = _analysis(
+        [_suggestion(minimal_cidrs=["1.1.1.1/32"])], ip_acls=[_acl("office", "ALLOW", ["8.8.8.8/32"])]
+    )
+    pols = rules.build_rules(a, IngressConfig(scoping_mode="ip_only", ip_acl_handling="migrate_and_enrich"))
     labels = [s["label"] for s in pols[ALL_WORKSPACES]["allow"]]
     assert "migrated-acl-office" in labels  # migrated ACL rule (as-is, no name_prefix)
-    assert "Acme" in labels                # traffic-derived owner-grouped rule
-    assert not any("ip-only" in lbl for lbl in labels)         # no blanket collapse anymore
+    assert "Acme" in labels  # traffic-derived owner-grouped rule
+    assert not any("ip-only" in lbl for lbl in labels)  # no blanket collapse anymore
 
 
 def test_acl_migrate_only_drops_traffic_rules():
-    a = _analysis([_suggestion(minimal_cidrs=["1.1.1.1/32"])],
-                  ip_acls=[_acl("office", "ALLOW", ["8.8.8.8/32"])])
+    a = _analysis(
+        [_suggestion(minimal_cidrs=["1.1.1.1/32"])], ip_acls=[_acl("office", "ALLOW", ["8.8.8.8/32"])]
+    )
     pols = rules.build_rules(a, IngressConfig(scoping_mode="ip_only", ip_acl_handling="migrate"))
     labels = [s["label"] for s in pols[ALL_WORKSPACES]["allow"]]
     assert all("ip-only" not in lbl for lbl in labels)
@@ -169,8 +198,9 @@ def test_acl_migrate_only_drops_traffic_rules():
 
 
 def test_acl_ignore_excludes_acl():
-    a = _analysis([_suggestion(minimal_cidrs=["1.1.1.1/32"])],
-                  ip_acls=[_acl("office", "ALLOW", ["8.8.8.8/32"])])
+    a = _analysis(
+        [_suggestion(minimal_cidrs=["1.1.1.1/32"])], ip_acls=[_acl("office", "ALLOW", ["8.8.8.8/32"])]
+    )
     pols = rules.build_rules(a, IngressConfig(scoping_mode="ip_only", ip_acl_handling="ignore"))
     labels = [s["label"] for s in pols[ALL_WORKSPACES]["allow"]]
     assert not any("acl" in lbl for lbl in labels)
@@ -191,8 +221,9 @@ def test_disabled_acl_skipped():
 
 # --------------------------------------------------------------------------- denied-IP deny rules
 def test_deny_denied_ips_builds_deny_rule():
-    denied = pd.DataFrame([{"source_ip": "70.1.2.3"}, {"source_ip": "70.1.2.3"},
-                           {"source_ip": "2001:db8::1"}])
+    denied = pd.DataFrame(
+        [{"source_ip": "70.1.2.3"}, {"source_ip": "70.1.2.3"}, {"source_ip": "2001:db8::1"}]
+    )
     a = _analysis([_suggestion(minimal_cidrs=["1.1.1.1/32"])], denied=denied)
     pols = rules.build_rules(a, IngressConfig(scoping_mode="ip_only", deny_denied_ips=True))
     deny = pols[ALL_WORKSPACES]["deny"]
@@ -206,11 +237,13 @@ def _tr(cidr, feed, ttype, conf):
 
 
 def test_threat_deny_all_one_rule_per_feed():
-    a = _analysis(threat_ranges=[
-        _tr("9.9.9.0/24", "ipsum", "aggregated_blocklist", 1),
-        _tr("8.8.8.0/24", "dshield", "attacker_subnet", 1),
-        _tr("2001:db8::/32", "ipsum", "x", 1),  # ipv6 skipped
-    ])
+    a = _analysis(
+        threat_ranges=[
+            _tr("9.9.9.0/24", "ipsum", "aggregated_blocklist", 1),
+            _tr("8.8.8.0/24", "dshield", "attacker_subnet", 1),
+            _tr("2001:db8::/32", "ipsum", "x", 1),  # ipv6 skipped
+        ]
+    )
     pols = rules.build_rules(a, IngressConfig(scoping_mode="ip_only", threat_deny_rules="all"))
     deny = pols.get(ALL_WORKSPACES, {}).get("deny", [])
     feeds = {s["label"].removeprefix("deny-") for s in deny}
@@ -220,9 +253,16 @@ def test_threat_deny_all_one_rule_per_feed():
 
 
 def test_threat_deny_matched_only_uses_match_rows():
-    a = _analysis(threat_match_rows=[
-        {"matched_cidr": "9.9.9.0/24", "source_feed": "ipsum",
-         "threat_type": "aggregated_blocklist", "confidence": 2}])
+    a = _analysis(
+        threat_match_rows=[
+            {
+                "matched_cidr": "9.9.9.0/24",
+                "source_feed": "ipsum",
+                "threat_type": "aggregated_blocklist",
+                "confidence": 2,
+            }
+        ]
+    )
     pols = rules.build_rules(a, IngressConfig(scoping_mode="ip_only", threat_deny_rules="matched_only"))
     deny = pols.get(ALL_WORKSPACES, {}).get("deny", [])
     assert any(s["cidrs"] == ["9.9.9.0/24"] for s in deny)
@@ -230,9 +270,12 @@ def test_threat_deny_matched_only_uses_match_rows():
 
 def test_threat_deny_dedupes_keeping_most_severe():
     # same cidr, one conf2 non-attacker + one conf1 attacker -> attacker/conf1 wins.
-    a = _analysis(threat_ranges=[
-        _tr("9.9.9.0/24", "ipsum", "aggregated_blocklist", 2),
-        _tr("9.9.9.0/24", "dshield", "attacker_subnet", 1)])
+    a = _analysis(
+        threat_ranges=[
+            _tr("9.9.9.0/24", "ipsum", "aggregated_blocklist", 2),
+            _tr("9.9.9.0/24", "dshield", "attacker_subnet", 1),
+        ]
+    )
     pols = rules.build_rules(a, IngressConfig(scoping_mode="ip_only", threat_deny_rules="all"))
     deny = pols[ALL_WORKSPACES]["deny"]
     # only the dshield/attacker entry survives dedupe
@@ -263,6 +306,7 @@ class _FakeNetworkPolicies:
 
     def get_network_policy_rpc(self, network_policy_id):
         from databricks.sdk.errors import NotFound
+
         raise NotFound("nope")
 
     def create_network_policy_rpc(self, network_policy):
@@ -343,14 +387,18 @@ def test_apply_current_workspace_falls_back_to_ws_id_without_profile():
 
 def test_export_payload_builds_full_single_policy():
     # --export produces the full AccountNetworkPolicy: ingress mode block + FULL_ACCESS egress.
-    spec = {"label": "office", "cidrs": ["1.2.3.4/32"], "destination": "all_destinations",
-            "identity_type": "ALL_USERS", "identities": []}
+    spec = {
+        "label": "office",
+        "cidrs": ["1.2.3.4/32"],
+        "destination": "all_destinations",
+        "identity_type": "ALL_USERS",
+        "identities": [],
+    }
     policies = {ALL_WORKSPACES: {"allow": [spec], "deny": []}}
-    cfg = IngressConfig(policy_scope="all_workspaces", policy_mode="enforce",
-                        policy_name="my-ingress")
+    cfg = IngressConfig(policy_scope="all_workspaces", policy_mode="enforce", policy_name="my-ingress")
     payload = rules.export_payload(policies, cfg, "acc-1", this_workspace_id=42)
     assert payload["network_policy_id"] == "my-ingress"
     assert payload["account_id"] == "acc-1"
-    assert "egress" in payload                       # FULL_ACCESS egress default added
-    assert "ingress" in payload                      # enforce -> ingress (not ingress_dry_run)
+    assert "egress" in payload  # FULL_ACCESS egress default added
+    assert "ingress" in payload  # enforce -> ingress (not ingress_dry_run)
     assert payload["ingress"]["public_access"]["allow_rules"]

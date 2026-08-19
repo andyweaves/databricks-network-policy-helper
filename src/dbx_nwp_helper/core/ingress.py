@@ -24,6 +24,7 @@ ALL_WORKSPACES = "__ALL__"
 @dataclass
 class IngressAnalysis:
     """Everything analyze() produced — the review tables + intermediate state build_rules() needs."""
+
     candidates: pd.DataFrame
     suggestions: pd.DataFrame
     threat_matches: pd.DataFrame
@@ -50,9 +51,17 @@ def analyze(cfg: IngressConfig, sql_conn, workspace_client, on_step=lambda _m: N
         on_step(f"Scope=current_workspace — restricting analysis to workspace {only_ws}.")
 
     on_step("Querying frequent public source IPs…")
-    candidates = sql.query(sql_conn, queries.frequent_public_ips(
-        cfg.lookback_days, cfg.min_events, cfg.include_ipv6,
-        cfg.treat_null_status_as_success, cfg.include_account_level, only_workspace_id=only_ws))
+    candidates = sql.query(
+        sql_conn,
+        queries.frequent_public_ips(
+            cfg.lookback_days,
+            cfg.min_events,
+            cfg.include_ipv6,
+            cfg.treat_null_status_as_success,
+            cfg.include_account_level,
+            only_workspace_id=only_ws,
+        ),
+    )
 
     # When there are no candidates, run a cheap diagnostic funnel so we can explain *why* rather than
     # just reporting an empty table (the most common confusion: public IPs live on account-level rows,
@@ -60,8 +69,9 @@ def analyze(cfg: IngressConfig, sql_conn, workspace_client, on_step=lambda _m: N
     funnel = None
     if candidates.empty:
         on_step("No candidates — running a diagnostic funnel to explain why…")
-        fdf = sql.query(sql_conn, queries.candidate_funnel(
-            cfg.lookback_days, cfg.treat_null_status_as_success))
+        fdf = sql.query(
+            sql_conn, queries.candidate_funnel(cfg.lookback_days, cfg.treat_null_status_as_success)
+        )
         funnel = fdf.to_dict(orient="records")[0] if not fdf.empty else None
 
     on_step("Reading the workspace IP access list + denied requests…")
@@ -72,37 +82,51 @@ def analyze(cfg: IngressConfig, sql_conn, workspace_client, on_step=lambda _m: N
     threat_df = loaders.threat_intel(cfg.threat_feeds, refresh=cfg.refresh_feeds)
     cloud_df = loaders.cloud_ranges(refresh=cfg.refresh_feeds)
     dbx_df = loaders.databricks_ranges(refresh=cfg.refresh_feeds)
-    on_step(f"Loaded enrichment ranges: {len(threat_df):,} threat-intel, {len(cloud_df):,} cloud, "
-            f"{len(dbx_df):,} Databricks.")
+    on_step(
+        f"Loaded enrichment ranges: {len(threat_df):,} threat-intel, {len(cloud_df):,} cloud, "
+        f"{len(dbx_df):,} Databricks."
+    )
     # A feed that comes back empty (download failed) would make its membership checks silently false;
     # flag it so the operator knows the enrichment is degraded rather than trusting a clean result.
     for label, df in (("cloud-provider", cloud_df), ("Databricks", dbx_df)):
         if df.empty:
-            on_step(f"⚠️  {label} ranges are EMPTY — those checks can't run (likely a feed download "
-                    f"failure). Re-run with --refresh-feeds, or check network/proxy egress.")
+            on_step(
+                f"⚠️  {label} ranges are EMPTY — those checks can't run (likely a feed download "
+                f"failure). Re-run with --refresh-feeds, or check network/proxy egress."
+            )
     threat_ranges = enrich.load_ranges(threat_df, ["source_feed", "threat_type", "confidence", "source_url"])
     cloud_ranges = enrich.load_ranges(cloud_df, ["provider", "service", "region"])
     databricks_ranges = enrich.load_ranges(dbx_df, ["platform", "region", "direction"])
 
     on_step("Enriching candidate IPs (RDAP owner lookup, range membership)…")
     enriched, threat_match_rows = _enrich_candidates(
-        candidates, cfg, threat_ranges, cloud_ranges, databricks_ranges)
+        candidates, cfg, threat_ranges, cloud_ranges, databricks_ranges
+    )
 
     suggestion_rows = _build_suggestions(enriched, cfg)
 
     suggestions_pdf = (
         pd.DataFrame(suggestion_rows).sort_values(
-            ["policy_target", "recommendation", "total_events"], ascending=[True, True, False])
-        if suggestion_rows else pd.DataFrame()
+            ["policy_target", "recommendation", "total_events"], ascending=[True, True, False]
+        )
+        if suggestion_rows
+        else pd.DataFrame()
     )
     threat_matches_pdf = (
         pd.DataFrame(threat_match_rows).sort_values(["confidence", "events"], ascending=[True, False])
-        if threat_match_rows else pd.DataFrame()
+        if threat_match_rows
+        else pd.DataFrame()
     )
     return IngressAnalysis(
-        candidates=candidates, suggestions=suggestions_pdf, threat_matches=threat_matches_pdf,
-        denied_requests=denied, ip_acls=ip_acls, suggestion_rows=suggestion_rows,
-        threat_match_rows=threat_match_rows, threat_ranges=threat_ranges, funnel=funnel,
+        candidates=candidates,
+        suggestions=suggestions_pdf,
+        threat_matches=threat_matches_pdf,
+        denied_requests=denied,
+        ip_acls=ip_acls,
+        suggestion_rows=suggestion_rows,
+        threat_match_rows=threat_match_rows,
+        threat_ranges=threat_ranges,
+        funnel=funnel,
     )
 
 
@@ -110,12 +134,14 @@ def _read_ip_acls(workspace_client) -> list[dict]:
     acls = []
     try:
         for acl in workspace_client.ip_access_lists.list():
-            acls.append({
-                "label": acl.label,
-                "list_type": acl.list_type.value if acl.list_type else None,
-                "enabled": acl.enabled,
-                "ip_addresses": list(acl.ip_addresses or []),
-            })
+            acls.append(
+                {
+                    "label": acl.label,
+                    "list_type": acl.list_type.value if acl.list_type else None,
+                    "enabled": acl.enabled,
+                    "ip_addresses": list(acl.ip_addresses or []),
+                }
+            )
     except Exception:  # noqa: BLE001 - API may be unavailable / not configured
         pass
     return acls
@@ -149,26 +175,35 @@ def _enrich_candidates(candidates, cfg, threat_ranges, cloud_ranges, databricks_
         cloud_hits, _ = enrich.match_ranges(ip_obj, cloud_ranges)
         databricks_hits, _ = enrich.match_ranges(ip_obj, databricks_ranges)
         for meta, matched_cidr in zip(threat_hits, threat_cidrs, strict=False):
-            threat_match_rows.append({
-                "observed_ip": ip_str, "matched_cidr": matched_cidr,
-                "source_feed": meta["source_feed"], "threat_type": meta["threat_type"],
-                "confidence": meta["confidence"], "source_url": meta.get("source_url"),
-                "events": record["events"], "principals": record["principals"],
-                "first_active_date": record.get("first_active_date"),
-                "last_active_date": record.get("last_active_date"),
-            })
+            threat_match_rows.append(
+                {
+                    "observed_ip": ip_str,
+                    "matched_cidr": matched_cidr,
+                    "source_feed": meta["source_feed"],
+                    "threat_type": meta["threat_type"],
+                    "confidence": meta["confidence"],
+                    "source_url": meta.get("source_url"),
+                    "events": record["events"],
+                    "principals": record["principals"],
+                    "first_active_date": record.get("first_active_date"),
+                    "last_active_date": record.get("last_active_date"),
+                }
+            )
 
-        destinations = sorted({enrich.service_to_destination(s)
-                               for s in enrich.as_list(record.get("service_list"))})
-        record.update({
-            "ip_obj": ip_obj,
-            "rdap_owner_name": rdap_result["rdap_owner_name"],
-            "maximum_cidrs": rdap_result["maximum_cidrs"],
-            "destinations": destinations,
-            "threat_feeds": sorted({h["source_feed"] for h in threat_hits}),
-            "cloud_provider": sorted({h["provider"] for h in cloud_hits}),
-            "databricks_owned": sorted({h["platform"] for h in databricks_hits}),
-        })
+        destinations = sorted(
+            {enrich.service_to_destination(s) for s in enrich.as_list(record.get("service_list"))}
+        )
+        record.update(
+            {
+                "ip_obj": ip_obj,
+                "rdap_owner_name": rdap_result["rdap_owner_name"],
+                "maximum_cidrs": rdap_result["maximum_cidrs"],
+                "destinations": destinations,
+                "threat_feeds": sorted({h["source_feed"] for h in threat_hits}),
+                "cloud_provider": sorted({h["provider"] for h in cloud_hits}),
+                "databricks_owned": sorted({h["platform"] for h in databricks_hits}),
+            }
+        )
         enriched.append(record)
     return enriched, threat_match_rows
 
@@ -192,8 +227,11 @@ def _build_suggestions(enriched, cfg) -> list[dict]:
     groups = defaultdict(list)
     for rec in enriched:
         owner = rec["rdap_owner_name"] or _fallback_group_key(rec)
-        targets = (rec["workspace_ids"] or [ALL_WORKSPACES]) if cfg.policy_scope == "per_workspace" \
+        targets = (
+            (rec["workspace_ids"] or [ALL_WORKSPACES])
+            if cfg.policy_scope == "per_workspace"
             else [ALL_WORKSPACES]
+        )
         for tgt in targets:
             groups[(tgt, owner)].append(rec)
 
@@ -210,26 +248,35 @@ def _build_suggestions(enriched, cfg) -> list[dict]:
         principal_emails = sorted({e for r in recs for e in (r.get("principal_emails") or []) if e})
         subject_names = sorted({sn for r in recs for sn in (r.get("subject_names") or []) if sn})
         scoped_destination = _collapse_destinations([set(r["destinations"]) for r in recs])
-        suggestion_rows.append({
-            "policy_target": policy_target,
-            "rdap_owner": owner,
-            "distinct_ips": len(set(ip_objs)),
-            "total_events": sum(r["events"] for r in recs),
-            "principals": principals,
-            "principal_emails": principal_emails,
-            "subject_names": subject_names,
-            "scoped_destination": scoped_destination,
-            "minimal_cidrs": minimal,
-            "optimal_cidrs": optimal,
-            "maximum_cidrs": maximum or None,
-            "threat_feeds": threat_feeds or None,
-            "cloud_provider": cloud_providers or None,
-            "databricks_owned": databricks_owned or None,
-            "recommendation": (
-                "ALLOW — Databricks-owned" if databricks_owned else
-                "REVIEW — known-bad range" if threat_feeds else
-                "REVIEW — Cloud-owned range" if cloud_providers else
-                "REVIEW — Other hosting provider"
-            ),
-        })
+        suggestion_rows.append(
+            {
+                "policy_target": policy_target,
+                "rdap_owner": owner,
+                "distinct_ips": len(set(ip_objs)),
+                "total_events": sum(r["events"] for r in recs),
+                "principals": principals,
+                "principal_emails": principal_emails,
+                "subject_names": subject_names,
+                "scoped_destination": scoped_destination,
+                "minimal_cidrs": minimal,
+                "optimal_cidrs": optimal,
+                "maximum_cidrs": maximum or None,
+                "threat_feeds": threat_feeds or None,
+                "cloud_provider": cloud_providers or None,
+                "databricks_owned": databricks_owned or None,
+                "recommendation": (
+                    "ALLOW — Databricks-owned"
+                    if databricks_owned
+                    else (
+                        "REVIEW — known-bad range"
+                        if threat_feeds
+                        else (
+                            "REVIEW — Cloud-owned range"
+                            if cloud_providers
+                            else "REVIEW — Other hosting provider"
+                        )
+                    )
+                ),
+            }
+        )
     return suggestion_rows

@@ -19,9 +19,13 @@ def _noop(_m):
 
 
 def test_limits_caps_identities_per_rule():
-    spec = {"label": "r", "cidrs": ["1.1.1.1/32"],
-            "identities": [{"principal_id": i, "principal_type": "USER"}
-                           for i in range(MAX_IDENTITIES_PER_POLICY + 10)]}
+    spec = {
+        "label": "r",
+        "cidrs": ["1.1.1.1/32"],
+        "identities": [
+            {"principal_id": i, "principal_type": "USER"} for i in range(MAX_IDENTITIES_PER_POLICY + 10)
+        ],
+    }
     allow, _ = limits.enforce_limits([spec], [], "x", _noop)
     assert len(allow[0]["identities"]) == MAX_IDENTITIES_PER_POLICY
 
@@ -36,8 +40,7 @@ def test_limits_caps_rule_count_prioritising_allow():
 
 def test_limits_caps_total_cidrs():
     # One allow rule with more than the CIDR budget -> trimmed.
-    big = {"label": "a", "cidrs": [f"10.0.{i // 256}.{i % 256}/32"
-                                   for i in range(MAX_CIDRS_PER_POLICY + 50)]}
+    big = {"label": "a", "cidrs": [f"10.0.{i // 256}.{i % 256}/32" for i in range(MAX_CIDRS_PER_POLICY + 50)]}
     allow, _ = limits.enforce_limits([big], [], "x", _noop)
     assert sum(len(r["cidrs"]) for r in allow) <= MAX_CIDRS_PER_POLICY
 
@@ -110,9 +113,9 @@ def test_cache_does_not_persist_empty_results(tmp_path, monkeypatch):
         return pd.DataFrame(columns=["cidr"])
 
     cache.get_or_build("feed", build_empty, refresh=False)
-    assert cache.load("feed") is None       # nothing persisted
+    assert cache.load("feed") is None  # nothing persisted
     cache.get_or_build("feed", build_empty, refresh=False)
-    assert calls["n"] == 2                    # so the builder is retried, not served from cache
+    assert calls["n"] == 2  # so the builder is retried, not served from cache
 
 
 def test_cache_clear(tmp_path, monkeypatch):
@@ -126,6 +129,7 @@ def test_cache_clear(tmp_path, monkeypatch):
 
 def test_tls_enable_idempotent():
     from dbx_nwp_helper import tls
+
     # Should return a bool and never raise; second call is a no-op.
     first = tls.enable()
     second = tls.enable()
