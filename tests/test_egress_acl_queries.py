@@ -558,3 +558,167 @@ def test_denied_requests_query_filters_403():
     q = queries.denied_requests(14)
     assert "IpAccessDenied" in q and "status_code = 403" in q
     assert "INTERVAL 14 DAYS" in q
+
+
+# ---------------------------------------------------------------- egress owner resolution cascade
+def _internet_analysis(fqdn):
+    t = eg._new_target()
+    t["internet"][fqdn] = 1
+    return eg.EgressAnalysis(observed=pd.DataFrame(), targets={eg.ALL_WORKSPACES: t})
+
+
+def test_owner_lookup_private_ip(monkeypatch):
+    monkeypatch.setattr(eg, "_load_cloud_networks", lambda: [])
+    a = _internet_analysis("host.internal")
+    eg._owner_lookup(a, {"host.internal": ["10.0.0.5"]}, EgressConfig())
+    assert a.fqdn_owner["host.internal"] == "private/internal IP"
+
+
+def test_owner_lookup_cloud_range_wins_over_rdap(monkeypatch):
+    import ipaddress
+
+    monkeypatch.setattr(eg, "_load_cloud_networks", lambda: [(ipaddress.ip_network("52.0.0.0/8"), "AWS")])
+    from dbx_nwp_helper.feeds import rdap
+
+    # a cloud-range hit must short-circuit before RDAP is ever consulted
+    monkeypatch.setattr(
+        rdap, "lookup", lambda ip: (_ for _ in ()).throw(AssertionError("RDAP must not be called"))
+    )
+    a = _internet_analysis("aws.example.com")
+    eg._owner_lookup(a, {"aws.example.com": ["52.1.2.3"]}, EgressConfig())
+    assert a.fqdn_owner["aws.example.com"] == "AWS"
+
+
+def test_owner_lookup_dns_failure_is_flagged(monkeypatch):
+    monkeypatch.setattr(eg, "_load_cloud_networks", lambda: [])
+    monkeypatch.setattr(eg.socket, "gethostbyname", lambda h: (_ for _ in ()).throw(OSError("NXDOMAIN")))
+    a = _internet_analysis("nxdomain.test")
+    eg._owner_lookup(a, {}, EgressConfig())  # no pre-resolved IP -> gethostbyname -> fails
+    assert a.fqdn_owner["nxdomain.test"] == "DNS resolution failed - check egress control"
+
+
+def test_load_cloud_networks_builds_tuples_and_skips_bad_cidrs(monkeypatch):
+    from dbx_nwp_helper.feeds import cloud as cloud_feed
+    from dbx_nwp_helper.feeds import databricks as dbx_feed
+
+    monkeypatch.setattr(
+        cloud_feed,
+        "load_cloud_ranges",
+        lambda: pd.DataFrame(
+            [{"cidr": "52.0.0.0/8", "provider": "aws"}, {"cidr": "junk", "provider": "gcp"}]
+        ),
+    )
+    monkeypatch.setattr(dbx_feed, "load_databricks_ranges", lambda: pd.DataFrame([{"cidr": "3.3.3.0/24"}]))
+    nets = eg._load_cloud_networks()
+    owners = {o for _n, o in nets}
+    assert "AWS" in owners  # provider upper-cased
+    assert "Databricks" in owners  # databricks feed tagged
+    assert all("junk" not in str(n) for n, _o in nets)  # invalid CIDR silently skipped
+
+
+# ------------------------------------------------------------------------ S3 region inference
+def test_infer_s3_region_from_success_header(monkeypatch):
+    class _Resp:
+        headers = {"x-amz-bucket-region": "eu-west-1"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=10: _Resp())
+    assert eg._infer_s3_region("bkt") == "eu-west-1"
+
+
+def test_infer_s3_region_from_error_response_header(monkeypatch):
+    # a 301/403 to the wrong-region endpoint still carries x-amz-bucket-region on the error object
+    class _Hdrs:
+        def get(self, _k):
+            return "us-west-2"
+
+    err = Exception("301 Moved")
+    err.headers = _Hdrs()
+
+    def boom(req, timeout=10):
+        raise err
+
+    monkeypatch.setattr("urllib.request.urlopen", boom)
+    assert eg._infer_s3_region("bkt") == "us-west-2"
+
+
+def test_infer_s3_region_none_when_no_header(monkeypatch):
+    monkeypatch.setattr(
+        "urllib.request.urlopen", lambda req, timeout=10: (_ for _ in ()).throw(Exception("no header"))
+    )
+    assert eg._infer_s3_region("bkt") is None
+
+
+def test_analyze_drops_s3_bucket_when_region_unknown(monkeypatch):
+    # A global-endpoint S3 host has no region; if it can't be inferred the bucket is dropped (region
+    # is required by the API) and surfaced in dropped_s3_no_region.
+    observed = pd.DataFrame(
+        [
+            {
+                "destination": "globalbucket.s3.amazonaws.com",
+                "destination_type": "DNS",
+                "events": 3,
+                "workspace_ids": [1],
+                "resolved_ips": [],
+            }
+        ]
+    )
+    monkeypatch.setattr("dbx_nwp_helper.sql.query", lambda _c, _t: observed)
+    monkeypatch.setattr(eg, "_infer_s3_region", lambda bucket: None)
+    cfg = EgressConfig(enable_rdap=False, block_threat_domains="off", policy_scope="all_workspaces")
+    a = eg.analyze(cfg, sql_conn=None)
+    assert a.dropped_s3_no_region == ["globalbucket"]
+    assert not eg.union(a.targets, "s3")
+
+
+# ----------------------------------------------------------------- threat-domain block list
+def test_blocked_domains_all_mode_uses_whole_feed(monkeypatch):
+    monkeypatch.setattr(eg, "_load_threat_domains", lambda feed: {"evil.com", "bad.net"})
+    a = eg.EgressAnalysis(observed=pd.DataFrame(), targets={eg.ALL_WORKSPACES: eg._new_target()})
+    eg._blocked_domains(a, EgressConfig(block_threat_domains="all", threat_feed="threatfox"), lambda _m: None)
+    assert set(a.blocked_domains) == {"bad.net", "evil.com"}  # sorted, whole feed
+
+
+def test_blocked_domains_capped_at_limit(monkeypatch):
+    from dbx_nwp_helper.config import MAX_INTERNET_DESTINATIONS
+
+    feed = {f"d{i}.example" for i in range(MAX_INTERNET_DESTINATIONS + 5)}
+    monkeypatch.setattr(eg, "_load_threat_domains", lambda feed_key: feed)
+    a = eg.EgressAnalysis(observed=pd.DataFrame(), targets={eg.ALL_WORKSPACES: eg._new_target()})
+    notes = []
+    eg._blocked_domains(a, EgressConfig(block_threat_domains="all"), lambda m: notes.append(m))
+    assert len(a.blocked_domains) == MAX_INTERNET_DESTINATIONS
+    assert any("limit" in n for n in notes)  # operator warned about the truncation
+
+
+def test_load_threat_domains_parses_hostfile(monkeypatch):
+    text = "\n".join(
+        [
+            "# comment",
+            "! banner",
+            "127.0.0.1 evil.example.com",
+            "0.0.0.0 bad.test",
+            "1.2.3.4",
+            "0.0.0.0 5.5.5.5",
+        ]
+    )
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return text.encode()
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=45: _Resp())
+    domains = eg._load_threat_domains("threatfox")
+    assert "evil.example.com" in domains and "bad.test" in domains
+    assert "5.5.5.5" not in domains  # IP literal is not a valid FQDN block target

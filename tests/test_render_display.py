@@ -160,3 +160,179 @@ def test_suggestions_display_flags_show_matched_names():
     row = df.iloc[0]
     assert row["cloud_provider"] == "aws"
     assert row["databricks_owned"] == "aws"
+
+
+def test_fmt_flag_scalar_string_passthrough():
+    assert render._fmt_flag("aws") == "aws"
+
+
+# --------------------------------------------------------------------------------- egress tables
+def _egress_analysis(**kw):
+    from dbx_nwp_helper.core.egress import EgressAnalysis
+
+    base = dict(
+        observed=pd.DataFrame([{"x": 1}]),
+        targets={
+            "__ALL__": {
+                "s3": {("bkt", "us-east-1"): 10},
+                "gcs": {"gbkt": 5},
+                "azure": {("acct", "blob"): 3},
+                "internet": {"api.openai.com": 8},
+            }
+        },
+        fqdn_ip={"api.openai.com": "1.2.3.4"},
+        fqdn_owner={"api.openai.com": "Unknown"},
+        blocked_domains=["evil.com"],
+        skipped_bare_s3=2,
+        dropped_s3_no_region=["globalbucket"],
+    )
+    base.update(kw)
+    return EgressAnalysis(**base)
+
+
+def test_egress_analysis_renders_all_destination_tables(capsys, monkeypatch):
+    from dbx_nwp_helper import console
+
+    monkeypatch.setattr(console.console, "_width", 220)  # keep cells from folding for assertions
+    render.egress_analysis(_egress_analysis())
+    out = capsys.readouterr().out
+    assert "Internet FQDNs" in out and "api.openai.com" in out
+    assert "AWS S3 buckets" in out and "GCS buckets" in out and "Azure storage" in out
+    assert "evil.com" in out  # threat-intel blocked-domain table
+    assert "globalbucket" in out  # dropped-S3-no-region warning names the bucket
+    assert "bare" in out.lower()  # skipped bare/path-style S3 note
+
+
+def test_egress_analysis_warns_when_observed_empty(capsys):
+    from dbx_nwp_helper.core.egress import EgressAnalysis
+
+    render.egress_analysis(EgressAnalysis(observed=pd.DataFrame(), targets={"__ALL__": _new_target()}))
+    assert "outbound_network is empty" in capsys.readouterr().out
+
+
+def _new_target():
+    return {"s3": {}, "gcs": {}, "azure": {}, "internet": {}}
+
+
+def test_egress_preview_renders_block_with_scope_label(capsys):
+    from dbx_nwp_helper.config import EgressConfig
+
+    previews = {"__ALL__": {"egress": {"network_access": {"restriction_mode": "RESTRICTED_ACCESS"}}}}
+    render.egress_preview(previews, EgressConfig(policy_scope="current_workspace"))
+    out = capsys.readouterr().out
+    assert "this workspace" in out and "RESTRICTED_ACCESS" in out
+
+
+def test_egress_preview_empty_says_nothing_to_propose(capsys):
+    from dbx_nwp_helper.config import EgressConfig
+
+    render.egress_preview({}, EgressConfig())
+    assert "Nothing to propose" in capsys.readouterr().out
+
+
+# ------------------------------------------------------------------------- ingress preview / hints
+def _ingress_analysis(**kw):
+    from dbx_nwp_helper.core.ingress import IngressAnalysis
+
+    empty = pd.DataFrame()
+    base = dict(candidates=empty, suggestions=empty, threat_matches=empty, denied_requests=empty, ip_acls=[])
+    base.update(kw)
+    return IngressAnalysis(**base)
+
+
+def test_ingress_preview_reports_all_exclusions(capsys):
+    from dbx_nwp_helper.config import IngressConfig
+
+    a = _ingress_analysis()
+    a.excluded_flagged, a.excluded_unresolved, a.skipped_ipv6 = 2, 1, 3
+    previews = {"__ALL__": {"public_access": {"restriction_mode": "RESTRICTED_ACCESS"}}}
+    render.ingress_preview(previews, IngressConfig(policy_scope="all_workspaces"), a)
+    out = capsys.readouterr().out
+    assert "all workspaces" in out  # single-policy all_workspaces label
+    assert "threat-intel-matched" in out  # excluded_flagged banner
+    assert "identity" in out.lower()  # excluded_unresolved banner
+    assert "IPv6" in out  # skipped_ipv6 banner
+
+
+def test_ingress_preview_empty_says_no_specs(capsys):
+    from dbx_nwp_helper.config import IngressConfig
+
+    render.ingress_preview({}, IngressConfig(), _ingress_analysis())
+    assert "No rule specs to preview" in capsys.readouterr().out
+
+
+def test_ingress_analysis_shows_threat_matches(capsys):
+    from dbx_nwp_helper.config import IngressConfig
+
+    tm = pd.DataFrame(
+        [
+            {
+                "observed_ip": "9.9.9.9",
+                "matched_cidr": "9.9.9.0/24",
+                "source_feed": "ipsum",
+                "threat_type": "botnet",
+                "confidence": 1,
+                "events": 3,
+                "principals": 1,
+            }
+        ]
+    )
+    render.ingress_analysis(_ingress_analysis(threat_matches=tm), IngressConfig())
+    out = capsys.readouterr().out
+    assert "9.9.9.9" in out and "threat intel" in out.lower()
+
+
+def test_ingress_analysis_shows_suggestions(capsys):
+    from dbx_nwp_helper.config import IngressConfig
+
+    render.ingress_analysis(_ingress_analysis(suggestions=pd.DataFrame([_sugg_row()])), IngressConfig())
+    assert "Ranked suggestions" in capsys.readouterr().out
+
+
+def test_explain_empty_candidates_hints_account_level(capsys):
+    from dbx_nwp_helper.config import IngressConfig
+
+    # public IPs exist only on account-level rows -> hint to pass --include-account-level.
+    funnel = {
+        "total_rows": 100,
+        "with_source_ip": 80,
+        "ipv4": 80,
+        "ipv6": 0,
+        "successful": 80,
+        "workspace_level": 0,
+        "account_level": 80,
+        "public_ipv4": 80,
+        "distinct_public_ok": 5,
+        "distinct_public_ok_ws": 0,
+    }
+    render.ingress_analysis(_ingress_analysis(funnel=funnel), IngressConfig(include_account_level=False))
+    out = capsys.readouterr().out
+    assert "ACCOUNT-LEVEL" in out and "--include-account-level" in out
+
+
+def test_explain_empty_candidates_hints_private_ips(capsys):
+    from dbx_nwp_helper.config import IngressConfig
+
+    # source IPs are all private/reserved -> PrivateLink/NAT hint.
+    funnel = {
+        "total_rows": 100,
+        "with_source_ip": 80,
+        "ipv4": 80,
+        "ipv6": 0,
+        "successful": 80,
+        "workspace_level": 80,
+        "account_level": 0,
+        "public_ipv4": 0,
+        "distinct_public_ok": 0,
+        "distinct_public_ok_ws": 0,
+    }
+    render.ingress_analysis(_ingress_analysis(funnel=funnel), IngressConfig())
+    assert "PrivateLink" in capsys.readouterr().out
+
+
+def test_target_label_variants():
+    from dbx_nwp_helper.core.ingress import ALL_WORKSPACES
+
+    assert render._target_label(123, "per_workspace", ALL_WORKSPACES) == "workspace 123"
+    assert render._target_label(ALL_WORKSPACES, "current_workspace", ALL_WORKSPACES) == "this workspace"
+    assert render._target_label(ALL_WORKSPACES, "all_workspaces", ALL_WORKSPACES) == "all workspaces"

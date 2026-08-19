@@ -103,3 +103,91 @@ def test_all_loaders_registered():
     from dbx_nwp_helper.config import THREAT_FEEDS
 
     assert set(THREAT_FEEDS) == set(threat.THREAT_FEED_LOADERS)
+
+
+# ---------------------------------------------------------------- cloud-provider range parsing
+def test_load_cloud_ranges_parses_all_providers(monkeypatch):
+    from dbx_nwp_helper.feeds import cloud
+
+    aws = {
+        "prefixes": [{"ip_prefix": "3.0.0.0/24", "service": "EC2", "region": "us-east-1"}],
+        "ipv6_prefixes": [{"ipv6_prefix": "2600:1f00::/40", "service": "EC2", "region": "us-east-1"}],
+    }
+    gcp = {"prefixes": [{"ipv4Prefix": "8.34.0.0/16", "service": "Google Cloud", "scope": "us-central1"}]}
+    oci = {"regions": [{"region": "us-ashburn-1", "cidrs": [{"cidr": "129.213.0.0/16", "tags": ["OCI"]}]}]}
+    # Microsoft download page HTML; the loader scrapes it for the dated ServiceTags JSON URL.
+    azure_conf = "x https://download.microsoft.com/download/a/b/ServiceTags_Public_20260101.json y"
+    azure_json = {
+        "values": [
+            {
+                "properties": {
+                    "systemService": "Storage",
+                    "region": "eastus",
+                    "addressPrefixes": ["20.0.0.0/16"],
+                }
+            }
+        ]
+    }
+
+    def fake_get(url, as_json=False):
+        if "ip-ranges.amazonaws.com" in url:
+            return aws
+        if "gstatic.com" in url:
+            return gcp
+        if "oracle.com" in url:
+            return oci
+        if "details.aspx" in url:  # the download page (fetched as text)
+            return azure_conf
+        if "ServiceTags_Public" in url:
+            return azure_json
+        return None
+
+    monkeypatch.setattr(cloud, "http_get", fake_get)
+    df = cloud.load_cloud_ranges()
+    assert list(df.columns) == cloud.CLOUD_COLUMNS
+    assert {"aws", "gcp", "oracle", "azure"} <= set(df["provider"])
+    cidrs = set(df["cidr"])
+    assert {"3.0.0.0/24", "2600:1f00::/40", "8.34.0.0/16", "129.213.0.0/16", "20.0.0.0/16"} <= cidrs
+
+
+def test_load_cloud_ranges_warns_when_all_feeds_unavailable(monkeypatch, capsys):
+    from dbx_nwp_helper.feeds import cloud
+
+    monkeypatch.setattr(cloud, "http_get", lambda url, as_json=False: None)
+    df = cloud.load_cloud_ranges()
+    assert df.empty and list(df.columns) == cloud.CLOUD_COLUMNS
+    assert "azure" in capsys.readouterr().out.lower()  # explicit warning that Azure was skipped
+
+
+# ------------------------------------------------------------------ Databricks range parsing
+def test_load_databricks_ranges_parses_prefixes(monkeypatch):
+    from dbx_nwp_helper.feeds import databricks as dbx
+
+    data = {
+        "prefixes": [
+            {
+                "platform": "aws",
+                "region": "us-east-1",
+                "type": "inbound",
+                "ipv4Prefixes": ["3.4.5.0/24"],
+                "ipv6Prefixes": ["2600:1f00::/40"],
+            },
+            {"platform": "gcp", "region": "us", "type": "outbound", "ipv4Prefixes": ["8.8.8.0/24"]},
+        ]
+    }
+    monkeypatch.setattr(dbx, "http_get", lambda url, as_json=False: data)
+    df = dbx.load_databricks_ranges()
+    assert list(df.columns) == dbx.DATABRICKS_COLUMNS
+    rows = {(r.cidr, r.direction) for r in df.itertuples()}
+    assert ("3.4.5.0/24", "inbound") in rows
+    assert ("2600:1f00::/40", "inbound") in rows  # ipv6 kept (no version filter)
+    assert ("8.8.8.0/24", "outbound") in rows
+
+
+def test_load_databricks_ranges_empty_when_feed_unavailable(monkeypatch, capsys):
+    from dbx_nwp_helper.feeds import databricks as dbx
+
+    monkeypatch.setattr(dbx, "http_get", lambda url, as_json=False: None)
+    df = dbx.load_databricks_ranges()
+    assert df.empty and list(df.columns) == dbx.DATABRICKS_COLUMNS
+    assert "unavailable" in capsys.readouterr().out.lower()

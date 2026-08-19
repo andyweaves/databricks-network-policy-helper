@@ -402,3 +402,84 @@ def test_export_payload_builds_full_single_policy():
     assert "egress" in payload  # FULL_ACCESS egress default added
     assert "ingress" in payload  # enforce -> ingress (not ingress_dry_run)
     assert payload["ingress"]["public_access"]["allow_rules"]
+
+
+def test_resolve_identities_maps_sps_and_tracks_unresolved():
+    a = _analysis(
+        [
+            _suggestion(
+                principal_emails=["u@x.com", "gone@x.com"],
+                subject_names=["app-123", "gone-sp"],
+            )
+        ]
+    )
+    acct = _FakeAccount(user_map={"u@x.com": 11})
+    acct.service_principals = _FakeScim({"app-123": 22})
+    res = rules.resolve_identities(a, acct)
+    assert res["u@x.com"] == {"principal_id": 11, "principal_type": "USER"}
+    assert res["app-123"] == {"principal_id": 22, "principal_type": "SERVICE_PRINCIPAL"}
+    assert "gone@x.com" not in res and "gone-sp" not in res  # unresolved principals dropped
+
+
+def test_resolve_identities_survives_scim_error(monkeypatch):
+    a = _analysis([_suggestion(principal_emails=["u@x.com"], subject_names=[])])
+    acct = _FakeAccount()
+
+    class _Boom:
+        def list(self, filter, count=1):  # noqa: A002
+            raise RuntimeError("SCIM down")
+
+    acct.users = _Boom()
+    notes = []
+    res = rules.resolve_identities(a, acct, note=notes.append)
+    assert res == {}  # lookup failure -> treated as unresolved, not a crash
+    assert any("failed" in n for n in notes)
+
+
+def test_threat_deny_caps_and_prioritises(monkeypatch):
+    # cap smaller than the record count: confidence-1 + attacker_subnet must be kept, low-conf dropped.
+    monkeypatch.setattr(rules, "MAX_DENY_CIDRS", 2)
+    a = _analysis(
+        threat_ranges=[
+            _tr("1.0.0.0/24", "f", "attacker_subnet", 1),
+            _tr("2.0.0.0/24", "f", "aggregated_blocklist", 1),
+            _tr("3.0.0.0/24", "f", "aggregated_blocklist", 1),
+            _tr("4.0.0.0/24", "f", "aggregated_blocklist", 2),  # low confidence -> dropped first
+        ]
+    )
+    notes = []
+    pols = rules.build_rules(
+        a, IngressConfig(scoping_mode="ip_only", threat_deny_rules="all"), note=notes.append
+    )
+    cidrs = [c for s in pols[ALL_WORKSPACES]["deny"] for c in s["cidrs"]]
+    assert len(cidrs) == 2
+    assert "1.0.0.0/24" in cidrs  # attacker_subnet ranks first
+    assert "4.0.0.0/24" not in cidrs  # confidence-2 excluded by the cap
+    assert any("cap" in n for n in notes)
+
+
+def test_denied_specs_skips_ipv6():
+    denied = pd.DataFrame([{"source_ip": "1.2.3.4"}, {"source_ip": "2001:db8::1"}])
+    a = _analysis([_suggestion(minimal_cidrs=["203.0.55.10/32"])], denied=denied)
+    pols = rules.build_rules(a, IngressConfig(scoping_mode="ip_only", deny_denied_ips=True))
+    deny = pols[ALL_WORKSPACES]["deny"]
+    denied_rule = next(s for s in deny if s["label"] == "deny-currently-denied")
+    assert denied_rule["cidrs"] == ["1.2.3.4/32"]  # ipv6 omitted (CBI is IPv4-only)
+
+
+def test_apply_per_workspace_fans_out_and_binds():
+    a = _analysis(
+        [
+            _suggestion(policy_target=101, minimal_cidrs=["1.1.1.1/32"]),
+            _suggestion(policy_target=202, minimal_cidrs=["2.2.2.2/32"]),
+        ]
+    )
+    cfg = IngressConfig(scoping_mode="ip_only", policy_scope="per_workspace", policy_name="pfx")
+    cfg.apply.create_policy = True
+    cfg.apply.auto_assign = True
+    pols = rules.build_rules(a, cfg)
+    acct = _FakeAccount()
+    results = rules.apply(pols, cfg, acct, account_id="acc", this_workspace_id=999)
+    assert {r["target"] for r in results} == {101, 202}
+    assert all(r["action"] == "created" for r in results)
+    assert sorted(acct.workspace_network_configuration.bound) == [101, 202]  # each workspace bound
