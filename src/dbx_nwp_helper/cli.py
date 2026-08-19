@@ -44,9 +44,11 @@ app.add_typer(feeds_app, name="feeds")
 
 @app.callback()
 def _main() -> None:
-    """Runs before every command — make TLS verification use the OS trust store so corporate
-    proxy CAs are honoured by the SDK, the SQL connector, and feed downloads alike."""
-    from . import tls
+    """Runs before every command — tag SDK requests with the tool name (usage tracking, before any
+    client is built) and make TLS verification use the OS trust store so corporate proxy CAs are
+    honoured by the SDK, the SQL connector, and feed downloads alike."""
+    from . import tls, usage
+    usage.tag()
     tls.enable()
 
 
@@ -164,6 +166,94 @@ def _ensure_account_id(conn: Connection, reason: str) -> None:
     conn.account_id = entered
 
 
+def _is_expired_auth(msg: str) -> bool:
+    """True if an SDK auth error looks like expired / invalid Databricks-CLI credentials that a
+    `databricks auth login` would fix — as opposed to a mistyped profile or missing config."""
+    m = msg.lower()
+    return (
+        "reauthenticate" in m
+        or "refresh token" in m
+        or "cannot get access token" in m
+        or "databricks auth login" in m
+    )
+
+
+def _reauth_profile(msg: str, fallback: str | None) -> str | None:
+    """The profile that actually needs re-authenticating. The SDK error spells out the fix as
+    `databricks auth login --profile <name>`, so prefer that exact profile — account access is often
+    a different, auto-discovered profile than the workspace one (matched by account host + id), and
+    re-authing the profile we *asked* for wouldn't fix it. Falls back to the passed profile when the
+    message doesn't name one."""
+    import re
+
+    m = re.search(r"auth login --profile (\S+)", msg)
+    return m.group(1).rstrip(".").strip("'\"") if m else fallback
+
+
+def _reauthenticate(profile: str) -> bool:
+    """Offer to run `databricks auth login --profile <profile>` and return True if it succeeded (so
+    the caller can retry building the client). Returns False — after printing the command to run —
+    when non-interactive, when the user declines, when the databricks CLI isn't on PATH, or when the
+    login doesn't complete."""
+    import shutil
+    import subprocess
+    import sys
+
+    cmd = f"databricks auth login --profile {profile}"
+    console.banner(
+        "warn", f"The credentials for profile '{profile}' have expired (or its refresh token is invalid)."
+    )
+    if not sys.stdin.isatty():
+        console.banner("info", f"Re-authenticate, then re-run: {cmd}")
+        return False
+    if not typer.confirm(
+        typer.style(f"Re-authenticate now? This runs `{cmd}` and opens a browser.", fg="yellow"), default=True
+    ):
+        console.banner("info", f"Re-authenticate when ready, then re-run: {cmd}")
+        return False
+    if shutil.which("databricks") is None:
+        console.banner(
+            "danger",
+            "The `databricks` CLI isn't on your PATH — install it "
+            "(https://docs.databricks.com/dev-tools/cli/install), then run: "
+            f"{cmd}",
+        )
+        return False
+    console.banner("info", f"Running `{cmd}` …")
+    try:
+        result = subprocess.run(["databricks", "auth", "login", "--profile", profile])
+    except OSError as e:  # noqa: BLE001 - surface a clean message, don't crash
+        console.banner("danger", f"Couldn't launch the databricks CLI: {e}. Run manually: {cmd}")
+        return False
+    if result.returncode != 0:
+        console.banner(
+            "danger",
+            f"Re-authentication didn't complete (exit {result.returncode}). "
+            f"Run it manually, then re-run: {cmd}",
+        )
+        return False
+    console.banner("success", "Re-authenticated — continuing.")
+    return True
+
+
+def _client_or_exit(build, profile: str | None, flag: str):
+    """Build a Databricks client, turning a config/auth ValueError into a clean CLI error. If the
+    failure is expired CLI credentials and a profile is set, offer to re-authenticate and retry the
+    build once; any other ValueError (or a declined/failed re-auth) exits cleanly."""
+    try:
+        return build()
+    except ValueError as e:
+        # Re-auth the profile the SDK error actually names (which may differ from `profile` — e.g.
+        # the account client resolves to a separate auto-discovered profile), not the one we assumed.
+        reauth = _reauth_profile(str(e), profile) if _is_expired_auth(str(e)) else None
+        if reauth and _reauthenticate(reauth):
+            try:
+                return build()
+            except ValueError as e2:
+                _profile_config_error(e2, profile, flag)
+        _profile_config_error(e, profile, flag)
+
+
 def _profile_config_error(e: Exception, profile: str | None, flag: str) -> None:
     """Turn an SDK client-construction ValueError (e.g. a mistyped profile that isn't in
     ~/.databrickscfg) into a clean, actionable message instead of a raw traceback. Always raises."""
@@ -179,22 +269,23 @@ def _profile_config_error(e: Exception, profile: str | None, flag: str) -> None:
 
 
 def _workspace_client_or_exit(conn: Connection):
-    """Build the workspace client, converting a config/profile ValueError into a clean CLI error."""
+    """Build the workspace client, converting a config/profile ValueError into a clean CLI error
+    (and offering re-auth on expired credentials)."""
     from . import auth
-    try:
-        return auth.workspace_client(conn)
-    except ValueError as e:
-        _profile_config_error(e, conn.profile, "--profile")
+
+    return _client_or_exit(lambda: auth.workspace_client(conn), conn.profile, "--profile")
 
 
 def _account_client_or_exit(conn: Connection):
-    """Build the account client, converting a config/profile ValueError into a clean CLI error."""
+    """Build the account client, converting a config/profile ValueError into a clean CLI error
+    (and offering re-auth on expired credentials)."""
     from . import auth
-    try:
-        return auth.account_client(conn)
-    except ValueError as e:
-        _profile_config_error(e, conn.account_profile or conn.profile,
-                              "--account-profile" if conn.account_profile else "--profile")
+
+    return _client_or_exit(
+        lambda: auth.account_client(conn),
+        conn.account_profile or conn.profile,
+        "--account-profile" if conn.account_profile else "--profile",
+    )
 
 
 def _confirm_workspace(conn: Connection, yes: bool):
