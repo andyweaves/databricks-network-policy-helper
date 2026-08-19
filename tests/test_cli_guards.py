@@ -13,6 +13,16 @@ from dbx_nwp_helper.core.ingress import IngressAnalysis
 runner = CliRunner()
 
 
+def _plain(text: str) -> str:
+    """Strip ANSI escape codes so substring assertions hold regardless of whether the runtime emitted
+    colour. GitHub Actions forces colour on, and Rich styles option tokens as separate coloured spans
+    (`--policy-name` -> `-` `-policy` `-name`), which otherwise splits substrings with escape
+    sequences; a local non-TTY run emits no colour, so the same assertion passes there but not in CI."""
+    import re
+
+    return re.sub(r"\x1b\[[0-9;]*m", "", text)
+
+
 def test_resolve_profile_passthrough():
     assert cli._resolve_profile("myprofile") == "myprofile"
 
@@ -578,7 +588,7 @@ def test_ingress_policy_name_with_add_to_existing_is_rejected():
         ],
     )
     assert result.exit_code == 2
-    assert "policy-name" in result.output
+    assert "policy-name" in _plain(result.output)
 
 
 def test_has_rules_helper():
