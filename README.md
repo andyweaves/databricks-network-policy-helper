@@ -1,5 +1,8 @@
 # 🛡️ Databricks Network Policy Helper
 
+[![CI](https://github.com/andyweaves/databricks-network-policy-helper/actions/workflows/ci.yml/badge.svg)](https://github.com/andyweaves/databricks-network-policy-helper/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/andyweaves/databricks-network-policy-helper/branch/main/graph/badge.svg)](https://codecov.io/gh/andyweaves/databricks-network-policy-helper)
+
 > Build Databricks **account network policies** from *real observed traffic* — not guesswork.
 
 `dbx-nwp-helper` is a visually engaging CLI that turns the Databricks system tables into proposed
