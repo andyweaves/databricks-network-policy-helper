@@ -12,6 +12,7 @@ NOW = datetime.now(timezone.utc)
 
 def test_http_get_returns_none_on_malformed_json(monkeypatch):
     """A non-JSON body (e.g. a proxy error page) must degrade to None, not raise."""
+
     class _Resp:
         def __enter__(self):
             return self
@@ -48,7 +49,7 @@ def _patch_http(monkeypatch, text):
 
 
 def test_spamhaus_parses_jsonl(monkeypatch):
-    text = '\n'.join(['{"cidr":"1.2.3.0/24"}', 'garbage', '{"cidr":"bad"}'])
+    text = "\n".join(['{"cidr":"1.2.3.0/24"}', "garbage", '{"cidr":"bad"}'])
     _patch_http(monkeypatch, text)
     rows = threat._feed_spamhaus_drop(NOW)
     cidrs = {r[0] for r in rows}
@@ -90,8 +91,9 @@ def test_firehol_and_cins_skip_comments(monkeypatch):
 
 def test_load_threat_intel_dedupes_across_feeds(monkeypatch):
     # firehol + cins both yield the same cidr under different feeds -> both kept (dedupe on cidr+feed).
-    monkeypatch.setattr(threat, "http_get", lambda url, as_json=False: (
-        "1.2.3.0/24" if "firehol" in url else "1.2.3.0"))
+    monkeypatch.setattr(
+        threat, "http_get", lambda url, as_json=False: ("1.2.3.0/24" if "firehol" in url else "1.2.3.0")
+    )
     df = threat.load_threat_intel(["firehol_level1", "cins_ci_army"])
     # firehol -> 1.2.3.0/24 ; cins -> 1.2.3.0/32 : different cidr strings, both present
     assert set(df["source_feed"]) == {"firehol_level1", "cins_ci_army"}
@@ -99,4 +101,5 @@ def test_load_threat_intel_dedupes_across_feeds(monkeypatch):
 
 def test_all_loaders_registered():
     from dbx_nwp_helper.config import THREAT_FEEDS
+
     assert set(THREAT_FEEDS) == set(threat.THREAT_FEED_LOADERS)

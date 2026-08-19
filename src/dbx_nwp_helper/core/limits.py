@@ -17,25 +17,30 @@ from ..config import (
 Warn = Callable[[str], None]
 
 
-def enforce_limits(specs: list[dict], deny: list[dict], label: str,
-                   warn: Warn) -> tuple[list[dict], list[dict]]:
+def enforce_limits(
+    specs: list[dict], deny: list[dict], label: str, warn: Warn
+) -> tuple[list[dict], list[dict]]:
     """Cap a target policy's rules to 50 ingress rules / 2000 CIDRs / 100 identities per policy."""
     # Identities per rule (100).
     for spec in specs:
         n = len(spec.get("identities") or [])
         if n > MAX_IDENTITIES_PER_POLICY:
-            warn(f"[{label}] rule '{spec['label']}' has {n} identities > "
-                 f"{MAX_IDENTITIES_PER_POLICY} — using the first {MAX_IDENTITIES_PER_POLICY}.")
+            warn(
+                f"[{label}] rule '{spec['label']}' has {n} identities > "
+                f"{MAX_IDENTITIES_PER_POLICY} — using the first {MAX_IDENTITIES_PER_POLICY}."
+            )
             spec["identities"] = spec["identities"][:MAX_IDENTITIES_PER_POLICY]
 
     # Ingress rules per policy (50): allow + deny combined.
     all_rules = specs + list(deny)
     if len(all_rules) > MAX_INGRESS_RULES_PER_POLICY:
-        warn(f"[{label}] {len(all_rules)} rules (allow+deny) > {MAX_INGRESS_RULES_PER_POLICY} "
-             f"— keeping the first {MAX_INGRESS_RULES_PER_POLICY} (allow rules prioritised).")
+        warn(
+            f"[{label}] {len(all_rules)} rules (allow+deny) > {MAX_INGRESS_RULES_PER_POLICY} "
+            f"— keeping the first {MAX_INGRESS_RULES_PER_POLICY} (allow rules prioritised)."
+        )
         specs = specs[:MAX_INGRESS_RULES_PER_POLICY]
         remaining = MAX_INGRESS_RULES_PER_POLICY - len(specs)
-        deny = deny[:max(remaining, 0)]
+        deny = deny[: max(remaining, 0)]
 
     def _total_cidrs(rs):
         return sum(len(r["cidrs"]) for r in rs)

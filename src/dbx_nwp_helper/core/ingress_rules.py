@@ -23,6 +23,7 @@ _FRAMING_COL = {"minimal": "minimal_cidrs", "optimal": "optimal_cidrs", "maximum
 def _slug(text) -> str:
     """Normalise an owner/provider name into a readable, label-safe slug."""
     import re
+
     return re.sub(r"[^A-Za-z0-9]+", "-", str(text or "")).strip("-")
 
 
@@ -90,8 +91,12 @@ def resolve_identities(analysis: IngressAnalysis, account, note: Note = lambda _
     return identity_resolution
 
 
-def build_rules(analysis: IngressAnalysis, cfg: IngressConfig, identity_resolution: dict | None = None,
-                note: Note = lambda _m: None) -> dict:
+def build_rules(
+    analysis: IngressAnalysis,
+    cfg: IngressConfig,
+    identity_resolution: dict | None = None,
+    note: Note = lambda _m: None,
+) -> dict:
     """Turn the analysis into `policies`: {policy_target -> {"allow": [...], "deny": [...]}} with
     limits enforced. identity_resolution is required only when scoping_mode includes identity."""
     identity_resolution = identity_resolution or {}
@@ -114,7 +119,7 @@ def build_rules(analysis: IngressAnalysis, cfg: IngressConfig, identity_resoluti
                 excluded_flagged += 1
                 continue
             ipv4_cidrs = []
-            for cidr in (row[framing_col] or []):
+            for cidr in row[framing_col] or []:
                 try:
                     if ipaddress.ip_network(cidr, strict=False).version != 4:
                         skipped_ipv6 += 1
@@ -128,15 +133,17 @@ def build_rules(analysis: IngressAnalysis, cfg: IngressConfig, identity_resoluti
             spec = {
                 "label": _group_label(row),
                 "cidrs": ipv4_cidrs,
-                "destination": (row["scoped_destination"]
-                                if (cfg.scope_destination and not row["databricks_owned"])
-                                else "all_destinations"),
+                "destination": (
+                    row["scoped_destination"]
+                    if (cfg.scope_destination and not row["databricks_owned"])
+                    else "all_destinations"
+                ),
                 "identity_type": "ALL_USERS",
                 "identities": [],
             }
             if cfg.scope_identity and not row["databricks_owned"]:
                 resolved = []
-                for p in (row["principal_emails"] + row["subject_names"]):
+                for p in row["principal_emails"] + row["subject_names"]:
                     if p in identity_resolution:
                         resolved.append(identity_resolution[p])
                 seen, deduped = set(), []
@@ -184,20 +191,25 @@ def build_rules(analysis: IngressAnalysis, cfg: IngressConfig, identity_resoluti
     policies = {}
     for tgt in sorted(target_specs, key=str):
         label = "single policy" if tgt == ALL_WORKSPACES else f"workspace {tgt}"
-        allow, deny = limits.enforce_limits(list(target_specs[tgt]), list(deny_specs), label,
-                                            lambda m: note(m))
+        allow, deny = limits.enforce_limits(
+            list(target_specs[tgt]), list(deny_specs), label, lambda m: note(m)
+        )
         policies[tgt] = {"allow": allow, "deny": deny}
 
     if cfg.policy_scope == "per_workspace" and len(policies) > MAX_POLICIES_PER_ACCOUNT:
-        note(f"{len(policies)} per-workspace policies > {MAX_POLICIES_PER_ACCOUNT} account limit — "
-             "consider all_workspaces or consolidating workspaces.")
+        note(
+            f"{len(policies)} per-workspace policies > {MAX_POLICIES_PER_ACCOUNT} account limit — "
+            "consider all_workspaces or consolidating workspaces."
+        )
 
     if identity_scoped_rules:
-        note(f"Identity scoping matched specific principals for {identity_scoped_rules} rule(s), but "
-             "the CBI API can't attach per-identity authentication to Apps / Lakebase / "
-             "all-destinations rules — those rules will allow all users & service principals from "
-             "the listed IPs. The IP allow-list still applies, and groups whose principals couldn't "
-             "be resolved were still excluded.")
+        note(
+            f"Identity scoping matched specific principals for {identity_scoped_rules} rule(s), but "
+            "the CBI API can't attach per-identity authentication to Apps / Lakebase / "
+            "all-destinations rules — those rules will allow all users & service principals from "
+            "the listed IPs. The IP allow-list still applies, and groups whose principals couldn't "
+            "be resolved were still excluded."
+        )
 
     analysis.excluded_flagged = excluded_flagged
     analysis.excluded_unresolved = excluded_unresolved
@@ -229,8 +241,15 @@ def _acl_specs(analysis: IngressAnalysis, cfg: IngressConfig):
             continue
         label = f"migrated-acl-{a['label']}"[:250]
         if a["list_type"] == "ALLOW":
-            allow_specs.append({"label": label, "cidrs": cidrs, "destination": "all_destinations",
-                                "identity_type": "ALL_USERS", "identities": []})
+            allow_specs.append(
+                {
+                    "label": label,
+                    "cidrs": cidrs,
+                    "destination": "all_destinations",
+                    "identity_type": "ALL_USERS",
+                    "identities": [],
+                }
+            )
         elif a["list_type"] == "BLOCK":
             deny_specs.append({"label": label, "cidrs": cidrs})
     return allow_specs, deny_specs
@@ -258,8 +277,12 @@ _DENY_TYPE_PRIORITY = {"attacker_subnet": 0}
 
 
 def _deny_sort_key(rec):
-    return (_DENY_TYPE_PRIORITY.get(rec["threat_type"], 1), rec["confidence"],
-            rec["source_feed"], rec["cidr"])
+    return (
+        _DENY_TYPE_PRIORITY.get(rec["threat_type"], 1),
+        rec["confidence"],
+        rec["source_feed"],
+        rec["cidr"],
+    )
 
 
 def _threat_deny_specs(analysis: IngressAnalysis, cfg: IngressConfig, note: Note):
@@ -267,13 +290,26 @@ def _threat_deny_specs(analysis: IngressAnalysis, cfg: IngressConfig, note: Note
         return []
     by_cidr = {}
     if cfg.threat_deny_rules == "matched_only":
-        src = [{"cidr": m["matched_cidr"], "source_feed": m["source_feed"],
-                "threat_type": m["threat_type"], "confidence": m["confidence"]}
-               for m in analysis.threat_match_rows]
+        src = [
+            {
+                "cidr": m["matched_cidr"],
+                "source_feed": m["source_feed"],
+                "threat_type": m["threat_type"],
+                "confidence": m["confidence"],
+            }
+            for m in analysis.threat_match_rows
+        ]
     else:  # all
-        src = [{"cidr": str(net), "source_feed": meta["source_feed"],
-                "threat_type": meta["threat_type"], "confidence": meta["confidence"]}
-               for net, meta in analysis.threat_ranges if net.version == 4]
+        src = [
+            {
+                "cidr": str(net),
+                "source_feed": meta["source_feed"],
+                "threat_type": meta["threat_type"],
+                "confidence": meta["confidence"],
+            }
+            for net, meta in analysis.threat_ranges
+            if net.version == 4
+        ]
     for rec in src:
         try:
             if ipaddress.ip_network(rec["cidr"], strict=False).version != 4:
@@ -291,9 +327,11 @@ def _threat_deny_specs(analysis: IngressAnalysis, cfg: IngressConfig, note: Note
         pool = conf1 if conf1 else all_records
         pool.sort(key=_deny_sort_key)
         selected = pool[:MAX_DENY_CIDRS]
-        note(f"Threat-intel deny list has {total:,} CIDRs (> cap {MAX_DENY_CIDRS:,}) — prioritising: "
-             f"kept confidence-1, attacker_subnet first, top {MAX_DENY_CIDRS:,}. "
-             f"Including {len(selected):,} of {total:,}.")
+        note(
+            f"Threat-intel deny list has {total:,} CIDRs (> cap {MAX_DENY_CIDRS:,}) — prioritising: "
+            f"kept confidence-1, attacker_subnet first, top {MAX_DENY_CIDRS:,}. "
+            f"Including {len(selected):,} of {total:,}."
+        )
     else:
         selected = sorted(all_records, key=_deny_sort_key)
 
@@ -301,8 +339,7 @@ def _threat_deny_specs(analysis: IngressAnalysis, cfg: IngressConfig, note: Note
     for rec in selected:
         if rec["cidr"] not in by_feed[rec["source_feed"]]:
             by_feed[rec["source_feed"]].append(rec["cidr"])
-    return [{"label": f"deny-{feed}"[:250], "cidrs": by_feed[feed]}
-            for feed in sorted(by_feed)]
+    return [{"label": f"deny-{feed}"[:250], "cidrs": by_feed[feed]} for feed in sorted(by_feed)]
 
 
 # ------------------------------------------------------------------------------- preview + apply
@@ -315,17 +352,25 @@ def _single_policy_id(cfg: IngressConfig, profile: str | None, this_workspace_id
     return policy.policy_name("", explicit=name)
 
 
-def export_payload(policies: dict, cfg: IngressConfig, account_id: str, this_workspace_id,
-                   profile: str | None = None, note: Note = lambda _m: None) -> dict:
+def export_payload(
+    policies: dict,
+    cfg: IngressConfig,
+    account_id: str,
+    this_workspace_id,
+    profile: str | None = None,
+    note: Note = lambda _m: None,
+) -> dict:
     """The proposed network policy as a plain dict (for --export / a curl body): the single-policy
     ingress block + a permissive FULL_ACCESS egress default. Single-policy scopes only."""
     from databricks.sdk.service.settings import AccountNetworkPolicy
+
     mode_label = {"dry_run": "dry-run", "enforce": "enforced"}[cfg.policy_mode]
     p = policies.get(ALL_WORKSPACES) or next(iter(policies.values()))
     block = policy.build_ingress_block(p["allow"], p["deny"], mode_label, note)
     pid = _single_policy_id(cfg, profile, this_workspace_id)
-    np = AccountNetworkPolicy(account_id=account_id, network_policy_id=pid,
-                              egress=policy.build_full_access_egress())
+    np = AccountNetworkPolicy(
+        account_id=account_id, network_policy_id=pid, egress=policy.build_full_access_egress()
+    )
     setattr(np, cfg.policy_mode_target, block)
     return np.as_dict()
 
@@ -343,8 +388,15 @@ def preview_blocks(policies: dict, cfg: IngressConfig, note: Note = lambda _m: N
     return out
 
 
-def apply(policies: dict, cfg: IngressConfig, account, account_id: str, this_workspace_id,
-          profile: str | None = None, note: Note = lambda _m: None) -> list[dict]:
+def apply(
+    policies: dict,
+    cfg: IngressConfig,
+    account,
+    account_id: str,
+    this_workspace_id,
+    profile: str | None = None,
+    note: Note = lambda _m: None,
+) -> list[dict]:
     """Create/update policy(ies) and optionally assign. Returns a list of result dicts for display."""
     mode_label = {"dry_run": "dry-run", "enforce": "enforced"}[cfg.policy_mode]
     target_attr = cfg.policy_mode_target
@@ -357,7 +409,8 @@ def apply(policies: dict, cfg: IngressConfig, account, account_id: str, this_wor
         single_id = _single_policy_id(cfg, profile, this_workspace_id)
         block = policy.build_ingress_block(p["allow"], p["deny"], mode_label, note)
         action, effective_id, sent = policy.apply_ingress(
-            account, account_id, single_id, block, target_attr, must_exist=add_to_existing)
+            account, account_id, single_id, block, target_attr, must_exist=add_to_existing
+        )
         result = {"target": cfg.policy_scope, "action": action, "policy_id": effective_id, "sent": sent}
         if cfg.apply.auto_assign:
             policy.assign(account, this_workspace_id, effective_id)
@@ -371,8 +424,7 @@ def apply(policies: dict, cfg: IngressConfig, account, account_id: str, this_wor
             p = policies[tgt]
             block = policy.build_ingress_block(p["allow"], p["deny"], mode_label, note)
             try:
-                action, effective_id, _ = policy.apply_ingress(
-                    account, account_id, pid, block, target_attr)
+                action, effective_id, _ = policy.apply_ingress(account, account_id, pid, block, target_attr)
                 result = {"target": tgt, "action": action, "policy_id": effective_id}
                 if cfg.apply.auto_assign:
                     policy.assign(account, tgt, effective_id)

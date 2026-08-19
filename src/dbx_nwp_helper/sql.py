@@ -94,5 +94,6 @@ def query(c: dbsql.client.Connection, sql_text: str) -> pd.DataFrame:
 def warehouse_is_serverless(wh) -> bool:
     """Best-effort check used only for display."""
     return getattr(wh, "warehouse_type", None) in (
-        EndpointInfoWarehouseType.PRO, CreateWarehouseRequestWarehouseType.PRO,
+        EndpointInfoWarehouseType.PRO,
+        CreateWarehouseRequestWarehouseType.PRO,
     ) and bool(getattr(wh, "enable_serverless_compute", False))

@@ -121,9 +121,14 @@ def principal_network_diversity(lookback_days: int) -> str:
     """
 
 
-def frequent_public_ips(lookback_days: int, min_events: int, include_ipv6: bool,
-                        treat_null_status_as_success: bool, include_account_level: bool,
-                        only_workspace_id: int | None = None) -> str:
+def frequent_public_ips(
+    lookback_days: int,
+    min_events: int,
+    include_ipv6: bool,
+    treat_null_status_as_success: bool,
+    include_account_level: bool,
+    only_workspace_id: int | None = None,
+) -> str:
     ipv6_predicate = "OR ip_version = 6" if include_ipv6 else ""
     # workspace_id is a STRING column in system.access.audit; comparing to the integer 0 matches no
     # rows (silently excluding all workspace-level traffic), so compare against the string '0'.
@@ -200,13 +205,20 @@ def denied_requests(lookback_days: int) -> str:
     """
 
 
-def observed_egress(lookback_days: int, min_events: int, source_type_filter: str,
-                    only_workspace_id: int | None = None) -> str:
+def observed_egress(
+    lookback_days: int, min_events: int, source_type_filter: str, only_workspace_id: int | None = None
+) -> str:
     # Escape single quotes so a value containing one can't break (or inject into) the query.
-    src_filter = (f"AND network_source_type = '{source_type_filter.replace(chr(39), chr(39) * 2)}'"
-                  if source_type_filter else "")
-    ws_filter = (f"AND CAST(workspace_id AS STRING) = '{int(only_workspace_id)}'"
-                 if only_workspace_id is not None else "")
+    src_filter = (
+        f"AND network_source_type = '{source_type_filter.replace(chr(39), chr(39) * 2)}'"
+        if source_type_filter
+        else ""
+    )
+    ws_filter = (
+        f"AND CAST(workspace_id AS STRING) = '{int(only_workspace_id)}'"
+        if only_workspace_id is not None
+        else ""
+    )
     return f"""
     SELECT
       COALESCE(dns_event.domain_name, storage_event.hostname, destination) AS destination,

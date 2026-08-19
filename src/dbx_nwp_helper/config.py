@@ -41,6 +41,7 @@ MAX_POLICY_ID_LEN = 30
 class Connection:
     """How the CLI reaches the workspace + account. Auth itself is resolved by the SDK's unified
     auth (profile / env / OAuth); this only carries the selectors and the warehouse target."""
+
     profile: str | None = None
     warehouse_http_path: str | None = None
     # When no warehouse path is given, the CLI reuses/creates a serverless warehouse; store its name.
@@ -55,11 +56,12 @@ class Connection:
 @dataclass
 class ApplyOptions:
     """The gated write path — shared shape across all three commands."""
+
     create_policy: bool = False
-    policy_action: str = "create_new"   # create_new | add_to_existing
+    policy_action: str = "create_new"  # create_new | add_to_existing
     existing_policy_id: str = ""
     auto_assign: bool = False
-    reviewed: bool = False              # the review gate; --yes/--reviewed sets it non-interactively
+    reviewed: bool = False  # the review gate; --yes/--reviewed sets it non-interactively
 
 
 @dataclass
@@ -116,7 +118,7 @@ class EgressConfig:
     refresh_feeds: bool = False
     # See IngressConfig.policy_name — same resolution (explicit / profile / workspace id).
     policy_name: str = ""
-    export: str = ""        # optional path to write the proposed network-policy JSON (single-policy)
+    export: str = ""  # optional path to write the proposed network-policy JSON (single-policy)
     policy_mode: str = "dry_run"
     policy_scope: str = "current_workspace"
     block_threat_domains: str = "off"

@@ -6,16 +6,23 @@ from dbx_nwp_helper.core import policy
 
 
 def _allow(**kw):
-    base = {"label": "r", "cidrs": ["1.2.3.4/32"], "destination": "all_destinations",
-            "identity_type": "ALL_USERS", "identities": []}
+    base = {
+        "label": "r",
+        "cidrs": ["1.2.3.4/32"],
+        "destination": "all_destinations",
+        "identity_type": "ALL_USERS",
+        "identities": [],
+    }
     base.update(kw)
     return base
 
 
 class _CreateAcct:
     """Fake account: the policy doesn't exist yet (create path). Captures the created object."""
+
     def __init__(self):
         from databricks.sdk.errors import NotFound
+
         parent = self
         self.created = None
 
@@ -26,11 +33,13 @@ class _CreateAcct:
             def create_network_policy_rpc(self, network_policy):
                 parent.created = network_policy
                 return network_policy
+
         self.network_policies = _NP()
 
 
 class _UpdateAcct:
     """Fake account: the policy already exists (update path). Captures the updated object."""
+
     def __init__(self, existing):
         parent = self
         self.updated = None
@@ -41,6 +50,7 @@ class _UpdateAcct:
 
             def update_network_policy_rpc(self, network_policy_id, network_policy):
                 parent.updated = network_policy
+
         self.network_policies = _NP()
 
 
@@ -52,12 +62,12 @@ def _restricted_egress():
         EgressNetworkPolicyNetworkAccessPolicyRestrictionMode as ER,
     )
     from databricks.sdk.service.settings import NetworkPolicyEgress
+
     return NetworkPolicyEgress(network_access=EA(restriction_mode=ER.RESTRICTED_ACCESS))
 
 
 def test_build_full_access_ingress_is_public_full_access():
-    assert policy.build_full_access_ingress().as_dict()["public_access"]["restriction_mode"] == \
-        "FULL_ACCESS"
+    assert policy.build_full_access_ingress().as_dict()["public_access"]["restriction_mode"] == "FULL_ACCESS"
 
 
 def test_apply_egress_create_adds_full_access_ingress_default():
@@ -71,9 +81,13 @@ def test_apply_egress_create_adds_full_access_ingress_default():
 
 def test_apply_egress_update_leaves_existing_ingress_untouched():
     from databricks.sdk.service.settings import AccountNetworkPolicy
-    existing = AccountNetworkPolicy(account_id="acc", network_policy_id="p",
-                                    egress=policy.build_full_access_egress(),
-                                    ingress=policy.build_ingress_block([_allow()], [], "enforced", ""))
+
+    existing = AccountNetworkPolicy(
+        account_id="acc",
+        network_policy_id="p",
+        egress=policy.build_full_access_egress(),
+        ingress=policy.build_ingress_block([_allow()], [], "enforced", ""),
+    )
     acct = _UpdateAcct(existing)
     policy.apply_egress(acct, "acc", "p", _restricted_egress())
     # existing ingress rules preserved; egress replaced with the new (restricted) block
@@ -90,8 +104,8 @@ def test_apply_ingress_create_adds_full_access_egress_default():
 
 def test_apply_ingress_update_leaves_existing_egress_untouched():
     from databricks.sdk.service.settings import AccountNetworkPolicy
-    existing = AccountNetworkPolicy(account_id="acc", network_policy_id="p",
-                                    egress=_restricted_egress())
+
+    existing = AccountNetworkPolicy(account_id="acc", network_policy_id="p", egress=_restricted_egress())
     acct = _UpdateAcct(existing)
     block = policy.build_ingress_block([_allow()], [], "enforced", "")
     policy.apply_ingress(acct, "acc", "p", block, "ingress")
@@ -116,8 +130,10 @@ def test_ingress_rule_apps_and_lakebase_destinations():
 def test_ingress_rule_selected_identities_auth_omitted_on_broad_destinations():
     # The CBI API rejects an authentication block on Apps / Lakebase / all_destinations rules, so
     # even with SELECTED_IDENTITIES the builder must omit it (otherwise apply 400s).
-    ids = [{"principal_id": 42, "principal_type": "USER"},
-           {"principal_id": 7, "principal_type": "SERVICE_PRINCIPAL"}]
+    ids = [
+        {"principal_id": 42, "principal_type": "USER"},
+        {"principal_id": 7, "principal_type": "SERVICE_PRINCIPAL"},
+    ]
     for dest in ("all_destinations", "apps_runtime", "lakebase_runtime"):
         spec = _allow(destination=dest, identity_type="SELECTED_IDENTITIES", identities=ids)
         rule = policy.build_ingress_rule(spec, "enforced").as_dict()
@@ -139,8 +155,11 @@ def test_deny_rule_shape():
 def test_deny_without_allow_injects_catch_all():
     notes = []
     block = policy.build_ingress_block(
-        allow=[], deny=[{"label": "np-deny", "cidrs": ["9.9.9.0/24"]}],
-        mode_label="dry-run", note=notes.append).as_dict()
+        allow=[],
+        deny=[{"label": "np-deny", "cidrs": ["9.9.9.0/24"]}],
+        mode_label="dry-run",
+        note=notes.append,
+    ).as_dict()
     pub = block["public_access"]
     assert pub["allow_rules"][0]["origin"]["all_ip_ranges"] is True
     assert pub["deny_rules"]
@@ -150,8 +169,11 @@ def test_deny_without_allow_injects_catch_all():
 def test_allow_with_deny_no_catch_all():
     notes = []
     block = policy.build_ingress_block(
-        allow=[_allow()], deny=[{"label": "d", "cidrs": ["9.9.9.0/24"]}],
-        mode_label="dry-run", note=notes.append).as_dict()
+        allow=[_allow()],
+        deny=[{"label": "d", "cidrs": ["9.9.9.0/24"]}],
+        mode_label="dry-run",
+        note=notes.append,
+    ).as_dict()
     pub = block["public_access"]
     assert len(pub["allow_rules"]) == 1
     assert pub["allow_rules"][0]["origin"].get("all_ip_ranges") is None

@@ -30,12 +30,21 @@ def test_egress_recommend_unknown_when_no_lookup():
 # --------------------------------------------------------------------------------- egress
 def test_egress_owner_lookup_rdap_fallback(monkeypatch):
     # FQDN resolves to an IP that's NOT in any cloud range -> RDAP fallback names the owner.
-    observed = pd.DataFrame([
-        {"destination": "api.example.com", "destination_type": "DNS", "events": 5,
-         "workspace_ids": [1], "resolved_ips": ["104.16.1.1"]}])
+    observed = pd.DataFrame(
+        [
+            {
+                "destination": "api.example.com",
+                "destination_type": "DNS",
+                "events": 5,
+                "workspace_ids": [1],
+                "resolved_ips": ["104.16.1.1"],
+            }
+        ]
+    )
     monkeypatch.setattr("dbx_nwp_helper.sql.query", lambda _c, _t: observed)
     monkeypatch.setattr(eg, "_load_cloud_networks", lambda: [])  # nothing matches offline
     from dbx_nwp_helper.feeds import rdap
+
     monkeypatch.setattr(rdap, "lookup", lambda ip: {"rdap_owner_name": "Cloudflare"})
     cfg = EgressConfig(enable_rdap=True, block_threat_domains="off", policy_scope="all_workspaces")
     a = eg.analyze(cfg, sql_conn=None)
@@ -44,12 +53,21 @@ def test_egress_owner_lookup_rdap_fallback(monkeypatch):
 
 
 def test_egress_owner_unknown_when_rdap_also_misses(monkeypatch):
-    observed = pd.DataFrame([
-        {"destination": "api.example.com", "destination_type": "DNS", "events": 5,
-         "workspace_ids": [1], "resolved_ips": ["104.16.1.1"]}])
+    observed = pd.DataFrame(
+        [
+            {
+                "destination": "api.example.com",
+                "destination_type": "DNS",
+                "events": 5,
+                "workspace_ids": [1],
+                "resolved_ips": ["104.16.1.1"],
+            }
+        ]
+    )
     monkeypatch.setattr("dbx_nwp_helper.sql.query", lambda _c, _t: observed)
     monkeypatch.setattr(eg, "_load_cloud_networks", lambda: [])
     from dbx_nwp_helper.feeds import rdap
+
     monkeypatch.setattr(rdap, "lookup", lambda ip: {"rdap_owner_name": None})
     cfg = EgressConfig(enable_rdap=True, block_threat_domains="off", policy_scope="all_workspaces")
     a = eg.analyze(cfg, sql_conn=None)
@@ -58,34 +76,75 @@ def test_egress_owner_unknown_when_rdap_also_misses(monkeypatch):
 
 def test_egress_owner_lookup_cloud_match_no_rdap(monkeypatch):
     # An IP in a cloud range is named directly; RDAP must NOT be called.
-    observed = pd.DataFrame([
-        {"destination": "api.example.com", "destination_type": "DNS", "events": 5,
-         "workspace_ids": [1], "resolved_ips": ["52.10.0.5"]}])
+    observed = pd.DataFrame(
+        [
+            {
+                "destination": "api.example.com",
+                "destination_type": "DNS",
+                "events": 5,
+                "workspace_ids": [1],
+                "resolved_ips": ["52.10.0.5"],
+            }
+        ]
+    )
     monkeypatch.setattr("dbx_nwp_helper.sql.query", lambda _c, _t: observed)
     import ipaddress
-    monkeypatch.setattr(eg, "_load_cloud_networks",
-                        lambda: [(ipaddress.ip_network("52.10.0.0/16"), "AWS")])
+
+    monkeypatch.setattr(eg, "_load_cloud_networks", lambda: [(ipaddress.ip_network("52.10.0.0/16"), "AWS")])
     from dbx_nwp_helper.feeds import rdap
-    monkeypatch.setattr(rdap, "lookup", lambda ip: (_ for _ in ()).throw(
-        AssertionError("RDAP must not be called when the offline cloud match succeeds")))
+
+    monkeypatch.setattr(
+        rdap,
+        "lookup",
+        lambda ip: (_ for _ in ()).throw(
+            AssertionError("RDAP must not be called when the offline cloud match succeeds")
+        ),
+    )
     cfg = EgressConfig(enable_rdap=True, block_threat_domains="off", policy_scope="all_workspaces")
     a = eg.analyze(cfg, sql_conn=None)
     assert a.fqdn_owner["api.example.com"] == "AWS"
 
 
 def test_egress_analyze_targets_and_union(monkeypatch):
-    observed = pd.DataFrame([
-        {"destination": "b.s3.us-west-2.amazonaws.com", "destination_type": "DNS", "events": 10,
-         "workspace_ids": [1], "resolved_ips": []},
-        {"destination": "mb.storage.googleapis.com", "destination_type": "DNS", "events": 3,
-         "workspace_ids": [1], "resolved_ips": []},
-        {"destination": "acct.blob.core.windows.net", "destination_type": "DNS", "events": 2,
-         "workspace_ids": [1], "resolved_ips": []},
-        {"destination": "api.openai.com", "destination_type": "DNS", "events": 5,
-         "workspace_ids": [1], "resolved_ips": ["1.2.3.4"]},
-        {"destination": "s3.us-east-1.amazonaws.com", "destination_type": "DNS", "events": 1,
-         "workspace_ids": [1], "resolved_ips": []},  # bare S3 -> skipped
-    ])
+    observed = pd.DataFrame(
+        [
+            {
+                "destination": "b.s3.us-west-2.amazonaws.com",
+                "destination_type": "DNS",
+                "events": 10,
+                "workspace_ids": [1],
+                "resolved_ips": [],
+            },
+            {
+                "destination": "mb.storage.googleapis.com",
+                "destination_type": "DNS",
+                "events": 3,
+                "workspace_ids": [1],
+                "resolved_ips": [],
+            },
+            {
+                "destination": "acct.blob.core.windows.net",
+                "destination_type": "DNS",
+                "events": 2,
+                "workspace_ids": [1],
+                "resolved_ips": [],
+            },
+            {
+                "destination": "api.openai.com",
+                "destination_type": "DNS",
+                "events": 5,
+                "workspace_ids": [1],
+                "resolved_ips": ["1.2.3.4"],
+            },
+            {
+                "destination": "s3.us-east-1.amazonaws.com",
+                "destination_type": "DNS",
+                "events": 1,
+                "workspace_ids": [1],
+                "resolved_ips": [],
+            },  # bare S3 -> skipped
+        ]
+    )
     monkeypatch.setattr("dbx_nwp_helper.sql.query", lambda _c, _t: observed)
     cfg = EgressConfig(enable_rdap=False, block_threat_domains="off")
     a = eg.analyze(cfg, sql_conn=None)
@@ -98,9 +157,17 @@ def test_egress_analyze_targets_and_union(monkeypatch):
 
 def test_egress_global_s3_region_inferred(monkeypatch):
     # <bucket>.s3.amazonaws.com has no region in the host -> infer it, keep the bucket.
-    observed = pd.DataFrame([
-        {"destination": "mybucket.s3.amazonaws.com", "destination_type": "DNS", "events": 4,
-         "workspace_ids": [1], "resolved_ips": []}])
+    observed = pd.DataFrame(
+        [
+            {
+                "destination": "mybucket.s3.amazonaws.com",
+                "destination_type": "DNS",
+                "events": 4,
+                "workspace_ids": [1],
+                "resolved_ips": [],
+            }
+        ]
+    )
     monkeypatch.setattr("dbx_nwp_helper.sql.query", lambda _c, _t: observed)
     monkeypatch.setattr(eg, "_infer_s3_region", lambda bucket: "us-east-1")
     cfg = EgressConfig(enable_rdap=False, block_threat_domains="off")
@@ -111,9 +178,17 @@ def test_egress_global_s3_region_inferred(monkeypatch):
 
 def test_egress_global_s3_region_uninferable_dropped(monkeypatch):
     # region can't be inferred -> drop the bucket, flag it, and never emit an invalid rule.
-    observed = pd.DataFrame([
-        {"destination": "mybucket.s3.amazonaws.com", "destination_type": "DNS", "events": 4,
-         "workspace_ids": [1], "resolved_ips": []}])
+    observed = pd.DataFrame(
+        [
+            {
+                "destination": "mybucket.s3.amazonaws.com",
+                "destination_type": "DNS",
+                "events": 4,
+                "workspace_ids": [1],
+                "resolved_ips": [],
+            }
+        ]
+    )
     monkeypatch.setattr("dbx_nwp_helper.sql.query", lambda _c, _t: observed)
     monkeypatch.setattr(eg, "_infer_s3_region", lambda bucket: None)
     cfg = EgressConfig(enable_rdap=False, block_threat_domains="off")
@@ -126,9 +201,10 @@ def test_egress_global_s3_region_uninferable_dropped(monkeypatch):
 
 def test_egress_build_skips_regionless_s3_defensively():
     # Even if a region-less entry somehow reaches the target dict, the builder must skip it.
-    a = eg.EgressAnalysis(observed=pd.DataFrame(),
-                          targets={eg.ALL_WORKSPACES: {"s3": {("b", ""): 3}, "gcs": {}, "azure": {},
-                                                       "internet": {}}})
+    a = eg.EgressAnalysis(
+        observed=pd.DataFrame(),
+        targets={eg.ALL_WORKSPACES: {"s3": {("b", ""): 3}, "gcs": {}, "azure": {}, "internet": {}}},
+    )
     cfg = EgressConfig(enable_rdap=False, block_threat_domains="off")
     blocks = eg.build_blocks(a, cfg)
     # target has "content" (the s3 dict is non-empty) but the region-less entry is skipped ->
@@ -138,9 +214,17 @@ def test_egress_build_skips_regionless_s3_defensively():
 
 
 def test_egress_per_workspace_fans_out(monkeypatch):
-    observed = pd.DataFrame([
-        {"destination": "api.openai.com", "destination_type": "DNS", "events": 5,
-         "workspace_ids": [1, 2], "resolved_ips": []}])
+    observed = pd.DataFrame(
+        [
+            {
+                "destination": "api.openai.com",
+                "destination_type": "DNS",
+                "events": 5,
+                "workspace_ids": [1, 2],
+                "resolved_ips": [],
+            }
+        ]
+    )
     monkeypatch.setattr("dbx_nwp_helper.sql.query", lambda _c, _t: observed)
     cfg = EgressConfig(enable_rdap=False, policy_scope="per_workspace", block_threat_domains="off")
     a = eg.analyze(cfg, sql_conn=None)
@@ -148,12 +232,21 @@ def test_egress_per_workspace_fans_out(monkeypatch):
 
 
 def test_egress_build_blocks_restricted_with_enforcement(monkeypatch):
-    observed = pd.DataFrame([
-        {"destination": "api.openai.com", "destination_type": "DNS", "events": 5,
-         "workspace_ids": [1], "resolved_ips": []}])
+    observed = pd.DataFrame(
+        [
+            {
+                "destination": "api.openai.com",
+                "destination_type": "DNS",
+                "events": 5,
+                "workspace_ids": [1],
+                "resolved_ips": [],
+            }
+        ]
+    )
     monkeypatch.setattr("dbx_nwp_helper.sql.query", lambda _c, _t: observed)
-    cfg = EgressConfig(enable_rdap=False, policy_mode="enforce", block_threat_domains="off",
-                       policy_scope="all_workspaces")
+    cfg = EgressConfig(
+        enable_rdap=False, policy_mode="enforce", block_threat_domains="off", policy_scope="all_workspaces"
+    )
     a = eg.analyze(cfg, sql_conn=None)
     prev = eg.preview_blocks(a, cfg)
     na = prev[eg.ALL_WORKSPACES]["egress"]["network_access"]
@@ -162,11 +255,24 @@ def test_egress_build_blocks_restricted_with_enforcement(monkeypatch):
 
 
 def test_egress_blocked_domains_matched_only(monkeypatch):
-    observed = pd.DataFrame([
-        {"destination": "evil.example.com", "destination_type": "DNS", "events": 5,
-         "workspace_ids": [1], "resolved_ips": []},
-        {"destination": "good.example.com", "destination_type": "DNS", "events": 5,
-         "workspace_ids": [1], "resolved_ips": []}])
+    observed = pd.DataFrame(
+        [
+            {
+                "destination": "evil.example.com",
+                "destination_type": "DNS",
+                "events": 5,
+                "workspace_ids": [1],
+                "resolved_ips": [],
+            },
+            {
+                "destination": "good.example.com",
+                "destination_type": "DNS",
+                "events": 5,
+                "workspace_ids": [1],
+                "resolved_ips": [],
+            },
+        ]
+    )
     monkeypatch.setattr("dbx_nwp_helper.sql.query", lambda _c, _t: observed)
     monkeypatch.setattr(eg, "_load_threat_domains", lambda feed: {"evil.example.com", "other.bad"})
     cfg = EgressConfig(enable_rdap=False, block_threat_domains="matched_only")
@@ -179,9 +285,10 @@ def test_egress_warns_and_caps_over_internet_limit():
     # >100 internet FQDNs must be capped to the limit AND the operator warned (silent truncation
     # would block the dropped destinations in enforce mode).
     internet = {f"h{i}.example.com": 1 for i in range(eg.MAX_INTERNET_DESTINATIONS + 25)}
-    a = eg.EgressAnalysis(observed=pd.DataFrame(),
-                          targets={eg.ALL_WORKSPACES: {"s3": {}, "gcs": {}, "azure": {},
-                                                       "internet": internet}})
+    a = eg.EgressAnalysis(
+        observed=pd.DataFrame(),
+        targets={eg.ALL_WORKSPACES: {"s3": {}, "gcs": {}, "azure": {}, "internet": internet}},
+    )
     cfg = EgressConfig(enable_rdap=False, block_threat_domains="off")
     notes = []
     blocks = eg.build_blocks(a, cfg, note=notes.append)
@@ -194,15 +301,18 @@ def test_egress_cap_keeps_highest_traffic_internet():
     # over the cap, the lowest-traffic FQDNs are dropped and the busiest are kept (deterministic).
     n = eg.MAX_INTERNET_DESTINATIONS
     internet = {f"h{i}.example.com": (n + 2 - i) for i in range(n + 2)}  # h0 busiest, h{n+1} quietest
-    a = eg.EgressAnalysis(observed=pd.DataFrame(),
-                          targets={eg.ALL_WORKSPACES: {"s3": {}, "gcs": {}, "azure": {},
-                                                       "internet": internet}})
+    a = eg.EgressAnalysis(
+        observed=pd.DataFrame(),
+        targets={eg.ALL_WORKSPACES: {"s3": {}, "gcs": {}, "azure": {}, "internet": internet}},
+    )
     cfg = EgressConfig(enable_rdap=False, block_threat_domains="off")
     blocks = eg.build_blocks(a, cfg)
-    kept = {d["destination"] for d in
-            blocks[eg.ALL_WORKSPACES].as_dict()["network_access"]["allowed_internet_destinations"]}
+    kept = {
+        d["destination"]
+        for d in blocks[eg.ALL_WORKSPACES].as_dict()["network_access"]["allowed_internet_destinations"]
+    }
     assert len(kept) == n
-    assert "h0.example.com" in kept                                   # busiest kept
+    assert "h0.example.com" in kept  # busiest kept
     assert f"h{n}.example.com" not in kept and f"h{n + 1}.example.com" not in kept  # quietest dropped
 
 
@@ -210,11 +320,12 @@ def test_egress_cap_keeps_highest_traffic_storage_across_providers():
     # storage is ranked across s3/gcs/azure together, so a busy S3 bucket survives the cap even
     # though it's built after a full page of low-traffic GCS buckets.
     n = eg.MAX_STORAGE_DESTINATIONS
-    gcs = {f"bucket{i}": 1 for i in range(n)}       # n low-traffic GCS buckets
-    s3 = {("busy-bucket", "us-east-1"): 999}         # one high-traffic S3 bucket
-    a = eg.EgressAnalysis(observed=pd.DataFrame(),
-                          targets={eg.ALL_WORKSPACES: {"s3": s3, "gcs": gcs, "azure": {},
-                                                       "internet": {}}})
+    gcs = {f"bucket{i}": 1 for i in range(n)}  # n low-traffic GCS buckets
+    s3 = {("busy-bucket", "us-east-1"): 999}  # one high-traffic S3 bucket
+    a = eg.EgressAnalysis(
+        observed=pd.DataFrame(),
+        targets={eg.ALL_WORKSPACES: {"s3": s3, "gcs": gcs, "azure": {}, "internet": {}}},
+    )
     cfg = EgressConfig(enable_rdap=False, block_threat_domains="off")
     blocks = eg.build_blocks(a, cfg)
     dests = blocks[eg.ALL_WORKSPACES].as_dict()["network_access"]["allowed_storage_destinations"]
@@ -223,9 +334,10 @@ def test_egress_cap_keeps_highest_traffic_storage_across_providers():
 
 
 def test_egress_under_internet_limit_does_not_warn():
-    a = eg.EgressAnalysis(observed=pd.DataFrame(),
-                          targets={eg.ALL_WORKSPACES: {"s3": {}, "gcs": {}, "azure": {},
-                                                       "internet": {"api.openai.com": 3}}})
+    a = eg.EgressAnalysis(
+        observed=pd.DataFrame(),
+        targets={eg.ALL_WORKSPACES: {"s3": {}, "gcs": {}, "azure": {}, "internet": {"api.openai.com": 3}}},
+    )
     cfg = EgressConfig(enable_rdap=False, block_threat_domains="off")
     notes = []
     eg.build_blocks(a, cfg, note=notes.append)
@@ -234,11 +346,17 @@ def test_egress_under_internet_limit_does_not_warn():
 
 def test_egress_export_payload_builds_full_policy():
     # --export: egress block + a permissive FULL_ACCESS ingress default, single-policy id.
-    a = eg.EgressAnalysis(observed=pd.DataFrame(),
-                          targets={eg.ALL_WORKSPACES: {"s3": {}, "gcs": {}, "azure": {},
-                                                       "internet": {"api.openai.com": 5}}})
-    cfg = EgressConfig(enable_rdap=False, block_threat_domains="off", policy_scope="all_workspaces",
-                       policy_mode="enforce", policy_name="my-egress")
+    a = eg.EgressAnalysis(
+        observed=pd.DataFrame(),
+        targets={eg.ALL_WORKSPACES: {"s3": {}, "gcs": {}, "azure": {}, "internet": {"api.openai.com": 5}}},
+    )
+    cfg = EgressConfig(
+        enable_rdap=False,
+        block_threat_domains="off",
+        policy_scope="all_workspaces",
+        policy_mode="enforce",
+        policy_name="my-egress",
+    )
     payload = eg.export_payload(a, cfg, "acc-1", this_workspace_id=42)
     assert payload["network_policy_id"] == "my-egress"
     assert payload["account_id"] == "acc-1"
@@ -247,8 +365,12 @@ def test_egress_export_payload_builds_full_policy():
 
 
 def test_egress_empty_produces_no_blocks(monkeypatch):
-    monkeypatch.setattr("dbx_nwp_helper.sql.query", lambda _c, _t: pd.DataFrame(
-        columns=["destination", "destination_type", "events", "workspace_ids", "resolved_ips"]))
+    monkeypatch.setattr(
+        "dbx_nwp_helper.sql.query",
+        lambda _c, _t: pd.DataFrame(
+            columns=["destination", "destination_type", "events", "workspace_ids", "resolved_ips"]
+        ),
+    )
     cfg = EgressConfig(enable_rdap=False, block_threat_domains="off")
     a = eg.analyze(cfg, sql_conn=None)
     assert eg.preview_blocks(a, cfg) == {}
@@ -313,6 +435,7 @@ def _pas_account(pas_id):
     class _WS:
         def get(self, workspace_id):
             return type("W", (), {"private_access_settings_id": pas_id})()
+
     return type("Acct", (), {"workspaces": _WS()})()
 
 
@@ -325,6 +448,7 @@ def test_workspace_pas_attached_none_on_error():
     class _WS:
         def get(self, workspace_id):
             raise RuntimeError("no perms")
+
     acct = type("Acct", (), {"workspaces": _WS()})()
     assert acl_core.workspace_pas_attached(acct, 42) is None
 
@@ -337,16 +461,25 @@ def _policy_account(assigned_policy_id, policy_obj):
     class _NP:
         def get_network_policy_rpc(self, network_policy_id):
             return policy_obj
-    return type("Acct", (), {"workspace_network_configuration": _WNC(),
-                             "network_policies": _NP()})()
+
+    return type("Acct", (), {"workspace_network_configuration": _WNC(), "network_policies": _NP()})()
 
 
-def _ingress(public_mode="FULL_ACCESS", private_mode="ALLOW_ALL_REGISTERED_ENDPOINTS",
-             xws_mode="LEGACY_MODE"):
+def _ingress(
+    public_mode="FULL_ACCESS", private_mode="ALLOW_ALL_REGISTERED_ENDPOINTS", xws_mode="LEGACY_MODE"
+):
     def _blk(mode):
         return type("B", (), {"restriction_mode": mode, "allow_rules": None, "deny_rules": None})()
-    return type("Ing", (), {"public_access": _blk(public_mode), "private_access": _blk(private_mode),
-                            "cross_workspace_access": _blk(xws_mode)})()
+
+    return type(
+        "Ing",
+        (),
+        {
+            "public_access": _blk(public_mode),
+            "private_access": _blk(private_mode),
+            "cross_workspace_access": _blk(xws_mode),
+        },
+    )()
 
 
 def test_public_vs_private_restrictive_helpers():
@@ -361,26 +494,28 @@ def test_public_vs_private_restrictive_helpers():
 
 def _egress(restricted=True, enforced=True, internet=None, storage=None):
     import types
+
     na = types.SimpleNamespace(
         restriction_mode="RESTRICTED_ACCESS" if restricted else "FULL_ACCESS",
-        allowed_internet_destinations=internet, allowed_storage_destinations=storage,
+        allowed_internet_destinations=internet,
+        allowed_storage_destinations=storage,
         blocked_internet_destinations=None,
-        policy_enforcement=types.SimpleNamespace(
-            enforcement_mode="ENFORCED" if enforced else "DRY_RUN"))
+        policy_enforcement=types.SimpleNamespace(enforcement_mode="ENFORCED" if enforced else "DRY_RUN"),
+    )
     return types.SimpleNamespace(network_access=na)
 
 
 def test_egress_restrictive_matches_restricted_mode_and_dest_lists():
     assert acl_core.egress_restrictive(None) is False
-    assert acl_core.egress_restrictive(_egress(restricted=False)) is False   # FULL_ACCESS
-    assert acl_core.egress_restrictive(_egress(restricted=True)) is True     # RESTRICTED_ACCESS
+    assert acl_core.egress_restrictive(_egress(restricted=False)) is False  # FULL_ACCESS
+    assert acl_core.egress_restrictive(_egress(restricted=True)) is True  # RESTRICTED_ACCESS
     # FULL_ACCESS but with an allow list present -> still restrictive
     assert acl_core.egress_restrictive(_egress(restricted=False, internet=["x"])) is True
 
 
 def test_egress_enforced_reads_enforcement_mode():
     assert acl_core.egress_enforced(_egress(enforced=True)) is True
-    assert acl_core.egress_enforced(_egress(enforced=False)) is False        # DRY_RUN
+    assert acl_core.egress_enforced(_egress(enforced=False)) is False  # DRY_RUN
     assert acl_core.egress_enforced(None) is False
 
 
@@ -392,18 +527,18 @@ def test_assigned_policy_returns_id_and_object():
 
 # --------------------------------------------------------------------------------- queries
 def test_frequent_public_ips_predicate_toggles():
-    q_default = queries.frequent_public_ips(30, 1, include_ipv6=False,
-                                            treat_null_status_as_success=False,
-                                            include_account_level=False)
+    q_default = queries.frequent_public_ips(
+        30, 1, include_ipv6=False, treat_null_status_as_success=False, include_account_level=False
+    )
     assert "ip_version = 6" not in q_default
     # workspace_id is a STRING column -> compare against '0', not the integer 0.
     assert "CAST(workspace_id AS STRING) <> '0'" in q_default
     assert "workspace_id <> 0" not in q_default
     assert "status_code IS NULL AND FALSE" in q_default
 
-    q_all = queries.frequent_public_ips(7, 5, include_ipv6=True,
-                                        treat_null_status_as_success=True,
-                                        include_account_level=True)
+    q_all = queries.frequent_public_ips(
+        7, 5, include_ipv6=True, treat_null_status_as_success=True, include_account_level=True
+    )
     assert "OR ip_version = 6" in q_all
     # the account-level filter predicate is omitted when including account-level rows
     assert "CAST(workspace_id AS STRING) <> '0'" not in q_all

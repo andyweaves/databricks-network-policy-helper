@@ -29,18 +29,19 @@ from .config import (
     IngressConfig,
 )
 
-_STYLE = questionary.Style([
-    ("qmark", "fg:#FF3621 bold"),
-    ("question", "bold"),
-    ("answer", "fg:#00A972 bold"),
-    ("pointer", "fg:#FF3621 bold"),
-    ("highlighted", "fg:#FF3621 bold"),
-])
+_STYLE = questionary.Style(
+    [
+        ("qmark", "fg:#FF3621 bold"),
+        ("question", "bold"),
+        ("answer", "fg:#00A972 bold"),
+        ("pointer", "fg:#FF3621 bold"),
+        ("highlighted", "fg:#FF3621 bold"),
+    ]
+)
 
 
 def _select(message: str, choices: list[str], default: str | None = None) -> str:
-    return questionary.select(message, choices=choices, default=default or choices[0],
-                              style=_STYLE).ask()
+    return questionary.select(message, choices=choices, default=default or choices[0], style=_STYLE).ask()
 
 
 def _confirm(message: str, default: bool = False) -> bool:
@@ -63,13 +64,17 @@ def _int(message: str, default: int) -> int:
 def run_wizard(conn: Connection) -> None:
     from .cli import _run_egress, _run_ingress
 
-    console.title_panel("dbx-nwp-helper — guided setup",
-                        "Answer a few questions; I'll analyse traffic and propose a policy.")
+    console.title_panel(
+        "dbx-nwp-helper — guided setup", "Answer a few questions; I'll analyse traffic and propose a policy."
+    )
 
     direction = _select(
         "What would you like to build?",
-        ["Ingress (CBI) — who may connect IN, by source IP",
-         "Egress (SEG) — where workloads may connect OUT"])
+        [
+            "Ingress (CBI) — who may connect IN, by source IP",
+            "Egress (SEG) — where workloads may connect OUT",
+        ],
+    )
     if direction is None:
         return
 
@@ -94,24 +99,46 @@ def _ingress_wizard(conn: Connection) -> IngressConfig:
     scope = _select("Policy scope?", POLICY_SCOPES, default="current_workspace")
     enable_rdap = framing == "maximum" or _confirm("Do RDAP owner lookups (external calls)?", True)
     all_feeds = _confirm("Use all threat-intel feeds?", True)
-    feeds = list(THREAT_FEEDS) if all_feeds else (questionary.checkbox(
-        "Select threat-intel feeds:", choices=THREAT_FEEDS, style=_STYLE).ask() or list(THREAT_FEEDS))
-    acl_handling = _select("How should an existing IP ACL be treated?", IP_ACL_HANDLING,
-                           default="migrate_and_enrich")
+    feeds = (
+        list(THREAT_FEEDS)
+        if all_feeds
+        else (
+            questionary.checkbox("Select threat-intel feeds:", choices=THREAT_FEEDS, style=_STYLE).ask()
+            or list(THREAT_FEEDS)
+        )
+    )
+    acl_handling = _select(
+        "How should an existing IP ACL be treated?", IP_ACL_HANDLING, default="migrate_and_enrich"
+    )
     threat_deny = _select("Add threat-intel deny rules?", THREAT_DENY_RULES, default="off")
 
     apply = _apply_wizard(conn, scope, other="egress")
     mode = _mode_wizard() if apply.create_policy else "dry_run"
-    disable_acls = (apply.create_policy and apply.auto_assign
-                    and _confirm("Disable the workspace's existing IP access lists after applying? "
-                                 "(the new CBI policy replaces them)", False))
+    disable_acls = (
+        apply.create_policy
+        and apply.auto_assign
+        and _confirm(
+            "Disable the workspace's existing IP access lists after applying? "
+            "(the new CBI policy replaces them)",
+            False,
+        )
+    )
     # The policy name is prompted for centrally in the run flow (blank = profile name), so it isn't
     # asked here.
     return IngressConfig(
-        lookback_days=lookback, min_events=min_events, threat_feeds=feeds, enable_rdap=enable_rdap,
-        policy_framing=framing, scoping_mode=scoping, policy_scope=scope, policy_mode=mode,
+        lookback_days=lookback,
+        min_events=min_events,
+        threat_feeds=feeds,
+        enable_rdap=enable_rdap,
+        policy_framing=framing,
+        scoping_mode=scoping,
+        policy_scope=scope,
+        policy_mode=mode,
         threat_deny_rules=threat_deny,
-        ip_acl_handling=acl_handling, disable_existing_ip_acls=disable_acls, apply=apply)
+        ip_acl_handling=acl_handling,
+        disable_existing_ip_acls=disable_acls,
+        apply=apply,
+    )
 
 
 def _egress_wizard(conn: Connection) -> EgressConfig:
@@ -128,9 +155,15 @@ def _egress_wizard(conn: Connection) -> EgressConfig:
     # The policy name is prompted for centrally in the run flow (blank = profile name), so it isn't
     # asked here.
     return EgressConfig(
-        lookback_days=lookback, min_events=min_events, source_type_filter=src_filter,
-        enable_rdap=enable_rdap, policy_scope=scope, policy_mode=mode, block_threat_domains=block,
-        apply=apply)
+        lookback_days=lookback,
+        min_events=min_events,
+        source_type_filter=src_filter,
+        enable_rdap=enable_rdap,
+        policy_scope=scope,
+        policy_mode=mode,
+        block_threat_domains=block,
+        apply=apply,
+    )
 
 
 def _apply_wizard(conn: Connection, scope: str, other: str) -> ApplyOptions:
@@ -145,16 +178,19 @@ def _apply_wizard(conn: Connection, scope: str, other: str) -> ApplyOptions:
         action = "add_to_existing"
         existing_id = _text("Existing policy id?")
         if scope == "per_workspace":
-            console.banner("warn", "add_to_existing can't be used with per_workspace scope — the "
-                                   "run will flag this.")
+            console.banner(
+                "warn", "add_to_existing can't be used with per_workspace scope — the " "run will flag this."
+            )
     auto_assign = _confirm("Bind the workspace(s) to the policy?", False)
-    return ApplyOptions(create_policy=True, policy_action=action, existing_policy_id=existing_id,
-                        auto_assign=auto_assign)
+    return ApplyOptions(
+        create_policy=True, policy_action=action, existing_policy_id=existing_id, auto_assign=auto_assign
+    )
 
 
 def _mode_wizard() -> str:
-    mode = _select("Policy mode? (dry_run is log-only and strongly recommended first)",
-                   POLICY_MODES, default="dry_run")
+    mode = _select(
+        "Policy mode? (dry_run is log-only and strongly recommended first)", POLICY_MODES, default="dry_run"
+    )
     if mode == "enforce":
         console.banner("danger", "ENFORCE will block non-matching traffic once applied.")
         if not _confirm("Are you sure you want enforce (not dry_run)?", False):

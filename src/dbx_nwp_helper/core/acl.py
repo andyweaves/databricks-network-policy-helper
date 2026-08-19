@@ -50,8 +50,9 @@ def private_or_xws_restrictive(ingress) -> bool:
     is restrictive — the parts the public-IP helpers don't build and can't yet preserve."""
     if ingress is None:
         return False
-    return (_block_restrictive(getattr(ingress, "private_access", None))
-            or _block_restrictive(getattr(ingress, "cross_workspace_access", None)))
+    return _block_restrictive(getattr(ingress, "private_access", None)) or _block_restrictive(
+        getattr(ingress, "cross_workspace_access", None)
+    )
 
 
 def egress_restrictive(egress) -> bool:
@@ -66,9 +67,11 @@ def egress_restrictive(egress) -> bool:
     rm = getattr(na, "restriction_mode", None)
     if str(getattr(rm, "value", rm) or "") == "RESTRICTED_ACCESS":
         return True
-    return bool(getattr(na, "allowed_internet_destinations", None)
-                or getattr(na, "allowed_storage_destinations", None)
-                or getattr(na, "blocked_internet_destinations", None))
+    return bool(
+        getattr(na, "allowed_internet_destinations", None)
+        or getattr(na, "allowed_storage_destinations", None)
+        or getattr(na, "blocked_internet_destinations", None)
+    )
 
 
 def egress_enforced(egress) -> bool:
@@ -85,7 +88,8 @@ def assigned_policy(account, workspace_id) -> tuple[str | None, object | None]:
     failed, (None, None) if nothing is assigned. Best-effort."""
     try:
         opt = account.workspace_network_configuration.get_workspace_network_option_rpc(
-            workspace_id=int(workspace_id))
+            workspace_id=int(workspace_id)
+        )
         policy_id = getattr(opt, "network_policy_id", None)
     except Exception:  # noqa: BLE001
         return None, None
@@ -108,10 +112,14 @@ def disable_ip_access_lists(workspace_client, note: Note = lambda _m: None) -> b
     # Enforcement is only ON when the flag is explicitly "true"; anything else (missing key = never
     # configured, empty, or "false") means there's nothing to disable, so skip the write.
     if str(status.get("enableIpAccessLists", "")).lower() != "true":
-        note("Workspace IP access list enforcement is already off (never configured or already "
-             "disabled) — no change needed.")
+        note(
+            "Workspace IP access list enforcement is already off (never configured or already "
+            "disabled) — no change needed."
+        )
         return False
     workspace_client.workspace_conf.set_status({"enableIpAccessLists": "false"})
-    note("Disabled workspace IP access list enforcement (enableIpAccessLists=false). The lists "
-         "themselves are preserved — set it back to true to re-enable.")
+    note(
+        "Disabled workspace IP access list enforcement (enableIpAccessLists=false). The lists "
+        "themselves are preserved — set it back to true to re-enable."
+    )
     return True

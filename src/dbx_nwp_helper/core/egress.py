@@ -29,10 +29,10 @@ from .enrich import as_list
 Note = Callable[[str], None]
 ALL_WORKSPACES = "__ALL__"
 
-_S3_VH = re.compile(r'^(?P<bucket>[a-z0-9.\-]+)\.s3[.\-](?:(?P<region>[a-z0-9\-]+)\.)?amazonaws\.com$', re.I)
-_S3_BARE = re.compile(r'^s3[.\-](?:[a-z0-9\-]+\.)?amazonaws\.com$', re.I)
-_GCS = re.compile(r'^(?:(?P<bucket>[a-z0-9._\-]+)\.)?storage\.googleapis\.com$', re.I)
-_AZ = re.compile(r'^(?P<acct>[a-z0-9]+)\.(?P<svc>blob|dfs|file)\.core\.windows\.net$', re.I)
+_S3_VH = re.compile(r"^(?P<bucket>[a-z0-9.\-]+)\.s3[.\-](?:(?P<region>[a-z0-9\-]+)\.)?amazonaws\.com$", re.I)
+_S3_BARE = re.compile(r"^s3[.\-](?:[a-z0-9\-]+\.)?amazonaws\.com$", re.I)
+_GCS = re.compile(r"^(?:(?P<bucket>[a-z0-9._\-]+)\.)?storage\.googleapis\.com$", re.I)
+_AZ = re.compile(r"^(?P<acct>[a-z0-9]+)\.(?P<svc>blob|dfs|file)\.core\.windows\.net$", re.I)
 
 # ThreatFox — abuse.ch botnet-C2 IOC hostfile (free, no key). Best FQDN fit for the exfil use case.
 THREAT_FEEDS = {"threatfox": "https://threatfox.abuse.ch/downloads/hostfile/"}
@@ -41,7 +41,7 @@ THREAT_FEEDS = {"threatfox": "https://threatfox.abuse.ch/downloads/hostfile/"}
 @dataclass
 class EgressAnalysis:
     observed: pd.DataFrame
-    targets: dict = field(default_factory=dict)         # policy_target -> {s3,gcs,azure,internet}
+    targets: dict = field(default_factory=dict)  # policy_target -> {s3,gcs,azure,internet}
     fqdn_ip: dict = field(default_factory=dict)
     fqdn_owner: dict = field(default_factory=dict)
     blocked_domains: list = field(default_factory=list)
@@ -78,6 +78,7 @@ def _infer_s3_region(bucket: str) -> str | None:
     region in the `x-amz-bucket-region` header, no credentials required. Returns the region or None.
     Cached per bucket by the caller."""
     from urllib.request import Request, urlopen
+
     for url in (f"https://{bucket}.s3.amazonaws.com", f"https://s3.amazonaws.com/{bucket}"):
         try:
             req = Request(url, method="HEAD")
@@ -93,8 +94,7 @@ def _infer_s3_region(bucket: str) -> str | None:
     return None
 
 
-def analyze(cfg: EgressConfig, sql_conn, on_step=lambda _m: None,
-            this_workspace_id=None) -> EgressAnalysis:
+def analyze(cfg: EgressConfig, sql_conn, on_step=lambda _m: None, this_workspace_id=None) -> EgressAnalysis:
     from .. import queries, sql
 
     only_ws = this_workspace_id if cfg.policy_scope == "current_workspace" else None
@@ -102,14 +102,18 @@ def analyze(cfg: EgressConfig, sql_conn, on_step=lambda _m: None,
         on_step(f"Scope=current_workspace — restricting analysis to workspace {only_ws}.")
 
     on_step("Querying observed egress destinations…")
-    observed = sql.query(sql_conn, queries.observed_egress(
-        cfg.lookback_days, cfg.min_events, cfg.source_type_filter, only_workspace_id=only_ws))
+    observed = sql.query(
+        sql_conn,
+        queries.observed_egress(
+            cfg.lookback_days, cfg.min_events, cfg.source_type_filter, only_workspace_id=only_ws
+        ),
+    )
 
     targets = defaultdict(_new_target)
     fqdn_resolved_ips = {}
     skipped_bare_s3 = 0
     s3_region_cache: dict[str, str | None] = {}  # bucket -> region (inferred once), None if unknown
-    dropped_s3: dict[str, bool] = {}             # bucket -> True once dropped (dedupe warnings)
+    dropped_s3: dict[str, bool] = {}  # bucket -> True once dropped (dedupe warnings)
     for r in observed.to_dict(orient="records"):
         kind, info = _classify(r["destination"])
         events = int(r["events"])
@@ -140,8 +144,11 @@ def analyze(cfg: EgressConfig, sql_conn, on_step=lambda _m: None,
         else:
             skipped_bare_s3 += 1
             continue
-        tgts = ([int(w) for w in as_list(r.get("workspace_ids"))] or [ALL_WORKSPACES]) \
-            if cfg.policy_scope == "per_workspace" else [ALL_WORKSPACES]
+        tgts = (
+            ([int(w) for w in as_list(r.get("workspace_ids"))] or [ALL_WORKSPACES])
+            if cfg.policy_scope == "per_workspace"
+            else [ALL_WORKSPACES]
+        )
         for t in tgts:
             d = targets[t][key]
             d[bucketname] = d.get(bucketname, 0) + events
@@ -149,8 +156,12 @@ def analyze(cfg: EgressConfig, sql_conn, on_step=lambda _m: None,
     if not targets:
         targets[ALL_WORKSPACES] = _new_target()
 
-    analysis = EgressAnalysis(observed=observed, targets=dict(targets), skipped_bare_s3=skipped_bare_s3,
-                              dropped_s3_no_region=sorted(dropped_s3))
+    analysis = EgressAnalysis(
+        observed=observed,
+        targets=dict(targets),
+        skipped_bare_s3=skipped_bare_s3,
+        dropped_s3_no_region=sorted(dropped_s3),
+    )
 
     if cfg.enable_rdap:
         on_step("Matching internet FQDNs to a cloud owner (offline range match)…")
@@ -204,6 +215,7 @@ def _load_cloud_networks():
         except (ValueError, KeyError, AttributeError):
             pass
     from ..feeds import databricks as dbx_feed
+
     ddf = dbx_feed.load_databricks_ranges()
     for _, r in ddf.iterrows():
         try:
@@ -266,6 +278,7 @@ def _host_hostfile(line: str) -> str:
 
 def _load_threat_domains(feed_key: str) -> set[str]:
     from urllib.request import Request, urlopen
+
     url = THREAT_FEEDS[feed_key]
     domains = set()
     try:
@@ -298,8 +311,10 @@ def _blocked_domains(analysis: EgressAnalysis, cfg: EgressConfig, note: Note):
     else:
         blocked = sorted(feed)
     if len(blocked) > MAX_INTERNET_DESTINATIONS:
-        note(f"{len(blocked)} blocked domains > {MAX_INTERNET_DESTINATIONS} limit — keeping the "
-             f"first {MAX_INTERNET_DESTINATIONS}. Use matched_only to narrow.")
+        note(
+            f"{len(blocked)} blocked domains > {MAX_INTERNET_DESTINATIONS} limit — keeping the "
+            f"first {MAX_INTERNET_DESTINATIONS}. Use matched_only to narrow."
+        )
         blocked = blocked[:MAX_INTERNET_DESTINATIONS]
     analysis.blocked_domains = blocked
 
@@ -352,28 +367,46 @@ def _build_egress_block(t: dict, blocked_domains: list, policy_mode: str):
     for (bucket, region), events in t["s3"].items():
         if not region:
             continue  # region is required for AWS S3; a region-less entry would be rejected
-        storage_ranked.append((events, f"s3:{bucket}:{region}",
-                               StorDest(bucket_name=bucket, region=region,
-                                        storage_destination_type=StorType.AWS_S3)))
+        storage_ranked.append(
+            (
+                events,
+                f"s3:{bucket}:{region}",
+                StorDest(bucket_name=bucket, region=region, storage_destination_type=StorType.AWS_S3),
+            )
+        )
     for bucket, events in t["gcs"].items():
-        storage_ranked.append((events, f"gcs:{bucket}",
-                               StorDest(bucket_name=bucket,
-                                        storage_destination_type=StorType.GOOGLE_CLOUD_STORAGE)))
+        storage_ranked.append(
+            (
+                events,
+                f"gcs:{bucket}",
+                StorDest(bucket_name=bucket, storage_destination_type=StorType.GOOGLE_CLOUD_STORAGE),
+            )
+        )
     for (acct, svc), events in t["azure"].items():
-        storage_ranked.append((events, f"azure:{acct}:{svc}",
-                               StorDest(azure_storage_account=acct, azure_storage_service=svc,
-                                        storage_destination_type=StorType.AZURE_STORAGE)))
+        storage_ranked.append(
+            (
+                events,
+                f"azure:{acct}:{svc}",
+                StorDest(
+                    azure_storage_account=acct,
+                    azure_storage_service=svc,
+                    storage_destination_type=StorType.AZURE_STORAGE,
+                ),
+            )
+        )
     storage_ranked.sort(key=lambda e: (-e[0], e[1]))
     storage = [sd for _events, _key, sd in storage_ranked[:MAX_STORAGE_DESTINATIONS]]
 
     enforcement_mode = EnforcementMode.DRY_RUN if policy_mode == "dry_run" else EnforcementMode.ENFORCED
-    return NetworkPolicyEgress(network_access=EA(
-        restriction_mode=RestrictionMode.RESTRICTED_ACCESS,
-        allowed_internet_destinations=allowed_internet or None,
-        allowed_storage_destinations=storage or None,
-        blocked_internet_destinations=blocked_internet,
-        policy_enforcement=Enforcement(enforcement_mode=enforcement_mode),
-    ))
+    return NetworkPolicyEgress(
+        network_access=EA(
+            restriction_mode=RestrictionMode.RESTRICTED_ACCESS,
+            allowed_internet_destinations=allowed_internet or None,
+            allowed_storage_destinations=storage or None,
+            blocked_internet_destinations=blocked_internet,
+            policy_enforcement=Enforcement(enforcement_mode=enforcement_mode),
+        )
+    )
 
 
 def _target_has_content(t: dict, blocked_domains: list) -> bool:
@@ -387,17 +420,21 @@ def _warn_egress_limits(t: dict, tgt, note: Note) -> None:
     where = "" if tgt == ALL_WORKSPACES else f" [workspace {tgt}]"
     n_internet = len(t["internet"])
     if n_internet > MAX_INTERNET_DESTINATIONS:
-        note(f"{n_internet} internet FQDN destinations{where} exceed the "
-             f"{MAX_INTERNET_DESTINATIONS}-destination egress limit — keeping the "
-             f"{MAX_INTERNET_DESTINATIONS} highest-traffic; the rest won't be allow-listed (and "
-             f"would be blocked in enforce mode). Raise --min-events or narrow --lookback-days to "
-             f"fit under the cap.")
+        note(
+            f"{n_internet} internet FQDN destinations{where} exceed the "
+            f"{MAX_INTERNET_DESTINATIONS}-destination egress limit — keeping the "
+            f"{MAX_INTERNET_DESTINATIONS} highest-traffic; the rest won't be allow-listed (and "
+            f"would be blocked in enforce mode). Raise --min-events or narrow --lookback-days to "
+            f"fit under the cap."
+        )
     n_storage = len(t["s3"]) + len(t["gcs"]) + len(t["azure"])
     if n_storage > MAX_STORAGE_DESTINATIONS:
-        note(f"{n_storage} storage destinations{where} exceed the "
-             f"{MAX_STORAGE_DESTINATIONS}-destination egress limit — keeping the "
-             f"{MAX_STORAGE_DESTINATIONS} highest-traffic; the rest won't be allow-listed (and "
-             f"would be blocked in enforce mode).")
+        note(
+            f"{n_storage} storage destinations{where} exceed the "
+            f"{MAX_STORAGE_DESTINATIONS}-destination egress limit — keeping the "
+            f"{MAX_STORAGE_DESTINATIONS} highest-traffic; the rest won't be allow-listed (and "
+            f"would be blocked in enforce mode)."
+        )
 
 
 def build_blocks(analysis: EgressAnalysis, cfg: EgressConfig, note: Note = lambda _m: None) -> dict:
@@ -412,37 +449,53 @@ def build_blocks(analysis: EgressAnalysis, cfg: EgressConfig, note: Note = lambd
 
 
 def preview_blocks(analysis: EgressAnalysis, cfg: EgressConfig, note: Note = lambda _m: None) -> dict:
-    return {tgt: {"egress": block.as_dict()}
-            for tgt, block in build_blocks(analysis, cfg, note).items()}
+    return {tgt: {"egress": block.as_dict()} for tgt, block in build_blocks(analysis, cfg, note).items()}
 
 
 def _single_policy_id(cfg: EgressConfig, profile, this_workspace_id) -> str:
     """The policy id for a single-policy scope (current_workspace / all_workspaces): the
     add_to_existing target, else the resolved policy name (profile/workspace-id default)."""
     from . import policy
+
     if cfg.apply.policy_action == "add_to_existing":
         return cfg.apply.existing_policy_id
     name = cfg.policy_name or profile or str(this_workspace_id)
     return policy.policy_name("", explicit=name)
 
 
-def export_payload(analysis: EgressAnalysis, cfg: EgressConfig, account_id: str, this_workspace_id,
-                   profile: str | None = None) -> dict:
+def export_payload(
+    analysis: EgressAnalysis,
+    cfg: EgressConfig,
+    account_id: str,
+    this_workspace_id,
+    profile: str | None = None,
+) -> dict:
     """The proposed network policy as a plain dict (for --export / a curl body): the egress block +
     a permissive FULL_ACCESS ingress default. Single-policy scopes only."""
     from databricks.sdk.service.settings import AccountNetworkPolicy
 
     from . import policy
+
     blocks = build_blocks(analysis, cfg)
     egress_block = blocks.get(ALL_WORKSPACES) or (next(iter(blocks.values())) if blocks else None)
     np = AccountNetworkPolicy(
-        account_id=account_id, network_policy_id=_single_policy_id(cfg, profile, this_workspace_id),
-        ingress=policy.build_full_access_ingress(), egress=egress_block)
+        account_id=account_id,
+        network_policy_id=_single_policy_id(cfg, profile, this_workspace_id),
+        ingress=policy.build_full_access_ingress(),
+        egress=egress_block,
+    )
     return np.as_dict()
 
 
-def apply(analysis: EgressAnalysis, cfg: EgressConfig, account, account_id: str,
-          this_workspace_id, profile: str | None = None, note: Note = lambda _m: None) -> list[dict]:
+def apply(
+    analysis: EgressAnalysis,
+    cfg: EgressConfig,
+    account,
+    account_id: str,
+    this_workspace_id,
+    profile: str | None = None,
+    note: Note = lambda _m: None,
+) -> list[dict]:
     from . import policy
 
     blocks = build_blocks(analysis, cfg)
@@ -459,7 +512,8 @@ def apply(analysis: EgressAnalysis, cfg: EgressConfig, account, account_id: str,
         bind_ws = this_workspace_id if tgt == ALL_WORKSPACES else int(tgt)
         try:
             action, effective_id = policy.apply_egress(
-                account, account_id, pid, blocks[tgt], must_exist=add_to_existing)
+                account, account_id, pid, blocks[tgt], must_exist=add_to_existing
+            )
             result = {"target": tgt, "action": action, "policy_id": effective_id}
             if cfg.apply.auto_assign:
                 policy.assign(account, bind_ws, effective_id)

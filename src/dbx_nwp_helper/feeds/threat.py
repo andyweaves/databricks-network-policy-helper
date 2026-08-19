@@ -148,6 +148,7 @@ def load_threat_intel(selected_feeds: list[str]) -> pd.DataFrame:
             continue
         feed_rows = loader(now)
         from ..console import console
+
         console.print(f"  [muted]{feed}: {len(feed_rows):,} rows[/muted]")
         rows.extend(feed_rows)
     rows = dedupe(rows, (0, 1))

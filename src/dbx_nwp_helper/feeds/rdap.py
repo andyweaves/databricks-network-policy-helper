@@ -14,9 +14,9 @@ from urllib.request import Request, urlopen
 from .http import FEED_USER_AGENT
 
 RDAP_TIMEOUT_SECONDS = 8
-RDAP_MAX_RETRIES = 4          # rdap.org / RIR servers throttle bursts; a couple of retries wasn't enough
+RDAP_MAX_RETRIES = 4  # rdap.org / RIR servers throttle bursts; a couple of retries wasn't enough
 RDAP_MAX_REFERRAL_DEPTH = 3
-RDAP_DELAY_SECONDS = 0.25     # gentler default spacing between per-IP lookups in a run
+RDAP_DELAY_SECONDS = 0.25  # gentler default spacing between per-IP lookups in a run
 
 _EMPTY = {"rdap_owner_name": None, "rdap_type": None, "maximum_cidrs": None}
 
@@ -24,8 +24,7 @@ _EMPTY = {"rdap_owner_name": None, "rdap_type": None, "maximum_cidrs": None}
 # RDAP entity roles ranked best→worst for "who owns this" — the org that holds the allocation
 # (registrant/registrar) is the useful name; abuse/technical contacts (often literally "Abuse") are
 # a last resort. Lower number = higher priority.
-_ROLE_PRIORITY = {"registrant": 0, "registrar": 1, "administrative": 2, "technical": 3,
-                  "noc": 4, "abuse": 9}
+_ROLE_PRIORITY = {"registrant": 0, "registrar": 1, "administrative": 2, "technical": 3, "noc": 4, "abuse": 9}
 
 
 def _entity_name(entity):
@@ -78,19 +77,31 @@ def _should_retry(error):
         return True
     if isinstance(error, URLError):
         reason = str(error.reason).lower()
-        return any(p in reason for p in ["timed out", "timeout", "temporarily unavailable",
-                                         "connection reset", "connection aborted",
-                                         "connection refused", "remote end closed connection"])
-    return any(p in str(error).lower() for p in ["timed out", "timeout",
-                                                 "remote end closed connection", "temporarily unavailable"])
+        return any(
+            p in reason
+            for p in [
+                "timed out",
+                "timeout",
+                "temporarily unavailable",
+                "connection reset",
+                "connection aborted",
+                "connection refused",
+                "remote end closed connection",
+            ]
+        )
+    return any(
+        p in str(error).lower()
+        for p in ["timed out", "timeout", "remote end closed connection", "temporarily unavailable"]
+    )
 
 
 def _maximum_cidrs(start_ip, end_ip):
     if not start_ip or not end_ip:
         return None
     try:
-        nets = list(ipaddress.summarize_address_range(
-            ipaddress.ip_address(start_ip), ipaddress.ip_address(end_ip)))
+        nets = list(
+            ipaddress.summarize_address_range(ipaddress.ip_address(start_ip), ipaddress.ip_address(end_ip))
+        )
         return [str(n) for n in nets]
     except (ValueError, TypeError):
         return None
@@ -110,8 +121,9 @@ def _retry_after_seconds(error) -> float | None:
 def _fetch(url):
     delay, last_error = 1.0, None
     for attempt in range(1, RDAP_MAX_RETRIES + 1):
-        request = Request(url, headers={"Accept": "application/rdap+json, application/json",
-                                        "User-Agent": FEED_USER_AGENT})
+        request = Request(
+            url, headers={"Accept": "application/rdap+json, application/json", "User-Agent": FEED_USER_AGENT}
+        )
         try:
             with urlopen(request, timeout=RDAP_TIMEOUT_SECONDS) as response:
                 return json.loads(response.read().decode("utf-8")), response.geturl(), None
