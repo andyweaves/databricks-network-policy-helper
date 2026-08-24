@@ -42,7 +42,8 @@ If the table is empty, no egress policy is logging yet — start with step 1.
 3. Optional cloud-owner lookup on internet FQDNs (`--enable-rdap`, on by default) — resolve the IP
    (audit-log `rdata` first, else DNS) and match it **offline** against the AWS/GCP/Azure/Databricks
    published ranges. Shows `resolved_ip` + `hosting_owner` (the cloud, "non-cloud / unknown", or
-   "DNS resolution failed - check egress control"). Context only.
+   `DNS_RESOLUTION_FAILED` — DNS is resolved locally on the CLI host, so this is a local
+   resolution failure, not the workspace's egress control). Context only.
 4. **Review tables** (internet + per-cloud storage) — confirm before creating.
 5. Optional **threat-intel domain blocking** (`--block-threat-domains`: off / matched_only / all) →
    `blocked_internet_destinations` (FQDN-only, enforced in any mode, takes precedence over allows).
