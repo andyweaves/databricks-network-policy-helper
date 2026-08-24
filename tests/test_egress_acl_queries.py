@@ -24,7 +24,7 @@ def test_egress_recommend_unknown_when_no_lookup():
     # owner lookup disabled (None), an explicit Unknown, or DNS failed -> don't claim a provider
     assert eg.recommend(None) == "REVIEW — owner unknown"
     assert eg.recommend("Unknown") == "REVIEW — owner unknown"
-    assert eg.recommend("DNS resolution failed - check egress control") == "REVIEW — owner unknown"
+    assert eg.recommend("DNS_RESOLUTION_FAILED") == "REVIEW — owner unknown"
 
 
 # --------------------------------------------------------------------------------- egress
@@ -594,7 +594,7 @@ def test_owner_lookup_dns_failure_is_flagged(monkeypatch):
     monkeypatch.setattr(eg.socket, "gethostbyname", lambda h: (_ for _ in ()).throw(OSError("NXDOMAIN")))
     a = _internet_analysis("nxdomain.test")
     eg._owner_lookup(a, {}, EgressConfig())  # no pre-resolved IP -> gethostbyname -> fails
-    assert a.fqdn_owner["nxdomain.test"] == "DNS resolution failed - check egress control"
+    assert a.fqdn_owner["nxdomain.test"] == "DNS_RESOLUTION_FAILED"
 
 
 def test_load_cloud_networks_builds_tuples_and_skips_bad_cidrs(monkeypatch):

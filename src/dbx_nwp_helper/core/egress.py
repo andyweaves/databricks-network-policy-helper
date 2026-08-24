@@ -176,7 +176,7 @@ def analyze(cfg: EgressConfig, sql_conn, on_step=lambda _m: None, this_workspace
 
 _CLOUD_OWNERS = {"AWS", "GCP", "AZURE", "Azure", "ORACLE", "Oracle"}
 # Owner values that mean "we couldn't identify it" rather than a real provider name.
-_UNKNOWN_OWNERS = {None, "Unknown", "DNS resolution failed - check egress control"}
+_UNKNOWN_OWNERS = {None, "Unknown", "DNS_RESOLUTION_FAILED"}
 
 
 def recommend(hosting_owner: str | None) -> str:
@@ -264,7 +264,9 @@ def _owner_lookup(analysis: EgressAnalysis, fqdn_resolved_ips: dict, cfg: Egress
                 ip = None
         analysis.fqdn_ip[fqdn] = ip
         if ip is None:
-            analysis.fqdn_owner[fqdn] = "DNS resolution failed - check egress control"
+            # DNS is resolved locally on the CLI host (socket.gethostbyname), so a failure
+            # is a local resolution failure — not evidence of the workspace's egress control.
+            analysis.fqdn_owner[fqdn] = "DNS_RESOLUTION_FAILED"
             continue
         # Cloud-range match (AWS/GCP/Azure/Oracle/Databricks) wins; else RDAP owner; else Unknown.
         owner = owner_for_ip(ip) or rdap_owner(ip) or "Unknown"
