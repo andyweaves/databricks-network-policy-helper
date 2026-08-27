@@ -665,3 +665,160 @@ def test_ingress_create_with_no_rules_exits_nonzero(monkeypatch):
     )
     assert result.exit_code == 1
     assert "Nothing to apply" in result.stdout
+
+
+# --- ported auth / account-resolution improvements ---------------------------------------------
+def _sq(text: str) -> str:
+    """Strip ANSI + all whitespace, so substring asserts survive Rich panel wrapping."""
+    return "".join(_plain(text).split())
+
+
+def test_account_host_from_workspace_host():
+    f = cli.account_host_from_workspace_host
+    # AWS prod / staging / vanity: replace the single workspace label with 'accounts'
+    assert f("https://dbc-11112222-3333.cloud.databricks.com") == "https://accounts.cloud.databricks.com"
+    assert (
+        f("https://dbc-11112222-3333.staging.cloud.databricks.com/")
+        == "https://accounts.staging.cloud.databricks.com"
+    )
+    assert f("https://acme.cloud.databricks.com") == "https://accounts.cloud.databricks.com"
+    # GCP: two workspace-specific labels (<id>.<shard>) dropped; anchor on the base domain
+    assert (
+        f("https://1111111111111111.4.staging.gcp.databricks.com")
+        == "https://accounts.staging.gcp.databricks.com"
+    )
+    assert f("https://2222222222222222.8.gcp.databricks.com") == "https://accounts.gcp.databricks.com"
+    assert f("https://acme.gcp.databricks.com") == "https://accounts.gcp.databricks.com"
+    # Azure fixed host (region label must NOT leak in)
+    assert f("https://adb-123.4.azuredatabricks.net") == "https://accounts.azuredatabricks.net"
+    # undecidable / empty -> None (caller keeps its default; user can pin --account-host)
+    assert f("https://databricks.acme.example") is None
+    assert f("") is None and f(None) is None
+
+
+def test_norm_host_strips_scheme_and_slash():
+    assert cli._norm_host("https://accounts.azuredatabricks.net/") == "accounts.azuredatabricks.net"
+    assert cli._norm_host("accounts.azuredatabricks.net") == "accounts.azuredatabricks.net"
+    assert cli._norm_host("") == "" and cli._norm_host(None) == ""
+
+
+_CFG = {
+    "az-ws": {"host": "https://adb-1.7.azuredatabricks.net", "account_id": "aaaaaaaa"},
+    "az-acct": {"host": "https://accounts.azuredatabricks.net", "account_id": "aaaaaaaa"},
+    "aws-acct": {"host": "https://accounts.staging.cloud.databricks.com", "account_id": "bbbbbbbb"},
+    "az-acct-dupe": {"host": "accounts.azuredatabricks.net", "account_id": "aaaaaaaa"},
+}
+
+
+def test_matching_account_profiles_matches_on_host_and_id(monkeypatch):
+    monkeypatch.setattr(cli, "_read_config_profiles", lambda: _CFG)
+    assert set(cli._matching_account_profiles("https://accounts.azuredatabricks.net", "aaaaaaaa")) == {
+        "az-acct",
+        "az-acct-dupe",
+    }
+    # right id but wrong host -> no match; right host but wrong id -> no match
+    assert cli._matching_account_profiles("https://accounts.azuredatabricks.net", "bbbbbbbb") == []
+    assert cli._matching_account_profiles("https://accounts.staging.cloud.databricks.com", "aaaaaaaa") == []
+    assert cli._matching_account_profiles("", "aaaaaaaa") == []
+
+
+def test_resolve_account_profile_single_match(monkeypatch, capsys):
+    from dbx_nwp_helper.config import Connection
+
+    monkeypatch.setattr(cli, "_read_config_profiles", lambda: {"az-acct": _CFG["az-acct"]})
+    conn = Connection(account_host="https://accounts.azuredatabricks.net", account_id="aaaaaaaa")
+    cli._resolve_account_profile(conn)
+    assert conn.account_profile == "az-acct"
+    assert "az-acct" in _sq(capsys.readouterr().out)
+
+
+def test_resolve_account_profile_noop_when_explicit_or_no_match(monkeypatch):
+    from dbx_nwp_helper.config import Connection
+
+    monkeypatch.setattr(cli, "_read_config_profiles", lambda: _CFG)
+    explicit = Connection(
+        account_host="https://accounts.azuredatabricks.net", account_id="aaaaaaaa", account_profile="chosen"
+    )
+    cli._resolve_account_profile(explicit)
+    assert explicit.account_profile == "chosen"
+    nomatch = Connection(account_host="https://accounts.gcp.databricks.com", account_id="nope")
+    cli._resolve_account_profile(nomatch)
+    assert nomatch.account_profile is None
+
+
+def test_resolve_account_host_derives_and_respects_explicit(capsys):
+    from dbx_nwp_helper.config import Connection
+
+    wc = type("WC", (), {"config": type("C", (), {"host": "https://acme.gcp.databricks.com"})()})()
+    derived = Connection()  # account_host_explicit defaults False
+    cli._resolve_account_host(derived, wc)
+    assert derived.account_host == "https://accounts.gcp.databricks.com"
+    pinned = Connection(account_host="https://accounts.cloud.databricks.com", account_host_explicit=True)
+    cli._resolve_account_host(pinned, wc)
+    assert pinned.account_host == "https://accounts.cloud.databricks.com"  # explicit respected
+
+
+def test_default_account_id_from_workspace(capsys):
+    from dbx_nwp_helper.config import Connection
+
+    wc = type("WC", (), {"config": type("C", (), {"account_id": "aaaaaaaa"})()})()
+    conn = Connection(account_id="")
+    cli._default_account_id_from_workspace(conn, wc)
+    assert conn.account_id == "aaaaaaaa"
+    # an explicit --account-id is not overwritten
+    explicit = Connection(account_id="explicit")
+    cli._default_account_id_from_workspace(explicit, wc)
+    assert explicit.account_id == "explicit"
+
+
+def test_looks_like_account_console():
+    f = cli._looks_like_account_console
+    assert f("https://accounts.azuredatabricks.net") is True
+    assert f("https://accounts.staging.cloud.databricks.com") is True
+    assert f("https://adb-1.7.azuredatabricks.net") is False
+    assert f("https://dbc-x.cloud.databricks.com") is False
+    assert f("") is False
+
+
+def _fake_account(ok=True, err=None):
+    class _WS:
+        def get(self, workspace_id):
+            if not ok:
+                raise err or RuntimeError("boom")
+            return object()
+
+    return type("Acct", (), {"workspaces": _WS()})()
+
+
+def test_verify_account_access_returns_account_on_success():
+    from dbx_nwp_helper.config import Connection
+
+    acct = _fake_account(ok=True)
+    assert cli._verify_account_access_or_exit(Connection(account_id="a"), acct, 42) is acct
+
+
+def test_verify_account_access_exits_cleanly_on_rejection(capsys):
+    import typer
+
+    from dbx_nwp_helper.config import Connection
+
+    conn = Connection(account_id="acc-123", account_host="https://accounts.azuredatabricks.net")
+    with pytest.raises(typer.Exit) as exc:
+        cli._verify_account_access_or_exit(conn, _fake_account(ok=False), 42)
+    assert exc.value.exit_code == 1
+    out = _sq(capsys.readouterr().out)
+    assert "acc-123" in out and "--account-profile" in out
+
+
+def test_confirm_workspace_rejects_account_console_profile(monkeypatch, capsys):
+    import typer
+
+    from dbx_nwp_helper.config import Connection
+
+    wc = type("WC", (), {"config": type("C", (), {"host": "https://accounts.azuredatabricks.net"})()})()
+    monkeypatch.setattr(cli, "_workspace_client_or_exit", lambda conn: wc)
+    with pytest.raises(typer.Exit) as exc:
+        cli._confirm_workspace(Connection(profile="az-acct"), yes=True)
+    assert exc.value.exit_code == 1
+    out = _sq(capsys.readouterr().out)
+    assert "accountconsole" in out.lower() and "--account-profile" in out

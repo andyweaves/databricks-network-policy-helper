@@ -22,6 +22,7 @@ import typer
 
 from . import console, render
 from .config import (
+    DEFAULT_ACCOUNT_HOST,
     DEFAULT_NAME_PREFIX,
     MAX_POLICY_ID_LEN,
     ApplyOptions,
@@ -97,24 +98,87 @@ class Action(str, Enum):
     add_to_existing = "add_to_existing"  # noqa: E702
 
 
-def _available_profiles() -> list[str]:
-    """Profile names configured in ~/.databrickscfg (or $DATABRICKS_CONFIG_FILE)."""
+def _read_config_profiles() -> dict[str, dict[str, str]]:
+    """Every profile in ~/.databrickscfg (or $DATABRICKS_CONFIG_FILE) as {name: {key: value}},
+    including the DEFAULT section. Empty on a missing file or any read error."""
     import configparser
     import os
 
     path = os.path.expanduser(os.environ.get("DATABRICKS_CONFIG_FILE") or "~/.databrickscfg")
     if not os.path.exists(path):
-        return []
+        return {}
     cp = configparser.ConfigParser()
     try:
         cp.read(path)
     except configparser.Error:
-        return []
+        return {}
+    out = {name: dict(cp[name]) for name in cp.sections()}
     # DEFAULT is a real, selectable profile in .databrickscfg; ConfigParser hides it in sections().
-    names = list(cp.sections())
     if cp.defaults():
+        out["DEFAULT"] = dict(cp.defaults())
+    return out
+
+
+def _available_profiles() -> list[str]:
+    """Profile names configured in ~/.databrickscfg (or $DATABRICKS_CONFIG_FILE), DEFAULT first."""
+    profiles = _read_config_profiles()
+    names = [n for n in profiles if n != "DEFAULT"]
+    if "DEFAULT" in profiles:
         names = ["DEFAULT", *names]
     return names
+
+
+def _norm_host(host: str | None) -> str:
+    """Bare, comparable host: scheme + trailing slash stripped, lower-cased."""
+    if not host:
+        return ""
+    from urllib.parse import urlparse
+
+    return urlparse(host if "://" in host else f"https://{host}").netloc.lower().rstrip("/")
+
+
+def account_host_from_workspace_host(host: str | None) -> str | None:
+    """Derive the account-console API host from a workspace host, so a workspace in a non-default
+    environment (e.g. AWS staging, GCP) reaches the matching account API instead of the AWS prod
+    default. None if it can't be derived.
+
+    * Azure — one fixed account host (accounts.azuredatabricks.net).
+    * AWS — `<deployment>.[staging.]cloud.databricks.com`; the single leading label is
+      workspace-specific, so replace it with 'accounts'.
+    * GCP — `<workspace-id>.<shard>.[staging.]gcp.databricks.com` has *two* workspace-specific leading
+      labels (id + shard) that the account console drops entirely, so anchor on the shared base
+      domain rather than stripping a fixed number of labels. Custom/vanity subdomains
+      (acme.<base>) resolve to the same shared account console."""
+    h = (host or "").strip().lower()
+    h = h.split("://", 1)[-1]  # drop any scheme
+    h = h.split("/", 1)[0]  # drop any path / trailing slash
+    if not h:
+        return None
+    if "azuredatabricks.net" in h:
+        return "https://accounts.azuredatabricks.net"
+    if "gcp.databricks.com" in h:
+        base = "staging.gcp.databricks.com" if ".staging.gcp.databricks.com" in h else "gcp.databricks.com"
+        return f"https://accounts.{base}"
+    if "cloud.databricks.com" in h:
+        _first, _, rest = h.partition(".")
+        if rest:
+            return f"https://accounts.{rest}"
+    return None
+
+
+def _matching_account_profiles(account_host: str, account_id: str) -> list[str]:
+    """Profiles in the Databricks config whose host is `account_host` AND whose account_id is
+    `account_id`. Matching on BOTH is deliberate: an account_id alone is ambiguous — the same id
+    appears under several profiles, and across environments — so pairing it with the account-console
+    host disambiguates."""
+    if not account_host or not account_id:
+        return []
+    target = _norm_host(account_host)
+    return [
+        name
+        for name, cfg in _read_config_profiles().items()
+        if _norm_host(cfg.get("host")) == target and (cfg.get("account_id") or "") == account_id
+    ]
 
 
 def _resolve_profile(profile: str | None) -> str | None:
@@ -158,9 +222,70 @@ def _conn(profile, warehouse_http_path, account_id, account_host, account_profil
         profile=profile,
         warehouse_http_path=warehouse_http_path,
         account_id=account_id or "",
-        account_host=account_host,
+        # None → not pinned: the CLI derives it from the workspace host (see _resolve_account_host).
+        account_host=account_host or DEFAULT_ACCOUNT_HOST,
+        account_host_explicit=account_host is not None,
         account_profile=account_profile,
     )
+
+
+def _resolve_account_host(conn: Connection, wc) -> None:
+    """When --account-host wasn't pinned, derive it from the workspace host so a workspace in a
+    non-default environment (AWS staging / GCP / Azure) reaches the matching account API instead of
+    the AWS prod default. An explicit --account-host is always respected. Mutates conn."""
+    if conn.account_host_explicit:
+        return
+    ws_host = getattr(getattr(wc, "config", None), "host", None)
+    derived = account_host_from_workspace_host(ws_host)
+    if derived and derived != conn.account_host:
+        console.banner(
+            "info",
+            f"Using account host '{derived}', matched to the workspace's environment. "
+            "Pass --account-host to override.",
+        )
+        conn.account_host = derived
+
+
+def _default_account_id_from_workspace(conn: Connection, wc) -> None:
+    """When --account-id wasn't given, default it from the workspace profile's own account_id (a
+    workspace .databrickscfg profile usually carries it), so the user needn't retype it — and can't
+    fat-finger a different account's id. Mutates conn."""
+    if conn.account_id:
+        return
+    ws_account_id = getattr(getattr(wc, "config", None), "account_id", None)
+    if ws_account_id:
+        conn.account_id = str(ws_account_id)
+        console.banner(
+            "info",
+            f"Using account id '{conn.account_id}' from the workspace profile. Pass --account-id to "
+            "override.",
+        )
+
+
+def _resolve_account_profile(conn: Connection) -> None:
+    """When no --account-profile was given, find a config profile matching the account host +
+    account_id and use it, so account calls authenticate as that account admin rather than whatever
+    ambient credential unified auth would otherwise resolve (a frequent source of wrong-tenant /
+    wrong-account failures). Mutates conn. No-op when --account-profile was passed or nothing
+    matches; on multiple matches it uses the first and says so."""
+    if conn.account_profile:
+        return
+    matches = _matching_account_profiles(conn.account_host, conn.account_id)
+    if not matches:
+        return  # nothing matched → fall through; the account-access probe explains any failure
+    if len(matches) > 1:
+        console.banner(
+            "info",
+            f"Multiple config profiles match account '{conn.account_id}' at {conn.account_host} "
+            f"({', '.join(matches)}); using '{matches[0]}'. Pass --account-profile to choose.",
+        )
+    else:
+        console.banner(
+            "info",
+            f"Using account profile '{matches[0]}', matched to account '{conn.account_id}' at "
+            f"{conn.account_host}. Pass --account-profile to override.",
+        )
+    conn.account_profile = matches[0]
 
 
 def _step(message: str) -> None:
@@ -303,16 +428,82 @@ def _workspace_client_or_exit(conn: Connection):
     return _client_or_exit(lambda: auth.workspace_client(conn), conn.profile, "--profile")
 
 
-def _account_client_or_exit(conn: Connection):
+def _account_client_or_exit(conn: Connection, workspace_id: int | None = None):
     """Build the account client, converting a config/profile ValueError into a clean CLI error
-    (and offering re-auth on expired credentials)."""
+    (and offering re-auth on expired credentials). First auto-resolves a matching account profile
+    from the config (so account calls don't fall back to an ambient, often wrong-tenant, credential).
+    When `workspace_id` is given, probes the account API once so a bad account credential fails fast
+    with an actionable message rather than surfacing later as a raw SDK traceback."""
     from . import auth
 
-    return _client_or_exit(
+    _resolve_account_profile(conn)
+    account = _client_or_exit(
         lambda: auth.account_client(conn),
         conn.account_profile or conn.profile,
         "--account-profile" if conn.account_profile else "--profile",
     )
+    if workspace_id is not None:
+        account = _verify_account_access_or_exit(conn, account, workspace_id)
+    return account
+
+
+def _account_access_error(e: Exception, conn: Connection) -> None:
+    """Clean, actionable exit when the account API rejects our credentials — wrong account, wrong
+    Azure AD / Entra tenant, missing account-admin rights, or (with no --account-profile) no account
+    creds resolved for the account host at all. Always raises."""
+    if conn.account_profile:
+        creds = f"the --account-profile '{conn.account_profile}' credentials"
+    else:
+        creds = (
+            "the account credentials resolved by unified auth — no --account-profile was given and no "
+            "profile in your Databricks config matches this account's host + id, so they came from "
+            "$DATABRICKS_* / an auto-discovered profile / a cached cloud login, which may be for a "
+            "different tenant or account"
+        )
+    detail = " ".join(str(e).split())[:300] or type(e).__name__
+    console.banner(
+        "danger",
+        f"Couldn't access the Databricks account API at {conn.account_host} for account "
+        f"'{conn.account_id}' using {creds}.\n"
+        f"  The API rejected the request: {type(e).__name__}: {detail}\n"
+        "  This usually means those credentials are for a different account, or (on Azure) a "
+        "different Entra ID / AAD tenant than the account console, or lack account-admin rights.\n"
+        "  Fix: pass --account-profile <name> for an account-admin login to THIS account "
+        "(create one with `databricks auth login --host <account-console-url>`), then re-run.",
+    )
+    raise typer.Exit(code=1) from None
+
+
+def _verify_account_access_or_exit(conn: Connection, account, workspace_id: int):
+    """Probe the account API once (fetch this workspace via the account API) so a bad account
+    credential fails fast with an actionable message instead of surfacing later as a raw SDK
+    traceback. On expired creds, offers the same re-auth flow as client construction and retries once
+    with a fresh client. Returns the (possibly rebuilt) account client."""
+    from . import auth
+
+    prof = conn.account_profile or conn.profile
+    retried = False
+    while True:
+        try:
+            account.workspaces.get(workspace_id=int(workspace_id))
+            return account
+        except Exception as e:  # noqa: BLE001 - any account-API failure becomes a clean exit
+            msg = str(e)
+            if not retried and _is_expired_auth(msg):
+                reauth = _reauth_profile(msg, prof)
+                if reauth and _reauthenticate(reauth):
+                    account = auth.account_client(conn)  # rebuild with the refreshed credentials
+                    retried = True
+                    continue
+            _account_access_error(e, conn)
+
+
+def _looks_like_account_console(host: str | None) -> bool:
+    """True if this host is a Databricks *account* console (accounts.*.databricks.com /
+    accounts.azuredatabricks.net) rather than a workspace. Used to catch an --account-profile
+    mistakenly passed as the workspace --profile before we call workspace-only APIs on it (those
+    return non-JSON on an account host and would otherwise blow up as a raw JSONDecodeError)."""
+    return _norm_host(host).startswith("accounts.")
 
 
 def _confirm_workspace(conn: Connection, yes: bool):
@@ -327,6 +518,17 @@ def _confirm_workspace(conn: Connection, yes: bool):
         host = (wc.config.host or "").rstrip("/") or "unknown"
     except Exception:  # noqa: BLE001 - display best-effort; real auth errors surface later in use
         host = "unknown"
+    # A profile pointing at an account console isn't a workspace and would otherwise fail deep inside
+    # get_workspace_id with a raw JSONDecodeError — catch it up front with an actionable message.
+    if _looks_like_account_console(host):
+        console.banner(
+            "danger",
+            f"The workspace profile resolves to a Databricks account console ({host}), not a "
+            "workspace — it looks like an account profile was passed as --profile.\n"
+            "  Pass a WORKSPACE profile as --profile (its host is an adb-* / dbc-* workspace URL), "
+            "and put the account profile in --account-profile.",
+        )
+        raise typer.Exit(code=1)
     try:
         ws_id = wc.get_workspace_id()
     except Exception:  # noqa: BLE001
@@ -709,7 +911,9 @@ def ingress(
         "--auto-assign.",
     ),
     account_id: str | None = typer.Option(None, help="Databricks account_id (apply/identity)."),
-    account_host: str = typer.Option("https://accounts.cloud.databricks.com", help="Account host."),
+    account_host: str | None = typer.Option(
+        None, help="Account host. When unset, derived from the workspace's environment."
+    ),
     account_profile: str | None = typer.Option(
         None, help="Profile for account-level calls (apply/identity). Defaults to unified auth."
     ),
@@ -793,7 +997,9 @@ def egress(
         "propose-only mode too.",
     ),
     account_id: str | None = typer.Option(None, help="Databricks account_id (apply)."),
-    account_host: str = typer.Option("https://accounts.cloud.databricks.com", help="Account host."),
+    account_host: str | None = typer.Option(
+        None, help="Account host. When unset, derived from the workspace's environment."
+    ),
     account_profile: str | None = typer.Option(
         None, help="Profile for account-level calls (apply/identity). Defaults to unified auth."
     ),
@@ -840,7 +1046,9 @@ def guided(
         None, help="SQL warehouse http_path. If omitted, a serverless warehouse is reused/created."
     ),
     account_id: str | None = typer.Option(None, help="Databricks account_id (apply/identity)."),
-    account_host: str = typer.Option("https://accounts.cloud.databricks.com", help="Account host."),
+    account_host: str | None = typer.Option(
+        None, help="Account host. When unset, derived from the workspace's environment."
+    ),
     account_profile: str | None = typer.Option(
         None, help="Profile for account-level calls (apply/identity). Defaults to unified auth."
     ),
@@ -915,6 +1123,11 @@ def _run_ingress(cfg: IngressConfig, conn: Connection, yes: bool) -> None:
         "Context-Based Ingress (CBI) Helper", "Propose a CBI allow-list from real audit-log source IPs."
     )
     wc = _confirm_workspace(conn, yes)
+    # Point account-level calls at the account console matching the workspace's environment and pick
+    # a matching account-admin profile + account_id, so a staging / GCP / Azure workspace doesn't
+    # fall back to the AWS prod default or an ambient (wrong-tenant) credential.
+    _resolve_account_host(conn, wc)
+    _default_account_id_from_workspace(conn, wc)
     _resolve_policy_name(cfg, conn, wc, yes)
     render.ingress_decisions(cfg)
     if cfg.policy_scope != "per_workspace":
@@ -937,7 +1150,7 @@ def _run_ingress(cfg: IngressConfig, conn: Connection, yes: bool) -> None:
     identity_resolution = None
     if cfg.scope_identity:
         with console.status("Resolving identities via account SCIM…"):
-            account = _account_client_or_exit(conn)
+            account = _account_client_or_exit(conn, workspace_id=auth.this_workspace_id(conn))
             identity_resolution = rules.resolve_identities(
                 analysis, account, note=lambda m: console.banner("info", m)
             )
@@ -970,8 +1183,8 @@ def _run_ingress(cfg: IngressConfig, conn: Connection, yes: bool) -> None:
         )
         raise typer.Exit(code=1)
 
-    account = _account_client_or_exit(conn)
     this_ws = auth.this_workspace_id(conn)
+    account = _account_client_or_exit(conn, workspace_id=this_ws)
     # Pre-check the workspace we'd bind — but only when creating AND assigning a single new policy
     # (per_workspace fans out; add_to_existing targets a chosen policy on purpose).
     if (
@@ -1016,6 +1229,10 @@ def _run_egress(cfg: EgressConfig, conn: Connection, yes: bool) -> None:
         "Propose an egress allow-list from observed outbound traffic.",
     )
     wc = _confirm_workspace(conn, yes)
+    # Point account-level calls at the account console matching the workspace's environment and pick
+    # a matching account-admin profile + account_id (see _run_ingress).
+    _resolve_account_host(conn, wc)
+    _default_account_id_from_workspace(conn, wc)
     _resolve_policy_name(cfg, conn, wc, yes)
     render.egress_decisions(cfg)
     if cfg.policy_scope != "per_workspace":
@@ -1060,9 +1277,9 @@ def _run_egress(cfg: EgressConfig, conn: Connection, yes: bool) -> None:
         )
         raise typer.Exit(code=1)
 
-    account = _account_client_or_exit(conn)
     if this_ws is None:
         this_ws = auth.this_workspace_id(conn)
+    account = _account_client_or_exit(conn, workspace_id=this_ws)
     # Pre-check the workspace we'd bind — but only when creating AND assigning a single new policy
     # (per_workspace fans out; add_to_existing targets a chosen policy on purpose).
     if (
