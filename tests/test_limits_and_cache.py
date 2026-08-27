@@ -127,6 +127,13 @@ def test_cache_clear(tmp_path, monkeypatch):
     assert cache.load("a") is None
 
 
+def test_cache_humanize_thresholds():
+    assert cache._humanize(30) == "30s ago"
+    assert cache._humanize(120) == "2m ago"
+    assert cache._humanize(7200) == "2h ago"
+    assert cache._humanize(172800) == "2d ago"
+
+
 def test_tls_enable_idempotent():
     from dbx_nwp_helper import tls
 
