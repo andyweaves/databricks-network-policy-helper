@@ -98,6 +98,21 @@ class Action(str, Enum):
     add_to_existing = "add_to_existing"  # noqa: E702
 
 
+class WarehouseSize(str, Enum):
+    """Serverless SQL warehouse cluster ("t-shirt") sizes, smallest → largest. Values are the exact
+    strings the warehouses API accepts. Typer lists them as the --warehouse-size choices."""
+
+    xxsmall = "2X-Small"
+    xsmall = "X-Small"
+    small = "Small"
+    medium = "Medium"
+    large = "Large"
+    xlarge = "X-Large"  # noqa: E702
+    xxlarge = "2X-Large"
+    xxxlarge = "3X-Large"
+    xxxxlarge = "4X-Large"  # noqa: E702
+
+
 def _read_config_profiles() -> dict[str, dict[str, str]]:
     """Every profile in ~/.databrickscfg (or $DATABRICKS_CONFIG_FILE) as {name: {key: value}},
     including the DEFAULT section. Empty on a missing file or any read error."""
@@ -216,11 +231,19 @@ def _resolve_profile(profile: str | None) -> str | None:
 
 
 # Shared connection options (used by every command that hits the workspace).
-def _conn(profile, warehouse_http_path, account_id, account_host, account_profile=None) -> Connection:
+def _conn(
+    profile,
+    warehouse_http_path,
+    account_id,
+    account_host,
+    account_profile=None,
+    warehouse_size: str = "X-Small",
+) -> Connection:
     profile = _resolve_profile(profile)
     return Connection(
         profile=profile,
         warehouse_http_path=warehouse_http_path,
+        warehouse_size=warehouse_size,
         account_id=account_id or "",
         # None → not pinned: the CLI derives it from the workspace host (see _resolve_account_host).
         account_host=account_host or DEFAULT_ACCOUNT_HOST,
@@ -572,10 +595,23 @@ def _resolve_policy_name(cfg, conn: Connection, wc, yes: bool) -> None:
     cfg.policy_name = entered or default
 
 
-def _write_json_export(path: str, payload: dict) -> str:
-    """Write `payload` as pretty JSON to `path`, and return the final path written.
-    If `path` is a directory (or ends with a separator), write `<network_policy_id>.json` inside it;
-    create missing parent dirs; and turn write failures into a clean error instead of a traceback."""
+def _confirm_overwrite(dest, yes: bool) -> bool:
+    """True if it's OK to write `dest`. A new file: always. An existing file: overwrite silently
+    with --yes / non-interactively (for scripting), otherwise prompt (default No)."""
+    import sys
+
+    if not dest.exists():
+        return True
+    if yes or not sys.stdin.isatty():
+        return True
+    return typer.confirm(typer.style(f"'{dest}' already exists — overwrite?", fg="yellow"), default=False)
+
+
+def _write_json_export(path: str, payload: dict, yes: bool = False) -> str | None:
+    """Write `payload` as pretty JSON to `path`, and return the final path written (or None if an
+    existing file was kept). If `path` is a directory (or ends with a separator), write
+    `<network_policy_id>.json` inside it; create missing parent dirs; and turn write failures into a
+    clean error instead of a traceback."""
     import json
     import os
     from pathlib import Path
@@ -584,6 +620,9 @@ def _write_json_export(path: str, payload: dict) -> str:
     if dest.is_dir() or path.endswith(("/", os.sep)):
         name = payload.get("network_policy_id") or "network-policy"
         dest = dest / f"{name}.json"
+    if not _confirm_overwrite(dest, yes):
+        console.banner("info", f"Kept existing '{dest}' — not overwritten.")
+        return None
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
         # Pin UTF-8 so a non-ASCII rule label writes identically on macOS and Windows (whose default
@@ -596,9 +635,10 @@ def _write_json_export(path: str, payload: dict) -> str:
     return str(dest)
 
 
-def _write_tf_export(path: str, payload: dict) -> str:
-    """Write a best-effort Terraform config for `payload` alongside the JSON, and return the path.
-    A directory writes `<network_policy_id>.tf` inside it; a file path takes a `.tf` suffix."""
+def _write_tf_export(path: str, payload: dict, yes: bool = False) -> str | None:
+    """Write a best-effort Terraform config for `payload` alongside the JSON, and return the path (or
+    None if an existing file was kept). A directory writes `<network_policy_id>.tf` inside it; a file
+    path takes a `.tf` suffix."""
     import os
     from pathlib import Path
 
@@ -610,6 +650,9 @@ def _write_tf_export(path: str, payload: dict) -> str:
         dest = dest / f"{name}.tf"
     else:
         dest = dest.with_suffix(".tf")
+    if not _confirm_overwrite(dest, yes):
+        console.banner("info", f"Kept existing '{dest}' — not overwritten.")
+        return None
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(terraform.network_policy_hcl(payload), encoding="utf-8")
@@ -619,13 +662,19 @@ def _write_tf_export(path: str, payload: dict) -> str:
     return str(dest)
 
 
-def _export_policy(path: str, payload: dict) -> None:
-    """Write the proposed policy as both JSON (curl / REST body) and best-effort Terraform."""
-    json_dest = _write_json_export(path, payload)
-    tf_dest = _write_tf_export(path, payload)
-    console.banner(
-        "success", f"Wrote proposed network-policy JSON to {json_dest} and Terraform to {tf_dest}."
-    )
+def _export_policy(path: str, payload: dict, yes: bool = False) -> None:
+    """Write the proposed policy as both JSON (curl / REST body) and best-effort Terraform. An
+    existing file is only overwritten after confirmation (or with --yes)."""
+    json_dest = _write_json_export(path, payload, yes)
+    tf_dest = _write_tf_export(path, payload, yes)
+    if json_dest and tf_dest:
+        console.banner(
+            "success", f"Wrote proposed network-policy JSON to {json_dest} and Terraform to {tf_dest}."
+        )
+    elif json_dest:
+        console.banner("success", f"Wrote proposed network-policy JSON to {json_dest}.")
+    elif tf_dest:
+        console.banner("success", f"Wrote proposed network-policy Terraform to {tf_dest}.")
 
 
 def _ingress_preflight(account, workspace_id, new_policy_id: str, yes: bool) -> None:
@@ -865,6 +914,13 @@ def ingress(
     warehouse_http_path: str | None = typer.Option(
         None, help="SQL warehouse http_path. If omitted, a serverless warehouse is reused/created."
     ),
+    warehouse_size: WarehouseSize = typer.Option(
+        WarehouseSize.xsmall,
+        help="Cluster size for the auto-created serverless warehouse (ignored with "
+        "--warehouse-http-path). One of: 2X-Small, X-Small (default), Small, Medium, Large, "
+        "X-Large, 2X-Large, 3X-Large, 4X-Large. Bump it if the analysis query is slow on a large "
+        "audit log.",
+    ),
     lookback_days: int = typer.Option(30, help="Days of system.access.audit history."),
     min_events: int = typer.Option(1, help="Min successful events per IP."),
     treat_null_status_as_success: bool = typer.Option(False, help="Count NULL status as success."),
@@ -878,6 +934,11 @@ def ingress(
         None, help="Comma-separated feeds (default: all). See `feeds list`."
     ),
     enable_rdap: bool = typer.Option(True, help="RDAP owner lookup (needed for 'maximum')."),
+    rdap_workers: int = typer.Option(
+        16,
+        help="Concurrent RDAP lookups (network-bound; the slow part of enrichment with many "
+        "candidate IPs). 1 = sequential. Higher is faster but hits RIR rate limits harder.",
+    ),
     refresh_feeds: bool = typer.Option(False, help="Force re-download of cached feeds."),
     policy_framing: Framing = typer.Option(Framing.minimal, help="CIDR framing."),
     scoping_mode: Scoping = typer.Option(Scoping.ip_only, help="Destination/identity scoping."),
@@ -941,6 +1002,7 @@ def ingress(
         include_account_level=include_account_level,
         threat_feeds=feeds,
         enable_rdap=enable_rdap,
+        rdap_workers=rdap_workers,
         refresh_feeds=refresh_feeds,
         policy_framing=policy_framing.value,
         scoping_mode=scoping_mode.value,
@@ -959,7 +1021,9 @@ def ingress(
             auto_assign=auto_assign,
         ),
     )
-    conn = _conn(profile, warehouse_http_path, account_id, account_host, account_profile)
+    conn = _conn(
+        profile, warehouse_http_path, account_id, account_host, account_profile, warehouse_size.value
+    )
     _run_ingress(cfg, conn, yes)
 
 
@@ -968,6 +1032,13 @@ def egress(
     profile: str | None = typer.Option(None, help="Databricks CLI/config profile."),
     warehouse_http_path: str | None = typer.Option(
         None, help="SQL warehouse http_path. If omitted, a serverless warehouse is reused/created."
+    ),
+    warehouse_size: WarehouseSize = typer.Option(
+        WarehouseSize.xsmall,
+        help="Cluster size for the auto-created serverless warehouse (ignored with "
+        "--warehouse-http-path). One of: 2X-Small, X-Small (default), Small, Medium, Large, "
+        "X-Large, 2X-Large, 3X-Large, 4X-Large. Bump it if the analysis query is slow on a large "
+        "audit log.",
     ),
     lookback_days: int = typer.Option(30, help="Days of outbound_network history."),
     min_events: int = typer.Option(1, help="Min events per destination."),
@@ -1035,7 +1106,9 @@ def egress(
             auto_assign=auto_assign,
         ),
     )
-    conn = _conn(profile, warehouse_http_path, account_id, account_host, account_profile)
+    conn = _conn(
+        profile, warehouse_http_path, account_id, account_host, account_profile, warehouse_size.value
+    )
     _run_egress(cfg, conn, yes)
 
 
@@ -1044,6 +1117,12 @@ def guided(
     profile: str | None = typer.Option(None, help="Databricks CLI/config profile."),
     warehouse_http_path: str | None = typer.Option(
         None, help="SQL warehouse http_path. If omitted, a serverless warehouse is reused/created."
+    ),
+    warehouse_size: WarehouseSize = typer.Option(
+        WarehouseSize.xsmall,
+        help="Cluster size for the auto-created serverless warehouse (ignored with "
+        "--warehouse-http-path). One of: 2X-Small, X-Small (default), Small, Medium, Large, "
+        "X-Large, 2X-Large, 3X-Large, 4X-Large.",
     ),
     account_id: str | None = typer.Option(None, help="Databricks account_id (apply/identity)."),
     account_host: str | None = typer.Option(
@@ -1056,7 +1135,9 @@ def guided(
     """Interactive Q&A wizard — walks you through building an ingress/egress policy."""
     from .guided import run_wizard
 
-    conn = _conn(profile, warehouse_http_path, account_id, account_host, account_profile)
+    conn = _conn(
+        profile, warehouse_http_path, account_id, account_host, account_profile, warehouse_size.value
+    )
     run_wizard(conn)
 
 
@@ -1106,6 +1187,57 @@ def feeds_clear():
 
 # --------------------------------------------------------------------------------- run helpers
 # These are importable by the guided wizard too, so a wizard run and a flag run share one flow.
+
+# Server-side signatures of a preview-gated SQL feature the warehouse doesn't have enabled. The
+# queries no longer use the INET functions, but this keeps any such gate a clear message not a
+# traceback (e.g. a future dependency, or an older/limited warehouse).
+_UNSUPPORTED_SQL_SIGNATURES = ("INET_FUNCTIONS_NOT_ENABLED", "is disabled or unsupported")
+
+# Signatures of a query that couldn't complete because the warehouse was too slow to respond or the
+# connection dropped. The databricks-sql connector retries up to a max duration (default 900s) and
+# then raises rather than hanging forever — good, but it surfaces as a raw traceback we should catch.
+_SQL_UNAVAILABLE_SIGNATURES = (
+    "Retry policy max retry duration",  # RequestError: retry budget exhausted
+    "Error during request to server",  # the RequestError message prefix
+    "Remote end closed connection",
+    "Max retries exceeded",
+    "Connection aborted",
+    "Connection refused",
+    "timed out",  # socket / read timeout
+)
+
+
+def _run_analysis(analyze_call):
+    """Run an engine's analysis SQL, turning known SQL/warehouse failures into a clear, actionable
+    message instead of a raw traceback. Unrecognised errors are re-raised unchanged."""
+    try:
+        return analyze_call()
+    except Exception as e:  # noqa: BLE001 - narrowed by message signature below, else re-raised
+        msg = str(e)
+        if any(sig in msg for sig in _UNSUPPORTED_SQL_SIGNATURES):
+            console.banner(
+                "danger",
+                "The SQL warehouse rejected a function this tool needs — the workspace looks to be "
+                "missing a required (preview) SQL capability:\n\n"
+                f"    {msg.strip().splitlines()[0]}\n\n"
+                "Try a different warehouse/workspace where the feature is enabled, or raise it with "
+                "Databricks. Nothing was written.",
+            )
+            raise typer.Exit(code=1) from None
+        if any(sig in msg for sig in _SQL_UNAVAILABLE_SIGNATURES):
+            console.banner(
+                "danger",
+                "The analysis query didn't complete — the SQL warehouse was too slow to respond or "
+                "the connection dropped (the client retried up to its timeout, then gave up rather "
+                "than hang).\n"
+                "  Try again once the warehouse is running/warmed up; lighten the query with a "
+                "smaller --lookback-days or a higher --min-events; or point --warehouse-http-path at "
+                "a larger warehouse. Nothing was written.",
+            )
+            raise typer.Exit(code=1) from None
+        raise
+
+
 def _run_ingress(cfg: IngressConfig, conn: Connection, yes: bool) -> None:
     from . import auth, sql
     from .core import ingress as ing
@@ -1134,15 +1266,26 @@ def _run_ingress(cfg: IngressConfig, conn: Connection, yes: bool) -> None:
         _note_policy_name(cfg.policy_name)
     _confirm_params(yes)
 
-    # Account-level work (apply, or identity scoping via SCIM) needs an account_id — prompt for it up
-    # front rather than failing after the analysis + enrichment have already run.
+    # Account-level work (apply, or identity scoping via SCIM) needs account-admin auth. Resolve it
+    # ALL up front — account_id, a matching account-admin profile, and a built + verified account
+    # client — right after params are confirmed and BEFORE the (potentially slow) analysis, feed
+    # downloads, and RDAP lookups run. That way wrong-account / wrong-tenant / not-account-admin
+    # credentials fail in seconds with a clear message, instead of after the whole analysis. The one
+    # client is reused for both SCIM and the apply below.
+    account = None
+    this_ws = None
     if cfg.apply.create_policy or cfg.scope_identity:
         reason = "Creating a policy" if cfg.apply.create_policy else "Identity scoping (SCIM)"
         _ensure_account_id(conn, reason)
+        _resolve_account_profile(conn)
+        this_ws = auth.this_workspace_id(conn)
+        account = _account_client_or_exit(conn, workspace_id=this_ws)
 
     http_path = sql.resolve_warehouse(conn)
     with sql.connection(conn, http_path) as sconn:
-        analysis = ing.analyze(cfg, sconn, wc, on_step=_step)
+        analysis = _run_analysis(
+            lambda: ing.analyze(cfg, sconn, wc, on_step=_step, status=console.status)
+        )
 
     render.ingress_analysis(analysis, cfg)
     _checkpoint(yes)
@@ -1150,7 +1293,6 @@ def _run_ingress(cfg: IngressConfig, conn: Connection, yes: bool) -> None:
     identity_resolution = None
     if cfg.scope_identity:
         with console.status("Resolving identities via account SCIM…"):
-            account = _account_client_or_exit(conn, workspace_id=auth.this_workspace_id(conn))
             identity_resolution = rules.resolve_identities(
                 analysis, account, note=lambda m: console.banner("info", m)
             )
@@ -1166,10 +1308,9 @@ def _run_ingress(cfg: IngressConfig, conn: Connection, yes: bool) -> None:
             payload = rules.export_payload(
                 policies, cfg, conn.account_id or "", auth.this_workspace_id(conn), profile=conn.profile
             )
-            _export_policy(cfg.export, payload)
+            _export_policy(cfg.export, payload, yes)
         else:
             console.banner("warn", "Nothing to export — the analysis produced no ingress rules.")
-    _checkpoint(yes)
 
     if not cfg.apply.create_policy:
         console.banner("info", "Propose-only run (no --create-policy). Nothing was written.")
@@ -1183,8 +1324,7 @@ def _run_ingress(cfg: IngressConfig, conn: Connection, yes: bool) -> None:
         )
         raise typer.Exit(code=1)
 
-    this_ws = auth.this_workspace_id(conn)
-    account = _account_client_or_exit(conn, workspace_id=this_ws)
+    # account + this_ws were resolved and verified up front (the create-policy path guarantees it).
     # Pre-check the workspace we'd bind — but only when creating AND assigning a single new policy
     # (per_workspace fans out; add_to_existing targets a chosen policy on purpose).
     if (
@@ -1239,15 +1379,40 @@ def _run_egress(cfg: EgressConfig, conn: Connection, yes: bool) -> None:
         _note_policy_name(cfg.policy_name)
     _confirm_params(yes)
 
+    # Resolve account-admin auth ALL up front when we'll create a policy — account_id, a matching
+    # account-admin profile, and a built + verified account client — BEFORE the (potentially slow)
+    # analysis runs, so wrong-account / wrong-tenant / not-account-admin credentials fail in seconds
+    # with a clear message rather than after the whole analysis. Reused for the preflight + apply.
+    account = None
     if cfg.apply.create_policy:
         _ensure_account_id(conn, "Creating a policy")
+        _resolve_account_profile(conn)
 
     # current_workspace scope needs this workspace's id to both filter analysis and name the policy.
     this_ws = auth.this_workspace_id(conn) if cfg.policy_scope == "current_workspace" else None
 
+    # The workspace we'd probe/bind is always "this" workspace, independent of the analysis scope.
+    apply_ws = None
+    if cfg.apply.create_policy:
+        apply_ws = this_ws if this_ws is not None else auth.this_workspace_id(conn)
+        account = _account_client_or_exit(conn, workspace_id=apply_ws)
+
+    # The workspace's cloud gates which storage-destination type the egress policy can carry (the API
+    # rejects cross-cloud storage, e.g. Azure storage on an AWS workspace) — derive it from the host.
+    ws_cloud = eg.workspace_cloud_from_host(getattr(getattr(wc, "config", None), "host", None))
+
     http_path = sql.resolve_warehouse(conn)
     with sql.connection(conn, http_path) as sconn:
-        analysis = eg.analyze(cfg, sconn, on_step=_step, this_workspace_id=this_ws)
+        analysis = _run_analysis(
+            lambda: eg.analyze(
+                cfg,
+                sconn,
+                on_step=_step,
+                this_workspace_id=this_ws,
+                workspace_cloud=ws_cloud,
+                status=console.status,
+            )
+        )
 
     render.egress_analysis(analysis)
     _checkpoint(yes)
@@ -1260,10 +1425,9 @@ def _run_egress(cfg: EgressConfig, conn: Connection, yes: bool) -> None:
         if previews:
             # this_ws is set for current_workspace (the only scope whose name uses it); None otherwise.
             payload = eg.export_payload(analysis, cfg, conn.account_id or "", this_ws, profile=conn.profile)
-            _export_policy(cfg.export, payload)
+            _export_policy(cfg.export, payload, yes)
         else:
             console.banner("warn", "Nothing to export — no egress destinations were classified.")
-    _checkpoint(yes)
 
     if not cfg.apply.create_policy:
         console.banner("info", "Propose-only run (no --create-policy). Nothing was written.")
@@ -1277,9 +1441,7 @@ def _run_egress(cfg: EgressConfig, conn: Connection, yes: bool) -> None:
         )
         raise typer.Exit(code=1)
 
-    if this_ws is None:
-        this_ws = auth.this_workspace_id(conn)
-    account = _account_client_or_exit(conn, workspace_id=this_ws)
+    # account + apply_ws were resolved and verified up front (the create-policy path guarantees it).
     # Pre-check the workspace we'd bind — but only when creating AND assigning a single new policy
     # (per_workspace fans out; add_to_existing targets a chosen policy on purpose).
     if (
@@ -1287,8 +1449,8 @@ def _run_egress(cfg: EgressConfig, conn: Connection, yes: bool) -> None:
         and cfg.apply.policy_action == "create_new"
         and cfg.policy_scope in ("current_workspace", "all_workspaces")
     ):
-        new_id = eg._single_policy_id(cfg, conn.profile, this_ws)
-        _egress_preflight(account, this_ws, new_id, yes)
+        new_id = eg._single_policy_id(cfg, conn.profile, apply_ws)
+        _egress_preflight(account, apply_ws, new_id, yes)
 
     if not _confirm_write(cfg.policy_mode, yes):
         console.banner("info", "Aborted — nothing written.")
@@ -1300,7 +1462,7 @@ def _run_egress(cfg: EgressConfig, conn: Connection, yes: bool) -> None:
             cfg,
             account,
             conn.account_id,
-            this_ws,
+            apply_ws,
             profile=conn.profile,
             note=lambda m: console.banner("info", m),
         )

@@ -12,6 +12,7 @@ import re
 import socket
 from collections import defaultdict
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 
 import pandas as pd
@@ -37,6 +38,24 @@ _AZ = re.compile(r"^(?P<acct>[a-z0-9]+)\.(?P<svc>blob|dfs|file)\.core\.windows\.
 # ThreatFox — abuse.ch botnet-C2 IOC hostfile (free, no key). Best FQDN fit for the exfil use case.
 THREAT_FEEDS = {"threatfox": "https://threatfox.abuse.ch/downloads/hostfile/"}
 
+# Databricks-owned domains. The egress API rejects any host in these as an internet destination
+# ("Workspace URL '…' not allowed as internet destination: `allowed_internet_destinations`") —
+# workspace URLs (which also front model-serving endpoints at a path), Databricks Apps
+# (*.databricksapps.com), and control-plane / platform service hosts are all platform-internal, not
+# general internet egress. We match on these public, well-known domain suffixes rather than any
+# specific hostname; the match is deliberately broad (the whole family) because allow-listing any of
+# them fails the apply. Matched hosts are classified separately so they're flagged for the operator
+# but never placed in the allow-list.
+_DATABRICKS_URL_SUFFIXES = (
+    ".databricks.com",  # workspaces (*.cloud/*.gcp[.staging]), docs, and control-plane service hosts
+    ".azuredatabricks.net",  # Azure workspaces (adb-*)
+    ".databricksapps.com",  # Databricks Apps
+)
+
+
+def _is_databricks_url(host: str) -> bool:
+    return host in ("databricks.com", "azuredatabricks.net") or host.endswith(_DATABRICKS_URL_SUFFIXES)
+
 
 @dataclass
 class EgressAnalysis:
@@ -49,6 +68,17 @@ class EgressAnalysis:
     # S3 buckets dropped because a region couldn't be determined (region is required by the API for
     # AWS storage destinations). List of bucket names.
     dropped_s3_no_region: list = field(default_factory=list)
+    # Databricks workspace / Apps / model-serving URLs observed in egress but excluded from the
+    # allow-list (the API rejects them as internet destinations). List of hostnames — flagged only.
+    skipped_databricks_urls: list = field(default_factory=list)
+    # Internet FQDNs excluded because they resolve only to non-routable IPs (loopback / private /
+    # link-local / reserved). List of (fqdn, ip, reason) — flagged only, never allow-listed.
+    skipped_nonglobal_fqdns: list = field(default_factory=list)
+    # The workspace's cloud ('aws'/'azure'/'gcp'/None) — used to keep only its storage type.
+    workspace_cloud: str | None = None
+    # Storage destinations excluded because their cloud != the workspace's (the API rejects them).
+    # List of (provider_label, display_name) — flagged only, never allow-listed.
+    skipped_cross_cloud_storage: list = field(default_factory=list)
 
 
 def _classify(host: str) -> tuple[str, dict]:
@@ -66,6 +96,10 @@ def _classify(host: str) -> tuple[str, dict]:
     a = _AZ.match(h)
     if a:
         return "azure", {"account": a.group("acct"), "service": a.group("svc")}
+    if _is_databricks_url(h):
+        # A Databricks-owned URL (workspace / Apps / model-serving / platform) — unsupported as an
+        # egress internet destination; flagged and excluded rather than added (the API rejects it).
+        return "databricks_url", {"host": h}
     return "internet", {"fqdn": h}
 
 
@@ -94,24 +128,58 @@ def _infer_s3_region(bucket: str) -> str | None:
     return None
 
 
-def analyze(cfg: EgressConfig, sql_conn, on_step=lambda _m: None, this_workspace_id=None) -> EgressAnalysis:
+def workspace_cloud_from_host(host: str | None) -> str | None:
+    """The workspace's cloud ('aws' / 'azure' / 'gcp') from its host, or None if it can't be told.
+    Used to keep only the matching storage-destination type in the egress policy — the API rejects a
+    cross-cloud storage destination (e.g. an Azure storage destination on an AWS workspace)."""
+    if not host:
+        return None
+    h = host.lower()
+    if "azuredatabricks.net" in h:
+        return "azure"
+    if "gcp.databricks.com" in h:
+        return "gcp"
+    if "cloud.databricks.com" in h:
+        return "aws"
+    return None
+
+
+# The single storage kind each cloud's egress policy accepts (the typed storage destination must
+# match the workspace's own cloud).
+_CLOUD_STORAGE_KIND = {"aws": "s3", "azure": "azure", "gcp": "gcs"}
+
+
+def analyze(
+    cfg: EgressConfig,
+    sql_conn,
+    on_step=lambda _m: None,
+    this_workspace_id=None,
+    workspace_cloud: str | None = None,
+    status=None,
+) -> EgressAnalysis:
+    """`on_step(msg)` logs a persistent progress line; `status(msg)` (optional) is a context manager
+    for an animated spinner around a long blocking step (the query, the RDAP owner sweep)."""
     from .. import queries, sql
+
+    def _phase(msg):
+        return status(msg) if status is not None else nullcontext()
 
     only_ws = this_workspace_id if cfg.policy_scope == "current_workspace" else None
     if only_ws is not None:
         on_step(f"Scope=current_workspace — restricting analysis to workspace {only_ws}.")
 
-    on_step("Querying observed egress destinations…")
-    observed = sql.query(
-        sql_conn,
-        queries.observed_egress(
-            cfg.lookback_days, cfg.min_events, cfg.source_type_filter, only_workspace_id=only_ws
-        ),
-    )
+    with _phase("Querying observed egress destinations… (large logs can take a few minutes)"):
+        observed = sql.query(
+            sql_conn,
+            queries.observed_egress(
+                cfg.lookback_days, cfg.min_events, cfg.source_type_filter, only_workspace_id=only_ws
+            ),
+        )
 
     targets = defaultdict(_new_target)
     fqdn_resolved_ips = {}
     skipped_bare_s3 = 0
+    skipped_dbx: dict[str, int] = {}  # Databricks workspace/app/serving URL -> events (flagged, excluded)
     s3_region_cache: dict[str, str | None] = {}  # bucket -> region (inferred once), None if unknown
     dropped_s3: dict[str, bool] = {}  # bucket -> True once dropped (dedupe warnings)
     for r in observed.to_dict(orient="records"):
@@ -141,6 +209,10 @@ def analyze(cfg: EgressConfig, sql_conn, on_step=lambda _m: None, this_workspace
             for ip in as_list(r.get("resolved_ips")):
                 if ip not in ips:
                     ips.append(ip)
+        elif kind == "databricks_url":
+            # Unsupported as an egress internet destination — collect for the flag, never allow-list.
+            skipped_dbx[info["host"]] = skipped_dbx.get(info["host"], 0) + events
+            continue
         else:
             skipped_bare_s3 += 1
             continue
@@ -161,11 +233,22 @@ def analyze(cfg: EgressConfig, sql_conn, on_step=lambda _m: None, this_workspace
         targets=dict(targets),
         skipped_bare_s3=skipped_bare_s3,
         dropped_s3_no_region=sorted(dropped_s3),
+        skipped_databricks_urls=sorted(skipped_dbx),
+        workspace_cloud=workspace_cloud,
     )
 
+    # Drop + flag storage destinations whose cloud doesn't match the workspace's — the egress API
+    # only accepts the workspace-cloud's storage type (e.g. no Azure storage on an AWS workspace).
+    _exclude_cross_cloud_storage(analysis, workspace_cloud)
+
     if cfg.enable_rdap:
-        on_step("Matching internet FQDNs to a cloud owner (offline range match)…")
-        _owner_lookup(analysis, fqdn_resolved_ips, cfg)
+        n_fqdns = len(union(analysis.targets, "internet"))
+        with _phase(f"Resolving + owner-matching {n_fqdns} internet FQDN(s) (RDAP where needed)…"):
+            _owner_lookup(analysis, fqdn_resolved_ips, cfg)
+
+    # Drop + flag FQDNs that resolve only to non-routable IPs (loopback / private / reserved). Runs
+    # regardless of RDAP — it uses the DNS-event resolved IPs, falling back to any owner-lookup one.
+    _exclude_nonglobal_fqdns(analysis, fqdn_resolved_ips)
 
     if cfg.block_threat_domains != "off":
         on_step(f"Loading threat-domain feed '{cfg.threat_feed}'…")
@@ -271,6 +354,99 @@ def _owner_lookup(analysis: EgressAnalysis, fqdn_resolved_ips: dict, cfg: Egress
         # Cloud-range match (AWS/GCP/Azure/Oracle/Databricks) wins; else RDAP owner; else Unknown.
         owner = owner_for_ip(ip) or rdap_owner(ip) or "Unknown"
         analysis.fqdn_owner[fqdn] = owner
+
+
+def _nonglobal_reason(ip_str: str) -> str | None:
+    """A short reason if `ip_str` is a non-globally-routable address (so it can't be a real internet
+    egress destination), else None. Ordered so the most specific label wins (is_private also covers
+    loopback/link-local in the stdlib, so those are checked first)."""
+    try:
+        addr = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return None
+    if addr.is_global:
+        return None
+    if addr.is_unspecified:
+        return "unspecified"
+    if addr.is_loopback:
+        return "loopback"
+    if addr.is_link_local:
+        return "link-local"
+    if addr.is_private:
+        return "private/internal"
+    if addr.is_multicast:
+        return "multicast"
+    if addr.is_reserved:
+        return "reserved"
+    if addr.is_unspecified:
+        return "unspecified"
+    return "non-global"
+
+
+def _exclude_nonglobal_fqdns(analysis: EgressAnalysis, fqdn_resolved_ips: dict) -> None:
+    """Drop (and flag) internet FQDNs whose resolved IP(s) are ALL non-globally-routable — loopback
+    (127.0.0.1), RFC1918/CGNAT private ranges, link-local, reserved, etc. These are usually a local
+    DNS/hosts artefact on the analysis host rather than a genuine outbound destination, and can't be
+    a valid egress internet destination. A FQDN with at least one global IP is kept. Mutates
+    analysis.targets and records analysis.skipped_nonglobal_fqdns as (fqdn, ip, reason)."""
+    excluded = []
+    for fqdn in sorted(union(analysis.targets, "internet")):
+        ips = list(fqdn_resolved_ips.get(fqdn) or [])
+        single = analysis.fqdn_ip.get(fqdn)  # the owner-lookup-resolved IP (when RDAP ran)
+        if single and single not in ips:
+            ips.append(single)
+        if not ips:
+            continue  # nothing resolved — can't judge; leave it for review rather than dropping it
+        reasons = [(ip, _nonglobal_reason(ip)) for ip in ips]
+        # Exclude only when EVERY resolved IP is non-global — a single global IP means it's reachable.
+        if all(reason for _ip, reason in reasons):
+            ip, reason = next((ip, r) for ip, r in reasons if r)
+            excluded.append((fqdn, ip, reason))
+    if not excluded:
+        return
+    drop = {fqdn for fqdn, _ip, _r in excluded}
+    for t in analysis.targets.values():
+        for fqdn in drop:
+            t["internet"].pop(fqdn, None)
+    analysis.skipped_nonglobal_fqdns = excluded
+
+
+def _storage_display_name(kind: str, name) -> str:
+    if kind == "s3":
+        bucket, region = name
+        return f"{bucket} ({region})" if region else bucket
+    if kind == "azure":
+        acct, svc = name
+        return f"{acct}.{svc}"
+    return name  # gcs: bucket name
+
+
+def _exclude_cross_cloud_storage(analysis: EgressAnalysis, cloud: str | None) -> None:
+    """Drop (and flag) storage destinations whose cloud isn't the workspace's — a cloud's egress
+    policy only accepts its own storage type (AWS→S3, Azure→Azure, GCP→GCS), so a cross-cloud storage
+    destination is rejected by the API. Unknown cloud → no filtering (leave it to the API). Mutates
+    analysis.targets and records analysis.skipped_cross_cloud_storage as (provider_label, name).
+
+    NB: for per_workspace scope this filters every target by *this* workspace's cloud; a mixed-cloud
+    per_workspace run could over-exclude, but detecting each workspace's cloud needs per-workspace
+    account calls — out of scope here."""
+    keep = _CLOUD_STORAGE_KIND.get(cloud or "")
+    if keep is None:
+        return
+    labels = {"s3": "AWS S3", "gcs": "GCS", "azure": "Azure"}
+    excluded: dict[str, str] = {}  # display_name -> provider_label (deduped across targets)
+    for kind in ("s3", "gcs", "azure"):
+        if kind == keep:
+            continue
+        for t in analysis.targets.values():
+            d = t[kind]
+            for name in list(d):
+                d.pop(name)
+                excluded[_storage_display_name(kind, name)] = labels[kind]
+    if excluded:
+        analysis.skipped_cross_cloud_storage = sorted(
+            (label, name) for name, label in excluded.items()
+        )
 
 
 def _host_hostfile(line: str) -> str:

@@ -91,6 +91,60 @@ def test_analyze_runs_funnel_only_when_empty(monkeypatch):
     assert a.funnel["distinct_public_ok_ws"] == 0
 
 
+def test_enrich_candidates_reports_rdap_progress(monkeypatch):
+    # progress is reported per RDAP lookup (the slow, network-bound step) so the spinner tracks it.
+    # workers=1 keeps completion order deterministic for the assertion.
+    from dbx_nwp_helper.feeds import rdap
+
+    monkeypatch.setattr(rdap, "lookup", lambda ip: dict(rdap._EMPTY))  # no network
+    candidates = pd.DataFrame(
+        [
+            {"public_ip": ip, "events": 1, "principals": 1, "principal_list": [], "principal_emails": [],
+             "subject_names": [], "workspace_ids": [], "service_list": []}
+            for ip in ("8.8.8.8", "1.1.1.1", "9.9.9.9")
+        ]
+    )
+    calls = []
+    ing._enrich_candidates(
+        candidates,
+        IngressConfig(enable_rdap=True, rdap_workers=1),
+        [],
+        [],
+        [],
+        on_progress=lambda done, total, ip: calls.append((done, total, ip)),
+    )
+    assert calls == [(1, 3, "8.8.8.8"), (2, 3, "1.1.1.1"), (3, 3, "9.9.9.9")]
+
+
+def test_rdap_lookups_concurrent_dedupes_and_covers_all(monkeypatch):
+    # concurrent path: every distinct IP is resolved exactly once, progress counts up to the total.
+    from dbx_nwp_helper.feeds import rdap
+
+    seen = []
+    monkeypatch.setattr(rdap, "lookup", lambda ip: seen.append(ip) or {"rdap_owner_name": ip})
+    ips = ["1.1.1.1", "2.2.2.2", "1.1.1.1", "3.3.3.3"]  # a duplicate to prove de-duping
+    progress = []
+    cache = ing._rdap_lookups(ips, workers=4, on_progress=lambda d, t, ip: progress.append((d, t)))
+    assert set(cache) == {"1.1.1.1", "2.2.2.2", "3.3.3.3"}
+    assert sorted(seen) == ["1.1.1.1", "2.2.2.2", "3.3.3.3"]  # deduped -> 3 lookups, not 4
+    assert [d for d, _t in progress] == [1, 2, 3] and progress[-1][1] == 3
+
+
+def test_rdap_lookups_single_failure_degrades(monkeypatch):
+    # one lookup raising must not sink the sweep — it becomes the empty result.
+    from dbx_nwp_helper.feeds import rdap
+
+    def flaky(ip):
+        if ip == "2.2.2.2":
+            raise RuntimeError("rdap boom")
+        return {"rdap_owner_name": "ok"}
+
+    monkeypatch.setattr(rdap, "lookup", flaky)
+    cache = ing._rdap_lookups(["1.1.1.1", "2.2.2.2"], workers=2)
+    assert cache["1.1.1.1"]["rdap_owner_name"] == "ok"
+    assert cache["2.2.2.2"] == rdap._EMPTY
+
+
 def test_render_hint_account_level(capsys):
     # public IPs exist but only account-level -> hint to use --include-account-level.
     funnel = {

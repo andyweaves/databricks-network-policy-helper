@@ -326,6 +326,36 @@ def egress_analysis(analysis: EgressAnalysis) -> None:
             f"storage rule): {buckets}. Add them manually with their region if "
             f"needed.",
         )
+    if analysis.skipped_databricks_urls:
+        hosts = ", ".join(analysis.skipped_databricks_urls)
+        console.banner(
+            "warn",
+            f"Excluded {len(analysis.skipped_databricks_urls)} Databricks workspace / Apps / "
+            f"model-serving URL(s) — these are platform-internal and can't be set as egress internet "
+            f"destinations (the API rejects them), so they're flagged here but NOT added to the "
+            f"policy: {hosts}.",
+        )
+    if analysis.skipped_nonglobal_fqdns:
+        items = ", ".join(
+            f"{fqdn} → {ip} ({reason})" for fqdn, ip, reason in analysis.skipped_nonglobal_fqdns
+        )
+        console.banner(
+            "warn",
+            f"Excluded {len(analysis.skipped_nonglobal_fqdns)} FQDN(s) that resolve only to "
+            f"non-routable IPs (loopback / private / link-local / reserved) — these can't be real "
+            f"internet egress (often a local DNS/hosts artefact on the analysis host), so they're "
+            f"flagged here but NOT added to the policy: {items}.",
+        )
+    if analysis.skipped_cross_cloud_storage:
+        items = ", ".join(f"{name} ({label})" for label, name in analysis.skipped_cross_cloud_storage)
+        ctx = (analysis.workspace_cloud or "this").upper()
+        console.banner(
+            "warn",
+            f"Excluded {len(analysis.skipped_cross_cloud_storage)} cross-cloud storage destination(s) "
+            f"— a {ctx}-context egress policy only supports its own cloud's storage type, so the API "
+            f"rejects these; they're flagged here but NOT added to the policy (allow-list them "
+            f"another way if the workload genuinely needs them): {items}.",
+        )
 
 
 def egress_preview(previews: dict, cfg: EgressConfig) -> None:

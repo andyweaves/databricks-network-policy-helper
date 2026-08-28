@@ -46,6 +46,9 @@ class Connection:
     warehouse_http_path: str | None = None
     # When no warehouse path is given, the CLI reuses/creates a serverless warehouse; store its name.
     warehouse_name: str = "dbx-nwp-helper"
+    # Cluster ("t-shirt") size for that auto-created warehouse. Default X-Small; bump for large audit
+    # logs. Ignored when --warehouse-http-path points at an existing warehouse.
+    warehouse_size: str = "X-Small"
     account_id: str = ""
     account_host: str = DEFAULT_ACCOUNT_HOST
     # Whether --account-host was set explicitly. When False, the CLI derives the account host from the
@@ -79,6 +82,9 @@ class IngressConfig:
     # Enrichment
     threat_feeds: list[str] = field(default_factory=lambda: list(THREAT_FEEDS))
     enable_rdap: bool = True
+    # How many RDAP owner lookups to run concurrently (they're network-bound and independent). 1 =
+    # sequential. Higher is faster but hits RIR rate limits harder (lookups retry/back off on 429).
+    rdap_workers: int = 16
     refresh_feeds: bool = False
     # Policy shape
     policy_framing: str = "minimal"

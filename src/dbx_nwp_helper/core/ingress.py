@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ipaddress
 from collections import defaultdict
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 
 import pandas as pd
@@ -19,6 +20,24 @@ from ..feeds import loaders, rdap
 from . import enrich
 
 ALL_WORKSPACES = "__ALL__"
+
+# Signatures of a warehouse that doesn't have the (preview) INET SQL builtins enabled.
+_INET_UNAVAILABLE_SIGNATURES = ("INET_FUNCTIONS_NOT_ENABLED", "is disabled or unsupported")
+
+
+def _detect_inet(sql_conn) -> bool:
+    """True if the warehouse has the INET SQL builtins (the fast path). Runs a tiny probe once; a
+    clean result → available; the INET-disabled error → fall back to the portable query path; any
+    other error (e.g. a timeout) propagates so it's surfaced, not silently downgraded."""
+    from .. import queries, sql
+
+    try:
+        sql.query(sql_conn, queries.INET_PROBE)
+        return True
+    except Exception as e:  # noqa: BLE001 - only the INET-disabled signature is swallowed
+        if any(s in str(e) for s in _INET_UNAVAILABLE_SIGNATURES):
+            return False
+        raise
 
 
 @dataclass
@@ -41,47 +60,69 @@ class IngressAnalysis:
     funnel: dict | None = None
 
 
-def analyze(cfg: IngressConfig, sql_conn, workspace_client, on_step=lambda _m: None) -> IngressAnalysis:
-    """Run SQL + enrichment and produce the candidate/suggestion/threat-match review tables."""
+def analyze(
+    cfg: IngressConfig, sql_conn, workspace_client, on_step=lambda _m: None, status=None
+) -> IngressAnalysis:
+    """Run SQL + enrichment and produce the candidate/suggestion/threat-match review tables.
+
+    `on_step(msg)` logs a persistent progress line; `status(msg)` (optional) is a context manager for
+    an animated spinner around a long blocking step, so a slow query doesn't look like a hang."""
     from .. import queries, sql
+
+    def _phase(msg):
+        return status(msg) if status is not None else nullcontext()
 
     # current_workspace scope restricts the analysis to this workspace's own traffic.
     only_ws = workspace_client.get_workspace_id() if cfg.policy_scope == "current_workspace" else None
     if only_ws is not None:
         on_step(f"Scope=current_workspace — restricting analysis to workspace {only_ws}.")
 
-    on_step("Querying frequent public source IPs…")
-    candidates = sql.query(
-        sql_conn,
-        queries.frequent_public_ips(
-            cfg.lookback_days,
-            cfg.min_events,
-            cfg.include_ipv6,
-            cfg.treat_null_status_as_success,
-            cfg.include_account_level,
-            only_workspace_id=only_ws,
-        ),
+    # Prefer the native INET SQL builtins (fast); fall back to the portable query path only where a
+    # probe shows they're not enabled on this warehouse.
+    with _phase("Checking SQL IP-function support…"):
+        use_inet = _detect_inet(sql_conn)
+    on_step(
+        "Using native INET SQL functions (fast path)."
+        if use_inet
+        else "INET SQL functions unavailable — using the portable IP query path (slower)."
     )
+
+    with _phase("Querying frequent public source IPs… (large audit logs can take a few minutes)"):
+        candidates = sql.query(
+            sql_conn,
+            queries.frequent_public_ips(
+                cfg.lookback_days,
+                cfg.min_events,
+                cfg.include_ipv6,
+                cfg.treat_null_status_as_success,
+                cfg.include_account_level,
+                only_workspace_id=only_ws,
+                use_inet=use_inet,
+            ),
+        )
 
     # When there are no candidates, run a cheap diagnostic funnel so we can explain *why* rather than
     # just reporting an empty table (the most common confusion: public IPs live on account-level rows,
     # or PrivateLink/NAT masks the real source IP).
     funnel = None
     if candidates.empty:
-        on_step("No candidates — running a diagnostic funnel to explain why…")
-        fdf = sql.query(
-            sql_conn, queries.candidate_funnel(cfg.lookback_days, cfg.treat_null_status_as_success)
-        )
+        with _phase("No candidates — running a diagnostic funnel to explain why…"):
+            fdf = sql.query(
+                sql_conn,
+                queries.candidate_funnel(
+                    cfg.lookback_days, cfg.treat_null_status_as_success, use_inet=use_inet
+                ),
+            )
         funnel = fdf.to_dict(orient="records")[0] if not fdf.empty else None
 
-    on_step("Reading the workspace IP access list + denied requests…")
-    ip_acls = _read_ip_acls(workspace_client)
-    denied = sql.query(sql_conn, queries.denied_requests(cfg.lookback_days))
+    with _phase("Reading the workspace IP access list + recently denied requests…"):
+        ip_acls = _read_ip_acls(workspace_client)
+        denied = sql.query(sql_conn, queries.denied_requests(cfg.lookback_days, use_inet=use_inet))
 
-    on_step("Loading enrichment feeds (threat-intel / cloud / Databricks ranges)…")
-    threat_df = loaders.threat_intel(cfg.threat_feeds, refresh=cfg.refresh_feeds)
-    cloud_df = loaders.cloud_ranges(refresh=cfg.refresh_feeds)
-    dbx_df = loaders.databricks_ranges(refresh=cfg.refresh_feeds)
+    with _phase("Loading enrichment feeds (threat-intel / cloud / Databricks ranges)…"):
+        threat_df = loaders.threat_intel(cfg.threat_feeds, refresh=cfg.refresh_feeds)
+        cloud_df = loaders.cloud_ranges(refresh=cfg.refresh_feeds)
+        dbx_df = loaders.databricks_ranges(refresh=cfg.refresh_feeds)
     on_step(
         f"Loaded enrichment ranges: {len(threat_df):,} threat-intel, {len(cloud_df):,} cloud, "
         f"{len(dbx_df):,} Databricks."
@@ -98,10 +139,21 @@ def analyze(cfg: IngressConfig, sql_conn, workspace_client, on_step=lambda _m: N
     cloud_ranges = enrich.load_ranges(cloud_df, ["provider", "service", "region"])
     databricks_ranges = enrich.load_ranges(dbx_df, ["platform", "region", "direction"])
 
-    on_step("Enriching candidate IPs (RDAP owner lookup, range membership)…")
-    enriched, threat_match_rows = _enrich_candidates(
-        candidates, cfg, threat_ranges, cloud_ranges, databricks_ranges
+    # RDAP is the slow, network-bound step — run concurrently (see _rdap_lookups) with live per-IP
+    # progress, so a large candidate set doesn't sit silent for minutes.
+    n_candidates = len(candidates)
+    rdap_note = (
+        f"RDAP owner lookup ({cfg.rdap_workers} concurrent) + " if cfg.enable_rdap and n_candidates else ""
     )
+    with _phase(f"Enriching {n_candidates} candidate IP(s): {rdap_note}range membership…") as _u:
+
+        def _progress(done, total, ip):
+            if _u is not None:
+                _u(f"Enriching candidate IPs — {done}/{total} (RDAP lookup: {ip})")
+
+        enriched, threat_match_rows = _enrich_candidates(
+            candidates, cfg, threat_ranges, cloud_ranges, databricks_ranges, on_progress=_progress
+        )
 
     suggestion_rows = _build_suggestions(enriched, cfg)
 
@@ -147,24 +199,62 @@ def _read_ip_acls(workspace_client) -> list[dict]:
     return acls
 
 
-def _enrich_candidates(candidates, cfg, threat_ranges, cloud_ranges, databricks_ranges):
-    import time
+def _rdap_lookups(ip_strs, workers: int, on_progress=None) -> dict:
+    """Resolve RDAP owner info for many IPs concurrently (they're independent network calls, the slow
+    part of enrichment). Returns {ip: result}. `workers`<=1 runs sequentially. Reports progress as
+    each lookup completes. Individual failures degrade to the empty result rather than aborting."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    rdap_cache, enriched, threat_match_rows = {}, [], []
-    for record in candidates.to_dict(orient="records"):
+    ips = list(dict.fromkeys(ip_strs))  # de-duped, order-preserving
+    total = len(ips)
+    cache: dict[str, dict] = {}
+
+    def _one(ip):
+        try:
+            return rdap.lookup(ip)
+        except Exception:  # noqa: BLE001 - a single lookup failing must not sink the whole sweep
+            return dict(rdap._EMPTY)
+
+    if workers <= 1 or total <= 1:
+        for done, ip in enumerate(ips, 1):
+            cache[ip] = _one(ip)
+            if on_progress is not None:
+                on_progress(done, total, ip)
+        return cache
+
+    with ThreadPoolExecutor(max_workers=min(workers, total)) as pool:
+        futures = {pool.submit(_one, ip): ip for ip in ips}
+        for done, future in enumerate(as_completed(futures), 1):
+            ip = futures[future]
+            cache[ip] = future.result()
+            if on_progress is not None:
+                on_progress(done, total, ip)
+    return cache
+
+
+def _enrich_candidates(
+    candidates, cfg, threat_ranges, cloud_ranges, databricks_ranges, on_progress=None
+):
+    enriched, threat_match_rows = [], []
+    records = candidates.to_dict(orient="records")
+
+    # RDAP is the slow, network-bound step — run all the lookups first, concurrently, then the fast
+    # per-record range checks below read from the resulting cache (no network).
+    if cfg.enable_rdap:
+        rdap_cache = _rdap_lookups(
+            (r["public_ip"] for r in records), cfg.rdap_workers, on_progress=on_progress
+        )
+    else:
+        rdap_cache = {}
+
+    for record in records:
         ip_str = record["public_ip"]
         try:
             ip_obj = ipaddress.ip_address(ip_str)
         except ValueError:
             continue
 
-        if cfg.enable_rdap:
-            if ip_str not in rdap_cache:
-                rdap_cache[ip_str] = rdap.lookup(ip_str)
-                time.sleep(rdap.RDAP_DELAY_SECONDS)
-            rdap_result = rdap_cache[ip_str]
-        else:
-            rdap_result = {"rdap_owner_name": None, "rdap_type": None, "maximum_cidrs": None}
+        rdap_result = rdap_cache.get(ip_str) or dict(rdap._EMPTY)
 
         record["principal_list"] = enrich.as_list(record.get("principal_list"))
         record["principal_emails"] = enrich.as_list(record.get("principal_emails"))
