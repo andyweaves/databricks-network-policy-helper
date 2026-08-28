@@ -202,18 +202,50 @@ def _read_ip_acls(workspace_client) -> list[dict]:
 def _rdap_lookups(ip_strs, workers: int, on_progress=None) -> dict:
     """Resolve RDAP owner info for many IPs concurrently (they're independent network calls, the slow
     part of enrichment). Returns {ip: result}. `workers`<=1 runs sequentially. Reports progress as
-    each lookup completes. Individual failures degrade to the empty result rather than aborting."""
+    each lookup completes. Individual failures degrade to the empty result rather than aborting.
+
+    Range-aware: every RDAP answer carries the IP's assigned block (`maximum_cidrs`), so once a block
+    is resolved, any other candidate IP inside it reuses that result with no network call. With many
+    candidates clustered in a few registered ranges (corporate egress, cloud NAT, VPNs) this cuts the
+    bulk of the requests. It's an accurate reuse — the assigned range is exactly RDAP's answer for any
+    IP in it — bar rare more-specific sub-allocations, which only affects owner grouping, not the
+    minimal/optimal CIDRs."""
+    import threading
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     ips = list(dict.fromkeys(ip_strs))  # de-duped, order-preserving
     total = len(ips)
     cache: dict[str, dict] = {}
+    resolved_ranges: list[tuple] = []  # (ip_network, result) from prior answers' assigned blocks
+    lock = threading.Lock()
+
+    def _cached(ip_obj):
+        for net, res in resolved_ranges:
+            if ip_obj.version == net.version and ip_obj in net:
+                return res
+        return None
 
     def _one(ip):
         try:
-            return rdap.lookup(ip)
-        except Exception:  # noqa: BLE001 - a single lookup failing must not sink the whole sweep
+            ip_obj = ipaddress.ip_address(ip)
+        except ValueError:
             return dict(rdap._EMPTY)
+        with lock:
+            hit = _cached(ip_obj)
+        if hit is not None:
+            return hit
+        try:
+            res = rdap.lookup(ip)
+        except Exception:  # noqa: BLE001 - a single lookup failing must not sink the whole sweep
+            res = dict(rdap._EMPTY)
+        # Record the assigned block(s) so sibling IPs skip the network next time.
+        with lock:
+            for cidr in res.get("maximum_cidrs") or []:
+                try:
+                    resolved_ranges.append((ipaddress.ip_network(cidr), res))
+                except ValueError:
+                    pass
+        return res
 
     if workers <= 1 or total <= 1:
         for done, ip in enumerate(ips, 1):
