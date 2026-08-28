@@ -153,6 +153,43 @@ def test_rdap_lookups_single_failure_degrades(monkeypatch):
     assert cache["2.2.2.2"] == rdap._EMPTY
 
 
+def test_rdap_lookups_reuse_assigned_range_skips_network(monkeypatch):
+    # once an IP resolves to an assigned block, sibling IPs in that block reuse it with NO extra
+    # lookup. workers=1 so the first result is cached before the siblings are processed.
+    from dbx_nwp_helper.feeds import rdap
+
+    calls = []
+
+    def fake_lookup(ip):
+        calls.append(ip)
+        return {"rdap_owner_name": "ACME", "rdap_type": None, "maximum_cidrs": ["203.0.113.0/24"]}
+
+    monkeypatch.setattr(rdap, "lookup", fake_lookup)
+    ips = ["203.0.113.10", "203.0.113.11", "203.0.113.250", "198.51.100.7"]
+    cache = ing._rdap_lookups(ips, workers=1)
+    # only ONE lookup for the whole 203.0.113.0/24 block, plus one for the other network
+    assert calls == ["203.0.113.10", "198.51.100.7"]
+    assert cache["203.0.113.11"]["rdap_owner_name"] == "ACME"  # reused from the range
+    assert cache["203.0.113.250"]["rdap_owner_name"] == "ACME"
+    assert set(cache) == set(ips)
+
+
+def test_rdap_lookups_no_range_falls_back_to_per_ip(monkeypatch):
+    # when RDAP returns no assigned block (maximum_cidrs=None), there's nothing to reuse — each IP
+    # is looked up individually (no incorrect cross-IP reuse).
+    from dbx_nwp_helper.feeds import rdap
+
+    calls = []
+    monkeypatch.setattr(
+        rdap,
+        "lookup",
+        lambda ip: calls.append(ip) or {"rdap_owner_name": ip, "rdap_type": None, "maximum_cidrs": None},
+    )
+    ips = ["203.0.113.10", "203.0.113.11"]
+    ing._rdap_lookups(ips, workers=1)
+    assert calls == ips  # both looked up — no range to reuse
+
+
 def test_render_hint_account_level(capsys):
     # public IPs exist but only account-level -> hint to use --include-account-level.
     funnel = {
