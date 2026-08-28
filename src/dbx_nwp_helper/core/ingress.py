@@ -264,18 +264,58 @@ def _rdap_lookups(ip_strs, workers: int, on_progress=None) -> dict:
     return cache
 
 
+# Offline-known owners: an IP in a Databricks or cloud-provider published range needs no RDAP call —
+# we already know who owns it. Databricks wins when both match.
+_CLOUD_OWNER_LABELS = {
+    "aws": "Amazon Web Services (AWS)",
+    "gcp": "Google Cloud Platform (GCP)",
+    "azure": "Microsoft Azure",
+}
+
+
+def _known_owner(ip_obj, cloud_ranges, databricks_ranges):
+    """The owner label + matched CIDR for an IP we can identify from the offline feeds (no RDAP),
+    else (None, None). Databricks takes priority over the cloud provider."""
+    dbx_hits, dbx_cidrs = enrich.match_ranges(ip_obj, databricks_ranges)
+    if dbx_hits:
+        return "Databricks", (dbx_cidrs[0] if dbx_cidrs else None)
+    cloud_hits, cloud_cidrs = enrich.match_ranges(ip_obj, cloud_ranges)
+    if cloud_hits:
+        provider = (cloud_hits[0].get("provider") or "").lower()
+        return _CLOUD_OWNER_LABELS.get(provider, provider.upper() or "Cloud provider"), (
+            cloud_cidrs[0] if cloud_cidrs else None
+        )
+    return None, None
+
+
 def _enrich_candidates(candidates, cfg, threat_ranges, cloud_ranges, databricks_ranges, on_progress=None):
     enriched, threat_match_rows = [], []
     records = candidates.to_dict(orient="records")
 
-    # RDAP is the slow, network-bound step — run all the lookups first, concurrently, then the fast
-    # per-record range checks below read from the resulting cache (no network).
-    if cfg.enable_rdap:
-        rdap_cache = _rdap_lookups(
-            (r["public_ip"] for r in records), cfg.rdap_workers, on_progress=on_progress
-        )
-    else:
-        rdap_cache = {}
+    # IPs we can identify from the offline Databricks/cloud feeds don't need an RDAP call — assign the
+    # owner directly and only RDAP the genuinely-unknown IPs. Known labels are applied regardless of
+    # --enable-rdap; RDAP just fills the rest (when enabled). This is the big win on cloud-heavy sets.
+    rdap_cache: dict[str, dict] = {}
+    unknown_ips = []
+    for record in records:
+        try:
+            ip_obj = ipaddress.ip_address(record["public_ip"])
+        except ValueError:
+            continue
+        label, cidr = _known_owner(ip_obj, cloud_ranges, databricks_ranges)
+        if label is not None:
+            rdap_cache[record["public_ip"]] = {
+                "rdap_owner_name": label,
+                "rdap_type": None,
+                "maximum_cidrs": [cidr] if cidr else None,
+            }
+        else:
+            unknown_ips.append(record["public_ip"])
+
+    # RDAP is the slow, network-bound step — run the unknowns concurrently; the fast per-record range
+    # checks below read from the resulting cache (no network).
+    if cfg.enable_rdap and unknown_ips:
+        rdap_cache.update(_rdap_lookups(unknown_ips, cfg.rdap_workers, on_progress=on_progress))
 
     for record in records:
         ip_str = record["public_ip"]

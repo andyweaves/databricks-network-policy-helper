@@ -100,6 +100,9 @@ class IngressConfig:
     export: str = ""
     ip_acl_handling: str = "migrate_and_enrich"
     deny_denied_ips: bool = False
+    # Interactively pick which proposed allow rules to keep (checkbox), before they're built. Skipped
+    # under --yes / non-interactive.
+    select_rules: bool = False
     # After creating AND assigning the policy, turn off the workspace's existing IP access lists
     # (the CBI policy replaces them). Gated by validate_disable_ip_acls so it can't leave the
     # workspace unprotected.
@@ -133,6 +136,8 @@ class EgressConfig:
     policy_scope: str = "current_workspace"
     block_threat_domains: str = "off"
     threat_feed: str = "threatfox"
+    # Interactively pick which observed destinations to allow-list (checkbox). Skipped under --yes.
+    select_rules: bool = False
     apply: ApplyOptions = field(default_factory=ApplyOptions)
 
 

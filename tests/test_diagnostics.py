@@ -174,6 +174,51 @@ def test_rdap_lookups_reuse_assigned_range_skips_network(monkeypatch):
     assert set(cache) == set(ips)
 
 
+def test_enrich_skips_rdap_for_known_cloud_and_databricks(monkeypatch):
+    # IPs in the offline Databricks/cloud ranges get their owner directly (friendly label) and are
+    # NOT sent to RDAP — only the genuinely-unknown IP is looked up.
+    import ipaddress
+
+    from dbx_nwp_helper.feeds import rdap
+
+    calls = []
+    monkeypatch.setattr(
+        rdap,
+        "lookup",
+        lambda ip: calls.append(ip)
+        or {"rdap_owner_name": "Some ISP", "rdap_type": None, "maximum_cidrs": None},
+    )
+    cloud_ranges = [(ipaddress.ip_network("52.0.0.0/8"), {"provider": "aws"})]
+    dbx_ranges = [(ipaddress.ip_network("3.3.3.0/24"), {"platform": "aws"})]
+    candidates = pd.DataFrame(
+        [
+            {
+                "public_ip": ip,
+                "events": 1,
+                "principals": 1,
+                "principal_list": [],
+                "principal_emails": [],
+                "subject_names": [],
+                "workspace_ids": [],
+                "service_list": [],
+            }
+            for ip in ("52.1.2.3", "3.3.3.9", "8.8.8.8")
+        ]
+    )
+    enriched, _ = ing._enrich_candidates(
+        candidates,
+        IngressConfig(enable_rdap=True, rdap_workers=1),
+        [],  # threat ranges
+        cloud_ranges,
+        dbx_ranges,
+    )
+    assert calls == ["8.8.8.8"]  # only the unknown IP hit the network
+    owners = {r["public_ip"]: r["rdap_owner_name"] for r in enriched}
+    assert owners["52.1.2.3"] == "Amazon Web Services (AWS)"
+    assert owners["3.3.3.9"] == "Databricks"
+    assert owners["8.8.8.8"] == "Some ISP"
+
+
 def test_rdap_lookups_no_range_falls_back_to_per_ip(monkeypatch):
     # when RDAP returns no assigned block (maximum_cidrs=None), there's nothing to reuse — each IP
     # is looked up individually (no incorrect cross-IP reuse).
