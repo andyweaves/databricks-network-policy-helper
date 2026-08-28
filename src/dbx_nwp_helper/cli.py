@@ -878,6 +878,106 @@ def _checkpoint(yes: bool) -> None:
         raise typer.Exit(code=0)
 
 
+def _interactive(yes: bool) -> bool:
+    """True only when we can and should prompt — interactive TTY and not --yes/scripted."""
+    import sys
+
+    return not yes and sys.stdin.isatty()
+
+
+def _checkbox_keep(title: str, choices: list) -> list | None:
+    """Show a pre-checked checkbox of `choices` (questionary.Choice with .value); return the list of
+    kept values, or None if the user cancelled (Ctrl-C). All start checked so 'keep everything' is a
+    single Enter."""
+    import questionary
+
+    return questionary.checkbox(title, choices=choices).ask()
+
+
+def _select_ingress_rules(analysis, cfg: IngressConfig, yes: bool) -> None:
+    """Let the user pick which proposed allow rules (owner groups) to keep, then filter the analysis
+    in place so only the selected groups become rules. Threat-flagged groups aren't offered (they're
+    never allow-listed). No-op under --yes / non-interactive / when --select-rules wasn't passed."""
+    if not cfg.select_rules or not _interactive(yes):
+        return
+    import questionary
+
+    framing_col = {"minimal": "minimal_cidrs", "optimal": "optimal_cidrs", "maximum": "maximum_cidrs"}[
+        cfg.policy_framing
+    ]
+    # Only offer groups that would actually become allow rules (Databricks-owned always would;
+    # otherwise a threat-feed match means it's excluded from the allow-list by design).
+    eligible = [r for r in analysis.suggestion_rows if r["databricks_owned"] or not r["threat_feeds"]]
+    if not eligible:
+        return
+    choices = []
+    for r in eligible:
+        cidrs = r.get(framing_col) or r.get("minimal_cidrs") or []
+        shown = ", ".join(cidrs[:3]) + (f" +{len(cidrs) - 3} more" if len(cidrs) > 3 else "")
+        target = "" if r["policy_target"] == "__ALL__" else f" [ws {r['policy_target']}]"
+        title = f"{r['rdap_owner']}{target} — {r['recommendation']} — {shown}"
+        choices.append(
+            questionary.Choice(title=title, value=(r["policy_target"], r["rdap_owner"]), checked=True)
+        )
+
+    kept = _checkbox_keep("Select the ingress allow rules to include (space=toggle, enter=confirm):", choices)
+    if kept is None:
+        console.banner("info", "Selection cancelled — aborting, nothing written.")
+        raise typer.Exit(code=0)
+    kept_keys = set(kept)
+    drop = {(r["policy_target"], r["rdap_owner"]) for r in eligible} - kept_keys
+    if not drop:
+        return
+    df = analysis.suggestions
+    analysis.suggestions = df[
+        ~df.apply(lambda row: (row["policy_target"], row["rdap_owner"]) in drop, axis=1)
+    ].reset_index(drop=True)
+    analysis.suggestion_rows = [
+        r for r in analysis.suggestion_rows if (r["policy_target"], r["rdap_owner"]) not in drop
+    ]
+    console.banner("info", f"Excluded {len(drop)} rule(s) from your selection; kept {len(kept_keys)}.")
+
+
+def _select_egress_rules(analysis, cfg: EgressConfig, yes: bool) -> None:
+    """Let the user pick which observed egress destinations to allow-list, then remove the deselected
+    ones from every target. No-op under --yes / non-interactive / when --select-rules wasn't passed."""
+    if not cfg.select_rules or not _interactive(yes):
+        return
+    import questionary
+
+    from .core import egress as eg
+
+    # (kind, key, display) for every distinct destination across targets.
+    dests = []
+    for fqdn, n in sorted(eg.union(analysis.targets, "internet").items(), key=lambda kv: -kv[1]):
+        owner = analysis.fqdn_owner.get(fqdn)
+        dests.append(("internet", fqdn, f"{fqdn}  ({owner or 'owner unknown'}, {n} events)"))
+    for (bucket, region), n in sorted(eg.union(analysis.targets, "s3").items(), key=lambda kv: -kv[1]):
+        dests.append(("s3", (bucket, region), f"S3  {bucket} ({region}, {n} events)"))
+    for bucket, n in sorted(eg.union(analysis.targets, "gcs").items(), key=lambda kv: -kv[1]):
+        dests.append(("gcs", bucket, f"GCS  {bucket} ({n} events)"))
+    for (acct, svc), n in sorted(eg.union(analysis.targets, "azure").items(), key=lambda kv: -kv[1]):
+        dests.append(("azure", (acct, svc), f"Azure  {acct}.{svc} ({n} events)"))
+    if not dests:
+        return
+
+    choices = [questionary.Choice(title=d, value=(kind, key), checked=True) for kind, key, d in dests]
+    kept = _checkbox_keep(
+        "Select the egress destinations to allow-list (space=toggle, enter=confirm):", choices
+    )
+    if kept is None:
+        console.banner("info", "Selection cancelled — aborting, nothing written.")
+        raise typer.Exit(code=0)
+    kept_set = set(kept)
+    drop = {(kind, key) for kind, key, _d in dests} - kept_set
+    if not drop:
+        return
+    for t in analysis.targets.values():
+        for kind, key in drop:
+            t[kind].pop(key, None)
+    console.banner("info", f"Excluded {len(drop)} destination(s) from your selection; kept {len(kept_set)}.")
+
+
 def _maybe_disable_ip_acls(disable: bool, results: list[dict], workspace_client) -> None:
     """After a successful create+assign, optionally turn off the workspace's IP access lists. Only
     fires when at least one policy was actually assigned — if the apply errored and assigned nothing,
@@ -959,6 +1059,11 @@ def ingress(
         AclHandling.migrate_and_enrich, help="How to treat an existing IP ACL."
     ),
     deny_denied_ips: bool = typer.Option(False, help="Deny currently-denied (403) source IPs."),
+    select_rules: bool = typer.Option(
+        False,
+        help="Interactively pick which proposed allow rules to include (a checkbox after the "
+        "preview). Ignored with --yes / non-interactively.",
+    ),
     export: str = typer.Option(
         "",
         help="Write the proposed network-policy JSON to this path (for curl / the REST API); a "
@@ -1013,6 +1118,7 @@ def ingress(
         export=export,
         ip_acl_handling=ip_acl_handling.value,
         deny_denied_ips=deny_denied_ips,
+        select_rules=select_rules,
         disable_existing_ip_acls=disable_existing_ip_acls,
         apply=ApplyOptions(
             create_policy=create_policy,
@@ -1055,6 +1161,11 @@ def egress(
         ThreatDeny.off, help="Block known-bad domains: off/matched_only/all."
     ),
     threat_feed: str = typer.Option("threatfox", help="Threat-domain feed."),
+    select_rules: bool = typer.Option(
+        False,
+        help="Interactively pick which observed destinations to allow-list (a checkbox after the "
+        "analysis). Ignored with --yes / non-interactively.",
+    ),
     policy_name: str = typer.Option(
         "",
         help="Policy name. If omitted you'll be prompted (blank there = the profile name). The "
@@ -1099,6 +1210,7 @@ def egress(
         policy_scope=policy_scope.value,
         block_threat_domains=block_threat_domains.value,
         threat_feed=threat_feed,
+        select_rules=select_rules,
         apply=ApplyOptions(
             create_policy=create_policy,
             policy_action=policy_action.value,
@@ -1287,6 +1399,8 @@ def _run_ingress(cfg: IngressConfig, conn: Connection, yes: bool) -> None:
 
     render.ingress_analysis(analysis, cfg)
     _checkpoint(yes)
+    # Optionally let the user cull the proposed allow rules before they're built (and before SCIM).
+    _select_ingress_rules(analysis, cfg, yes)
 
     identity_resolution = None
     if cfg.scope_identity:
@@ -1414,6 +1528,8 @@ def _run_egress(cfg: EgressConfig, conn: Connection, yes: bool) -> None:
 
     render.egress_analysis(analysis)
     _checkpoint(yes)
+    # Optionally let the user cull the observed destinations before the policy is built/previewed.
+    _select_egress_rules(analysis, cfg, yes)
     previews = eg.preview_blocks(analysis, cfg, note=lambda m: console.banner("warn", m))
     render.egress_preview(previews, cfg)
     if previews:

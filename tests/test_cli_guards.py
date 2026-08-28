@@ -158,6 +158,103 @@ def test_run_analysis_reraises_unknown_errors():
         cli._run_analysis(boom)
 
 
+def test_select_ingress_rules_filters_to_kept(monkeypatch):
+    from dbx_nwp_helper.config import IngressConfig
+
+    rows = [
+        {
+            "policy_target": "__ALL__",
+            "rdap_owner": "Acme",
+            "databricks_owned": [],
+            "threat_feeds": [],
+            "recommendation": "REVIEW",
+            "minimal_cidrs": ["1.1.1.1/32"],
+        },
+        {
+            "policy_target": "__ALL__",
+            "rdap_owner": "Beta",
+            "databricks_owned": [],
+            "threat_feeds": [],
+            "recommendation": "REVIEW",
+            "minimal_cidrs": ["2.2.2.2/32"],
+        },
+        {
+            "policy_target": "__ALL__",
+            "rdap_owner": "Bad",
+            "databricks_owned": [],
+            "threat_feeds": ["ipsum"],
+            "recommendation": "REVIEW",
+            "minimal_cidrs": ["9.9.9.9/32"],
+        },
+    ]
+    analysis = type("A", (), {})()
+    analysis.suggestion_rows = [dict(r) for r in rows]
+    analysis.suggestions = pd.DataFrame(rows)
+    monkeypatch.setattr(cli, "_interactive", lambda yes: True)
+    monkeypatch.setattr(cli, "_checkbox_keep", lambda title, choices: [("__ALL__", "Acme")])  # keep only Acme
+
+    cli._select_ingress_rules(analysis, IngressConfig(select_rules=True, policy_framing="minimal"), yes=False)
+
+    owners = set(analysis.suggestions["rdap_owner"])
+    assert "Acme" in owners  # kept
+    assert "Beta" not in owners  # deselected -> dropped
+    assert "Bad" in owners  # threat row wasn't offered, so retained untouched
+    keys = {(r["policy_target"], r["rdap_owner"]) for r in analysis.suggestion_rows}
+    assert ("__ALL__", "Beta") not in keys
+
+
+def test_select_ingress_rules_noop_without_flag(monkeypatch):
+    from dbx_nwp_helper.config import IngressConfig
+
+    analysis = type("A", (), {})()
+    analysis.suggestion_rows = [
+        {
+            "policy_target": "__ALL__",
+            "rdap_owner": "Acme",
+            "databricks_owned": [],
+            "threat_feeds": [],
+            "recommendation": "R",
+            "minimal_cidrs": ["1.1.1.1/32"],
+        }
+    ]
+    analysis.suggestions = pd.DataFrame(analysis.suggestion_rows)
+    monkeypatch.setattr(cli, "_interactive", lambda yes: True)
+    called = []
+    monkeypatch.setattr(cli, "_checkbox_keep", lambda t, c: called.append(1) or [])
+    cli._select_ingress_rules(analysis, IngressConfig(select_rules=False), yes=False)  # flag off
+    assert called == []  # never prompted
+
+
+def test_select_egress_rules_filters_targets(monkeypatch):
+    from dbx_nwp_helper.config import EgressConfig
+    from dbx_nwp_helper.core import egress as eg
+
+    a = eg.EgressAnalysis(
+        observed=pd.DataFrame(),
+        targets={
+            eg.ALL_WORKSPACES: {"s3": {}, "gcs": {}, "azure": {}, "internet": {"keep.com": 5, "drop.com": 3}}
+        },
+    )
+    a.fqdn_owner = {"keep.com": "X", "drop.com": "Y"}
+    monkeypatch.setattr(cli, "_interactive", lambda yes: True)
+    monkeypatch.setattr(cli, "_checkbox_keep", lambda t, c: [("internet", "keep.com")])
+    cli._select_egress_rules(a, EgressConfig(select_rules=True), yes=False)
+    assert eg.union(a.targets, "internet") == {"keep.com": 5}
+
+
+def test_select_rules_noop_non_interactive(monkeypatch):
+    # even with the flag on, a non-interactive session (no TTY) must not prompt
+    from dbx_nwp_helper.config import IngressConfig
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    called = []
+    monkeypatch.setattr(cli, "_checkbox_keep", lambda t, c: called.append(1) or [])
+    analysis = type("A", (), {})()
+    analysis.suggestion_rows = []
+    cli._select_ingress_rules(analysis, IngressConfig(select_rules=True), yes=False)
+    assert called == []
+
+
 def test_confirm_write_yes_proceeds():
     assert cli._confirm_write("dry_run", yes=True) is True
 
