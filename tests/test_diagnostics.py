@@ -99,8 +99,16 @@ def test_enrich_candidates_reports_rdap_progress(monkeypatch):
     monkeypatch.setattr(rdap, "lookup", lambda ip: dict(rdap._EMPTY))  # no network
     candidates = pd.DataFrame(
         [
-            {"public_ip": ip, "events": 1, "principals": 1, "principal_list": [], "principal_emails": [],
-             "subject_names": [], "workspace_ids": [], "service_list": []}
+            {
+                "public_ip": ip,
+                "events": 1,
+                "principals": 1,
+                "principal_list": [],
+                "principal_emails": [],
+                "subject_names": [],
+                "workspace_ids": [],
+                "service_list": [],
+            }
             for ip in ("8.8.8.8", "1.1.1.1", "9.9.9.9")
         ]
     )

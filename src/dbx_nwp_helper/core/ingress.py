@@ -232,9 +232,7 @@ def _rdap_lookups(ip_strs, workers: int, on_progress=None) -> dict:
     return cache
 
 
-def _enrich_candidates(
-    candidates, cfg, threat_ranges, cloud_ranges, databricks_ranges, on_progress=None
-):
+def _enrich_candidates(candidates, cfg, threat_ranges, cloud_ranges, databricks_ranges, on_progress=None):
     enriched, threat_match_rows = [], []
     records = candidates.to_dict(orient="records")
 

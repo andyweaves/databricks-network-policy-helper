@@ -862,7 +862,6 @@ def test_detect_inet_probe(monkeypatch):
         ing._detect_inet(sql_conn=None)
 
 
-
 # ---------------------------------------------------------------- egress owner resolution cascade
 def _internet_analysis(fqdn):
     t = eg._new_target()

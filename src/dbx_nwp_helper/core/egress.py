@@ -444,9 +444,7 @@ def _exclude_cross_cloud_storage(analysis: EgressAnalysis, cloud: str | None) ->
                 d.pop(name)
                 excluded[_storage_display_name(kind, name)] = labels[kind]
     if excluded:
-        analysis.skipped_cross_cloud_storage = sorted(
-            (label, name) for name, label in excluded.items()
-        )
+        analysis.skipped_cross_cloud_storage = sorted((label, name) for name, label in excluded.items())
 
 
 def _host_hostfile(line: str) -> str:

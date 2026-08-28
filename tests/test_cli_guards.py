@@ -732,9 +732,7 @@ def test_ingress_create_with_no_rules_exits_nonzero(monkeypatch):
     monkeypatch.setattr(
         rules,
         "apply",
-        lambda *a, **k: (_ for _ in ()).throw(
-            AssertionError("apply must not run when there are no rules")
-        ),
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("apply must not run when there are no rules")),
     )
 
     result = runner.invoke(

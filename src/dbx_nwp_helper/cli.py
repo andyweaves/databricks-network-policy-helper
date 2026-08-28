@@ -1283,9 +1283,7 @@ def _run_ingress(cfg: IngressConfig, conn: Connection, yes: bool) -> None:
 
     http_path = sql.resolve_warehouse(conn)
     with sql.connection(conn, http_path) as sconn:
-        analysis = _run_analysis(
-            lambda: ing.analyze(cfg, sconn, wc, on_step=_step, status=console.status)
-        )
+        analysis = _run_analysis(lambda: ing.analyze(cfg, sconn, wc, on_step=_step, status=console.status))
 
     render.ingress_analysis(analysis, cfg)
     _checkpoint(yes)
