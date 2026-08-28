@@ -156,9 +156,10 @@ def json_panel(title: str, obj: Any) -> None:
 
 @contextmanager
 def status(message: str):
-    """A spinner for a long step (feed download, SQL query, RDAP sweep)."""
-    with console.status(f"[info]{message}[/info]", spinner="dots"):
-        yield
+    """A spinner for a long step (feed download, SQL query, RDAP sweep). Yields an `update(msg)`
+    callable so a caller can refresh the spinner text with live progress (e.g. "37/120")."""
+    with console.status(f"[info]{message}[/info]", spinner="dots") as st:
+        yield lambda msg: st.update(f"[info]{msg}[/info]")
 
 
 def mode_banner(policy_mode: str) -> None:

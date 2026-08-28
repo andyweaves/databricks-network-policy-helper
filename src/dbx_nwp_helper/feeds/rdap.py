@@ -16,7 +16,8 @@ from .http import FEED_USER_AGENT
 RDAP_TIMEOUT_SECONDS = 8
 RDAP_MAX_RETRIES = 4  # rdap.org / RIR servers throttle bursts; a couple of retries wasn't enough
 RDAP_MAX_REFERRAL_DEPTH = 3
-RDAP_DELAY_SECONDS = 0.25  # gentler default spacing between per-IP lookups in a run
+# Note: lookups run concurrently (bounded by --rdap-workers), which caps the request rate; per-call
+# throttling/backoff on 429/503 is handled in _fetch (Retry-After + exponential backoff).
 
 _EMPTY = {"rdap_owner_name": None, "rdap_type": None, "maximum_cidrs": None}
 

@@ -116,6 +116,48 @@ def test_checkpoint_decline_aborts_cleanly(monkeypatch):
     assert exc.value.exit_code == 0  # 'n' -> clean abort
 
 
+def test_run_analysis_returns_value_on_success():
+    assert cli._run_analysis(lambda: "ok") == "ok"
+
+
+def test_run_analysis_handles_inet_unsupported(capsys):
+    import typer
+
+    def boom():
+        raise RuntimeError("[INET_FUNCTIONS_NOT_ENABLED] ip_cidr_contains is disabled or unsupported.")
+
+    with pytest.raises(typer.Exit) as exc:
+        cli._run_analysis(boom)
+    assert exc.value.exit_code == 1
+    assert "preview" in _plain(capsys.readouterr().out).lower()
+
+
+def test_run_analysis_handles_warehouse_timeout(capsys):
+    import typer
+
+    # the reported failure: the databricks-sql connector exhausts its retry budget and raises
+    def boom():
+        raise RuntimeError(
+            "Error during request to server. Retry request would exceed Retry policy max retry "
+            "duration of 900.0 seconds"
+        )
+
+    with pytest.raises(typer.Exit) as exc:
+        cli._run_analysis(boom)
+    assert exc.value.exit_code == 1
+    out = _plain(capsys.readouterr().out)
+    assert "didn't complete" in out and "warehouse" in out
+
+
+def test_run_analysis_reraises_unknown_errors():
+    # an error we don't recognise must NOT be swallowed — it propagates unchanged
+    def boom():
+        raise ValueError("something unexpected")
+
+    with pytest.raises(ValueError, match="something unexpected"):
+        cli._run_analysis(boom)
+
+
 def test_confirm_write_yes_proceeds():
     assert cli._confirm_write("dry_run", yes=True) is True
 
@@ -412,6 +454,46 @@ def test_write_json_export_bad_path_errors_cleanly(tmp_path):
     assert e.value.exit_code == 1
 
 
+def test_confirm_overwrite_new_file_always_writes(tmp_path):
+    # a path that doesn't exist yet never prompts
+    assert cli._confirm_overwrite(tmp_path / "new.json", yes=False) is True
+
+
+def test_confirm_overwrite_existing_kept_when_declined(monkeypatch, tmp_path):
+    import typer
+
+    existing = tmp_path / "policy.json"
+    existing.write_text("old")
+    # simulate an interactive terminal where the user declines the overwrite
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr(typer, "confirm", lambda *a, **k: False)
+    assert cli._confirm_overwrite(existing, yes=False) is False
+    # ...and --yes overwrites without prompting even when the file exists
+    assert cli._confirm_overwrite(existing, yes=True) is True
+
+
+def test_write_json_export_keeps_existing_when_declined(monkeypatch, tmp_path):
+    import json
+
+    dest = tmp_path / "my-acl.json"
+    dest.write_text('{"network_policy_id": "OLD"}')
+    monkeypatch.setattr(cli, "_confirm_overwrite", lambda d, yes: False)
+    # a declined overwrite returns None and leaves the original file untouched
+    assert cli._write_json_export(str(tmp_path), {"network_policy_id": "my-acl", "egress": {}}) is None
+    assert json.loads(dest.read_text())["network_policy_id"] == "OLD"
+
+
+def test_export_policy_overwrites_with_yes(tmp_path):
+    import json
+
+    # first write, then a second --yes write must overwrite both files silently
+    payload_v1 = {"network_policy_id": "pol", "egress": {}}
+    payload_v2 = {"network_policy_id": "pol", "egress": {"changed": True}}
+    cli._export_policy(str(tmp_path), payload_v1, yes=True)
+    cli._export_policy(str(tmp_path), payload_v2, yes=True)
+    assert json.loads((tmp_path / "pol.json").read_text())["egress"] == {"changed": True}
+
+
 def _fake_pol(ingress=None, dry=None, egress=None):
     return type("P", (), {"ingress": ingress, "ingress_dry_run": dry, "egress": egress})()
 
@@ -627,9 +709,15 @@ def test_ingress_create_with_no_rules_exits_nonzero(monkeypatch):
     import dbx_nwp_helper.auth as auth
     import dbx_nwp_helper.sql as sqlmod
     from dbx_nwp_helper.core import ingress as ing
+    from dbx_nwp_helper.core import ingress_rules as rules
 
     monkeypatch.setattr(auth, "workspace_client", lambda conn: object())
     monkeypatch.setattr(sqlmod, "resolve_warehouse", lambda conn: "/sql/1.0/warehouses/x")
+    # Account auth is now resolved + verified UP FRONT (fail-fast), so stub it to succeed; the point
+    # of this test is that no *apply* (write) happens when the empty analysis yields no rules.
+    monkeypatch.setattr(cli, "_resolve_account_profile", lambda conn: None)
+    monkeypatch.setattr(auth, "this_workspace_id", lambda conn: 42)
+    monkeypatch.setattr(cli, "_account_client_or_exit", lambda conn, workspace_id=None: object())
 
     class _Conn:
         def __enter__(self):
@@ -640,13 +728,11 @@ def test_ingress_create_with_no_rules_exits_nonzero(monkeypatch):
 
     monkeypatch.setattr(sqlmod, "connection", lambda conn, hp: _Conn())
     monkeypatch.setattr(ing, "analyze", lambda *a, **k: _empty_analysis())
-    # account client should never be reached; make it explode if it is.
+    # the apply (the actual write) must never run when there are no rules.
     monkeypatch.setattr(
-        auth,
-        "account_client",
-        lambda conn: (_ for _ in ()).throw(
-            AssertionError("account_client must not be called when there are no rules")
-        ),
+        rules,
+        "apply",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("apply must not run when there are no rules")),
     )
 
     result = runner.invoke(
@@ -690,7 +776,7 @@ def test_account_host_from_workspace_host():
     assert f("https://2222222222222222.8.gcp.databricks.com") == "https://accounts.gcp.databricks.com"
     assert f("https://acme.gcp.databricks.com") == "https://accounts.gcp.databricks.com"
     # Azure fixed host (region label must NOT leak in)
-    assert f("https://adb-123.4.azuredatabricks.net") == "https://accounts.azuredatabricks.net"
+    assert f("https://adb-0000000000000000.0.azuredatabricks.net") == "https://accounts.azuredatabricks.net"
     # undecidable / empty -> None (caller keeps its default; user can pin --account-host)
     assert f("https://databricks.acme.example") is None
     assert f("") is None and f(None) is None

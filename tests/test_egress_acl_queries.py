@@ -155,6 +155,239 @@ def test_egress_analyze_targets_and_union(monkeypatch):
     assert a.skipped_bare_s3 == 1
 
 
+def test_egress_excludes_databricks_urls(monkeypatch):
+    # Databricks workspace / Apps / model-serving URLs are unsupported as egress internet
+    # destinations (the API rejects them) — they must be flagged and excluded, never allow-listed.
+    # Hostnames below are synthetic placeholders on the public Databricks domains — not real hosts.
+    observed = pd.DataFrame(
+        [
+            {  # Databricks App
+                "destination": "example-app.aws.databricksapps.com",
+                "destination_type": "DNS",
+                "events": 20,
+                "workspace_ids": [1],
+                "resolved_ips": [],
+            },
+            {  # AWS workspace URL (also fronts model-serving endpoints)
+                "destination": "example.cloud.databricks.com",
+                "destination_type": "DNS",
+                "events": 15,
+                "workspace_ids": [1],
+                "resolved_ips": [],
+            },
+            {  # Azure workspace URL
+                "destination": "adb-0000000000000000.0.azuredatabricks.net",
+                "destination_type": "DNS",
+                "events": 9,
+                "workspace_ids": [1],
+                "resolved_ips": [],
+            },
+            {  # a genuine third-party internet FQDN — must still be allow-listed
+                "destination": "api.openai.com",
+                "destination_type": "DNS",
+                "events": 5,
+                "workspace_ids": [1],
+                "resolved_ips": [],
+            },
+        ]
+    )
+    monkeypatch.setattr("dbx_nwp_helper.sql.query", lambda _c, _t: observed)
+    cfg = EgressConfig(enable_rdap=False, block_threat_domains="off", policy_scope="all_workspaces")
+    a = eg.analyze(cfg, sql_conn=None)
+    # only the real third-party FQDN survives into the internet allow-list
+    assert eg.union(a.targets, "internet") == {"api.openai.com": 5}
+    assert a.skipped_databricks_urls == [
+        "adb-0000000000000000.0.azuredatabricks.net",
+        "example-app.aws.databricksapps.com",
+        "example.cloud.databricks.com",
+    ]
+    # and the built policy contains none of the excluded Databricks URLs
+    block = eg.build_blocks(a, cfg)[eg.ALL_WORKSPACES].as_dict()["network_access"]
+    dests = {d["destination"] for d in block["allowed_internet_destinations"]}
+    assert dests == {"api.openai.com"}
+
+
+def test_nonglobal_reason_labels():
+    assert eg._nonglobal_reason("127.0.0.1") == "loopback"
+    assert eg._nonglobal_reason("10.1.2.3") == "private/internal"
+    assert eg._nonglobal_reason("192.168.5.5") == "private/internal"
+    assert eg._nonglobal_reason("169.254.1.1") == "link-local"
+    assert eg._nonglobal_reason("0.0.0.0") == "unspecified"
+    # globally-routable and unparseable both return None (not excluded)
+    assert eg._nonglobal_reason("104.16.1.1") is None
+    assert eg._nonglobal_reason("not-an-ip") is None
+
+
+def test_egress_excludes_fqdns_resolving_to_nonglobal_ips(monkeypatch):
+    # An FQDN that resolves only to a loopback/private IP (a local DNS/hosts artefact) can't be real
+    # egress — flag + exclude it. One with a global IP, and one mixed (global + private), are kept.
+    observed = pd.DataFrame(
+        [
+            {  # pypi.org resolving to localhost — the reported case
+                "destination": "pypi.org",
+                "destination_type": "DNS",
+                "events": 4,
+                "workspace_ids": [1],
+                "resolved_ips": ["127.0.0.1"],
+            },
+            {  # internal host resolving to an RFC1918 address
+                "destination": "internal.svc.local",
+                "destination_type": "DNS",
+                "events": 3,
+                "workspace_ids": [1],
+                "resolved_ips": ["10.1.2.3"],
+            },
+            {  # genuine third-party — global IP, must be kept
+                "destination": "api.openai.com",
+                "destination_type": "DNS",
+                "events": 5,
+                "workspace_ids": [1],
+                "resolved_ips": ["104.16.1.1"],
+            },
+            {  # split-horizon: one private + one global -> reachable, so kept
+                "destination": "mixed.example.com",
+                "destination_type": "DNS",
+                "events": 2,
+                "workspace_ids": [1],
+                "resolved_ips": ["10.0.0.9", "8.8.8.8"],
+            },
+        ]
+    )
+    monkeypatch.setattr("dbx_nwp_helper.sql.query", lambda _c, _t: observed)
+    cfg = EgressConfig(enable_rdap=False, block_threat_domains="off", policy_scope="all_workspaces")
+    a = eg.analyze(cfg, sql_conn=None)
+    assert eg.union(a.targets, "internet") == {"api.openai.com": 5, "mixed.example.com": 2}
+    skipped = set(a.skipped_nonglobal_fqdns)
+    assert skipped == {
+        ("pypi.org", "127.0.0.1", "loopback"),
+        ("internal.svc.local", "10.1.2.3", "private/internal"),
+    }
+    # the built policy contains neither excluded FQDN
+    block = eg.build_blocks(a, cfg)[eg.ALL_WORKSPACES].as_dict()["network_access"]
+    assert {d["destination"] for d in block["allowed_internet_destinations"]} == {
+        "api.openai.com",
+        "mixed.example.com",
+    }
+
+
+def test_egress_keeps_fqdn_when_no_resolved_ip(monkeypatch):
+    # No resolved IP at all -> we can't judge, so keep it for review (never silently drop).
+    observed = pd.DataFrame(
+        [
+            {
+                "destination": "unresolved.example.com",
+                "destination_type": "DNS",
+                "events": 3,
+                "workspace_ids": [1],
+                "resolved_ips": [],
+            }
+        ]
+    )
+    monkeypatch.setattr("dbx_nwp_helper.sql.query", lambda _c, _t: observed)
+    cfg = EgressConfig(enable_rdap=False, block_threat_domains="off", policy_scope="all_workspaces")
+    a = eg.analyze(cfg, sql_conn=None)
+    assert eg.union(a.targets, "internet") == {"unresolved.example.com": 3}
+    assert a.skipped_nonglobal_fqdns == []
+
+
+def test_classify_databricks_url_variants():
+    # Any Databricks-owned host (workspace, apps, control-plane/platform, docs, apex) classifies as
+    # databricks_url — the egress API rejects the whole family, so we never allow-list any of them.
+    # All hostnames below are synthetic placeholders on the public Databricks domains, not real hosts.
+    for host in (
+        "example.cloud.databricks.com",  # AWS workspace
+        "example.staging.cloud.databricks.com",  # AWS staging workspace
+        "example.gcp.databricks.com",  # GCP workspace
+        "adb-0000000000000000.0.azuredatabricks.net",  # Azure workspace
+        "example-app.aws.databricksapps.com",  # Databricks App
+        "example-service.databricks.com",  # a control-plane / platform service host
+        "docs.databricks.com",  # a non-workspace databricks.com host
+        "databricks.com",  # apex
+    ):
+        assert eg._classify(host)[0] == "databricks_url", host
+    # a genuine third-party (and a lookalike that only *contains* the string) stay on the internet path
+    assert eg._classify("api.openai.com")[0] == "internet"
+    assert eg._classify("notdatabricks.com")[0] == "internet"
+    assert eg._classify("databricks.com.evil.example")[0] == "internet"
+
+
+def test_workspace_cloud_from_host():
+    assert eg.workspace_cloud_from_host("https://example.cloud.databricks.com") == "aws"
+    assert eg.workspace_cloud_from_host("https://example.staging.cloud.databricks.com") == "aws"
+    assert eg.workspace_cloud_from_host("https://adb-0000000000000000.0.azuredatabricks.net") == "azure"
+    assert eg.workspace_cloud_from_host("https://example.gcp.databricks.com") == "gcp"
+    assert eg.workspace_cloud_from_host(None) is None
+    assert eg.workspace_cloud_from_host("https://not-databricks.example.com") is None
+
+
+def test_egress_excludes_cross_cloud_storage_on_aws(monkeypatch):
+    # On an AWS workspace the egress API only accepts S3 storage — Azure + GCS storage destinations
+    # must be flagged and dropped (they'd otherwise fail the apply), while S3 and internet survive.
+    observed = pd.DataFrame(
+        [
+            {  # S3 — kept (matches AWS)
+                "destination": "b.s3.us-west-2.amazonaws.com",
+                "destination_type": "DNS",
+                "events": 10,
+                "workspace_ids": [1],
+                "resolved_ips": [],
+            },
+            {  # GCS — cross-cloud, dropped
+                "destination": "mb.storage.googleapis.com",
+                "destination_type": "DNS",
+                "events": 3,
+                "workspace_ids": [1],
+                "resolved_ips": [],
+            },
+            {  # Azure — cross-cloud, dropped (the reported case)
+                "destination": "acct.blob.core.windows.net",
+                "destination_type": "DNS",
+                "events": 2,
+                "workspace_ids": [1],
+                "resolved_ips": [],
+            },
+            {  # internet FQDN — unaffected
+                "destination": "api.openai.com",
+                "destination_type": "DNS",
+                "events": 5,
+                "workspace_ids": [1],
+                "resolved_ips": ["104.16.1.1"],
+            },
+        ]
+    )
+    monkeypatch.setattr("dbx_nwp_helper.sql.query", lambda _c, _t: observed)
+    cfg = EgressConfig(enable_rdap=False, block_threat_domains="off", policy_scope="all_workspaces")
+    a = eg.analyze(cfg, sql_conn=None, workspace_cloud="aws")
+    assert eg.union(a.targets, "s3") == {("b", "us-west-2"): 10}
+    assert eg.union(a.targets, "gcs") == {}
+    assert eg.union(a.targets, "azure") == {}
+    assert a.skipped_cross_cloud_storage == [("Azure", "acct.blob"), ("GCS", "mb")]
+    # the built AWS policy carries only the S3 storage destination
+    na = eg.build_blocks(a, cfg)[eg.ALL_WORKSPACES].as_dict()["network_access"]
+    stor_types = {d["storage_destination_type"] for d in na["allowed_storage_destinations"]}
+    assert stor_types == {"AWS_S3"}
+
+
+def test_egress_cross_cloud_no_filter_when_cloud_unknown(monkeypatch):
+    # Unknown workspace cloud -> don't filter (leave the decision to the API), nothing flagged.
+    observed = pd.DataFrame(
+        [
+            {
+                "destination": "mb.storage.googleapis.com",
+                "destination_type": "DNS",
+                "events": 3,
+                "workspace_ids": [1],
+                "resolved_ips": [],
+            }
+        ]
+    )
+    monkeypatch.setattr("dbx_nwp_helper.sql.query", lambda _c, _t: observed)
+    cfg = EgressConfig(enable_rdap=False, block_threat_domains="off", policy_scope="all_workspaces")
+    a = eg.analyze(cfg, sql_conn=None, workspace_cloud=None)
+    assert eg.union(a.targets, "gcs") == {"mb": 3}
+    assert a.skipped_cross_cloud_storage == []
+
+
 def test_egress_global_s3_region_inferred(monkeypatch):
     # <bucket>.s3.amazonaws.com has no region in the host -> infer it, keep the bucket.
     observed = pd.DataFrame(
@@ -558,6 +791,75 @@ def test_denied_requests_query_filters_403():
     q = queries.denied_requests(14)
     assert "IpAccessDenied" in q and "status_code = 403" in q
     assert "INTERVAL 14 DAYS" in q
+
+
+def test_queries_portable_mode_uses_no_inet_functions():
+    # The INET built-ins (try_ip_host / ip_version() / ip_cidr_contains / try_ip_cidr) are a
+    # non-public preview; a warehouse without them raises INET_FUNCTIONS_NOT_ENABLED. In portable
+    # mode (use_inet=False) every query must derive the same info with plain Spark SQL instead.
+    generated = [
+        queries.frequent_public_ips(30, 1, False, False, False, use_inet=False),
+        queries.frequent_public_ips(30, 1, True, True, True, only_workspace_id=42, use_inet=False),
+        queries.candidate_funnel(30, treat_null_status_as_success=False, use_inet=False),
+        queries.denied_requests(14, use_inet=False),
+        queries.observed_egress(30, 1, ""),
+        queries.audit_row_count(30, use_inet=False),
+        queries.surface_summary(30, use_inet=False),
+        queries.principal_network_diversity(30, use_inet=False),
+    ]
+    for q in generated:
+        assert "try_ip_host" not in q
+        assert "ip_version(" not in q  # the SQL FUNCTION call; the derived `ip_version` column is fine
+        assert "ip_cidr_contains" not in q
+        assert "try_ip_cidr" not in q
+
+
+def test_queries_native_mode_uses_inet_functions():
+    # Native mode (use_inet=True, the default) uses the fast INET builtins.
+    q = queries.frequent_public_ips(30, 1, False, False, False, use_inet=True)
+    assert "try_ip_host(source_ip_address)" in q
+    assert "ip_cidr_contains('10.0.0.0/8', normalized_ip)" in q
+    assert "ipv4_long" not in q  # the portable-only integer column isn't projected in native mode
+    # default is native
+    assert queries.frequent_public_ips(30, 1, False, False, False) == q
+    assert "ip_cidr_contains" in queries.candidate_funnel(30, treat_null_status_as_success=False)
+
+
+def test_frequent_public_ips_portable_excludes_private_ranges_by_integer_bounds():
+    import ipaddress
+
+    q = queries.frequent_public_ips(30, 1, False, False, False, use_inet=False)
+    # the portable private-range exclusion is generated from _PRIVATE_V4_CIDRS as integer BETWEEN
+    # checks; spot-check 10.0.0.0/8 and 192.168.0.0/16 bounds match what ipaddress computes.
+    for cidr in ("10.0.0.0/8", "192.168.0.0/16"):
+        net = ipaddress.ip_network(cidr)
+        assert f"ipv4_long BETWEEN {int(net.network_address)} AND {int(net.broadcast_address)}" in q
+    assert "normalized_ip = '0.0.0.0'" in q
+
+
+def test_detect_inet_probe(monkeypatch):
+    import pytest
+
+    from dbx_nwp_helper.core import ingress as ing
+
+    # a clean probe -> native INET available
+    monkeypatch.setattr("dbx_nwp_helper.sql.query", lambda _c, _t: pd.DataFrame([{"ok": True}]))
+    assert ing._detect_inet(sql_conn=None) is True
+
+    # the INET-disabled error -> fall back to portable
+    def raise_inet(_c, _t):
+        raise RuntimeError("[INET_FUNCTIONS_NOT_ENABLED] ip_cidr_contains is disabled or unsupported.")
+
+    monkeypatch.setattr("dbx_nwp_helper.sql.query", raise_inet)
+    assert ing._detect_inet(sql_conn=None) is False
+
+    # any other error (e.g. a timeout) must propagate, not be swallowed as "no INET"
+    def raise_timeout(_c, _t):
+        raise RuntimeError("Retry policy max retry duration of 900.0 seconds")
+
+    monkeypatch.setattr("dbx_nwp_helper.sql.query", raise_timeout)
+    with pytest.raises(RuntimeError, match="Retry policy"):
+        ing._detect_inet(sql_conn=None)
 
 
 # ---------------------------------------------------------------- egress owner resolution cascade

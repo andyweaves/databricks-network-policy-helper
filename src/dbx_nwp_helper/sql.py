@@ -31,6 +31,54 @@ def _http_path_for(warehouse_id: str) -> str:
     return f"/sql/1.0/warehouses/{warehouse_id}"
 
 
+def _resize_warehouse(w, existing, cluster_size: str):
+    """Edit an existing warehouse to `cluster_size`, preserving its other settings, then return the
+    refreshed warehouse. Editing an *active* warehouse restarts it, so we wait for it to come back
+    RUNNING; a stopped one just gets the new config (it's started by the caller). Best-effort: if the
+    edit fails (e.g. no permission), warn and keep the current size rather than aborting the run."""
+    from databricks.sdk.service.sql import EditWarehouseRequestWarehouseType
+
+    was_active = existing.state in (State.RUNNING, State.STARTING)
+    banner(
+        "info",
+        f"Resizing warehouse '{existing.name}' from {existing.cluster_size} to {cluster_size} "
+        f"(honouring --warehouse-size)…",
+    )
+    # Re-send the warehouse's own settings so only the size changes (the edit API treats omitted
+    # fields as defaults). warehouse_type uses a different enum on edit — convert by value.
+    kw = {
+        "cluster_size": cluster_size,
+        "name": existing.name,
+        "auto_stop_mins": existing.auto_stop_mins,
+        "min_num_clusters": existing.min_num_clusters,
+        "max_num_clusters": existing.max_num_clusters,
+        "enable_photon": existing.enable_photon,
+        "enable_serverless_compute": existing.enable_serverless_compute,
+        "spot_instance_policy": existing.spot_instance_policy,
+        "channel": existing.channel,
+        "tags": existing.tags,
+        "instance_profile_arn": existing.instance_profile_arn,
+    }
+    if existing.warehouse_type is not None:
+        kw["warehouse_type"] = EditWarehouseRequestWarehouseType(existing.warehouse_type.value)
+    kw = {k: v for k, v in kw.items() if v is not None}
+    try:
+        with status(f"Resizing warehouse to {cluster_size}…"):
+            wait = w.warehouses.edit(id=existing.id, **kw)
+            # Only wait for RUNNING when it was already active (edit restarts it); a stopped warehouse
+            # stays stopped after an edit, and the caller starts it.
+            if was_active:
+                wait.result()
+    except Exception as e:  # noqa: BLE001 - resize is best-effort; fall back to the current size
+        detail = " ".join(str(e).split())[:200] or type(e).__name__
+        banner(
+            "warn",
+            f"Couldn't resize the warehouse to {cluster_size} — {detail}. Using its current size "
+            f"({existing.cluster_size}).",
+        )
+    return w.warehouses.get(existing.id)
+
+
 def resolve_warehouse(conn: Connection) -> str:
     """Return an http_path to a usable SQL warehouse, creating/starting one if needed.
 
@@ -47,17 +95,24 @@ def resolve_warehouse(conn: Connection) -> str:
             break
 
     if existing is not None:
-        banner("info", f"Reusing SQL warehouse '{existing.name}' ({existing.id}).")
+        # Reusing a same-named warehouse — but honour --warehouse-size: if it differs, resize before
+        # use rather than silently running at the old size.
+        if existing.cluster_size and existing.cluster_size != conn.warehouse_size:
+            existing = _resize_warehouse(w, existing, conn.warehouse_size)
+        banner("info", f"Reusing SQL warehouse '{existing.name}' ({existing.id}, {existing.cluster_size}).")
         if existing.state not in (State.RUNNING, State.STARTING):
             with status(f"Starting warehouse '{existing.name}'…"):
                 w.warehouses.start(existing.id).result()
         return _http_path_for(existing.id)
 
-    banner("info", f"No warehouse named '{conn.warehouse_name}' — creating a serverless one.")
-    with status("Creating + starting serverless SQL warehouse…"):
+    banner(
+        "info",
+        f"No warehouse named '{conn.warehouse_name}' — creating a serverless one ({conn.warehouse_size}).",
+    )
+    with status(f"Creating + starting serverless SQL warehouse ({conn.warehouse_size})…"):
         created = w.warehouses.create(
             name=conn.warehouse_name,
-            cluster_size="2X-Small",
+            cluster_size=conn.warehouse_size,
             max_num_clusters=1,
             auto_stop_mins=10,
             enable_serverless_compute=True,
