@@ -464,6 +464,16 @@ def test_egress_per_workspace_fans_out(monkeypatch):
     assert set(a.targets) == {1, 2}
 
 
+def test_egress_planned_policy_ids_single_and_per_workspace():
+    single = eg.planned_policy_ids({}, EgressConfig(policy_scope="all_workspaces"), "prof", 42)
+    assert single == ["prof"]
+
+    # per_workspace: one '<prefix>-ws-<id>' per target with content (blocks/preview keys).
+    blocks = {1: object(), 2: object()}
+    ids = eg.planned_policy_ids(blocks, EgressConfig(policy_scope="per_workspace"), "prof", None)
+    assert ids == ["prof-ws-1", "prof-ws-2"]
+
+
 def test_egress_build_blocks_restricted_with_enforcement(monkeypatch):
     observed = pd.DataFrame(
         [

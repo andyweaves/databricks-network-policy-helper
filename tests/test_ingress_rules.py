@@ -99,6 +99,20 @@ def test_cloud_owned_label_not_redundant_with_friendly_owner():
         assert labels == [expected], f"{cloud}: {labels}"
 
 
+def test_planned_policy_ids_single_and_per_workspace():
+    a = _analysis([_suggestion(minimal_cidrs=["1.1.1.1/32"])])
+
+    single = rules.build_rules(a, IngressConfig(scoping_mode="ip_only", policy_scope="all_workspaces"))
+    assert rules.planned_policy_ids(single, IngressConfig(policy_scope="all_workspaces"), "prof", 42) == [
+        "prof"
+    ]
+
+    # per_workspace fans out to one '<prefix>-ws-<id>' id per workspace target (keys only matter).
+    pw = {101: {"allow": [], "deny": []}, 202: {"allow": [], "deny": []}}
+    ids = rules.planned_policy_ids(pw, IngressConfig(policy_scope="per_workspace"), "prof", None)
+    assert ids == ["prof-ws-101", "prof-ws-202"]
+
+
 def test_only_threat_groups_excluded():
     a = _analysis(
         [

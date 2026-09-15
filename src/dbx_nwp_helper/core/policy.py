@@ -219,6 +219,13 @@ def apply_ingress(
         action = "created"
 
     setattr(existing, target_attr, block)
+    # `ingress` and `ingress_dry_run` are mutually exclusive on the API ("Only one of ingress or
+    # ingress_dry_run can be set at a time") — they're the enforce- vs dry-run-mode form of the same
+    # ingress config. Setting one must clear the other, or updating a policy that already carries the
+    # opposite mode's block would send both and be rejected. Clearing it is how a mode switch
+    # (e.g. enforce -> dry_run) actually takes effect.
+    opposite_attr = "ingress" if target_attr == "ingress_dry_run" else "ingress_dry_run"
+    setattr(existing, opposite_attr, None)
     # Ensure the opposite direction is defined but never clobbered: only add a permissive egress
     # default when the policy has none (a fresh policy, or one somehow created without egress).
     if getattr(existing, "egress", None) is None:

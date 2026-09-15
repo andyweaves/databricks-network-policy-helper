@@ -364,6 +364,23 @@ def _single_policy_id(cfg: IngressConfig, profile: str | None, this_workspace_id
     return policy.policy_name("", explicit=name)
 
 
+def _ws_policy_id(cfg: IngressConfig, profile: str | None, workspace_id) -> str:
+    """The per-workspace policy id ('<prefix>-ws-<id>') apply() writes under per_workspace scope."""
+    prefix = cfg.policy_name or profile or DEFAULT_NAME_PREFIX
+    return policy.policy_name(prefix, workspace_id=workspace_id)
+
+
+def planned_policy_ids(
+    policies: dict, cfg: IngressConfig, profile: str | None, this_workspace_id
+) -> list[str]:
+    """The policy id(s) apply() will create/update — one for single-policy scopes, one per workspace
+    target for per_workspace. The CLI overwrite pre-check inspects exactly these ids."""
+    if cfg.policy_scope != "per_workspace":
+        return [_single_policy_id(cfg, profile, this_workspace_id)]
+    ws_targets = sorted(t for t in policies if t != ALL_WORKSPACES and int(t) != 0)
+    return [_ws_policy_id(cfg, profile, tgt) for tgt in ws_targets]
+
+
 def export_payload(
     policies: dict,
     cfg: IngressConfig,
@@ -430,9 +447,8 @@ def apply(
         results.append(result)
     else:
         ws_targets = sorted(t for t in policies if t != ALL_WORKSPACES and int(t) != 0)
-        prefix = cfg.policy_name or profile or DEFAULT_NAME_PREFIX
         for tgt in ws_targets:
-            pid = policy.policy_name(prefix, workspace_id=tgt)
+            pid = _ws_policy_id(cfg, profile, tgt)
             p = policies[tgt]
             block = policy.build_ingress_block(p["allow"], p["deny"], mode_label, note)
             try:

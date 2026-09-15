@@ -865,6 +865,41 @@ def _confirm_write(cfg_mode: str, yes: bool) -> bool:
     )
 
 
+def _confirm_overwrite_policy(account, policy_id: str, direction: str, yes: bool) -> None:
+    """Before writing the `direction` ('ingress'/'egress') block of a policy that ALREADY EXISTS,
+    warn when that same direction already carries real rules this run would replace, and get a Y/N.
+    The opposite direction is left untouched by apply_*, so it doesn't count — this fires only on
+    genuine same-direction data loss (so composing a new direction onto a policy won't prompt). A
+    missing policy, or an empty / permissive one (e.g. the account default policy), is silent.
+    --yes / non-interactive proceeds after printing the warning; 'No' aborts cleanly (exit 0)."""
+    from databricks.sdk.errors import NotFound
+
+    from .core import acl as acl_core
+
+    try:
+        pol = account.network_policies.get_network_policy_rpc(network_policy_id=policy_id)
+    except NotFound:
+        return  # brand-new policy id — nothing to overwrite
+    except Exception:  # noqa: BLE001 - best-effort; a read failure shouldn't block the write
+        return
+    content = acl_core.ingress_content(pol) if direction == "ingress" else acl_core.egress_content(pol)
+    if not content:
+        return  # empty / permissive in this direction — safe to write, no prompt
+    console.banner(
+        "warn",
+        f"Policy '{policy_id}' already exists and its {direction} config will be REPLACED "
+        f"(the opposite direction is left unchanged):\n  • " + "\n  • ".join(content),
+    )
+    if not _interactive(yes):
+        return
+    if not typer.confirm(
+        typer.style(f"Overwrite the existing {direction} rules on '{policy_id}'?", fg="yellow"),
+        default=False,
+    ):
+        console.banner("info", "Aborted — nothing written.")
+        raise typer.Exit(code=0)
+
+
 def _checkpoint(yes: bool) -> None:
     """Step-through pause after a results/preview section: let the user review it and choose whether
     to continue. Aborts the run cleanly (exit 0) on 'n'. On by default; skipped with --yes and in
@@ -1467,6 +1502,13 @@ def _run_ingress(cfg: IngressConfig, conn: Connection, yes: bool) -> None:
         new_id = rules._single_policy_id(cfg, conn.profile, this_ws)
         _ingress_preflight(account, this_ws, new_id, yes)
 
+    # Guard against silently clobbering an existing policy's ingress rules — for every id apply()
+    # would write (one for single-policy scopes, one per workspace target for per_workspace). Covers
+    # create_new whose id happens to already exist and add_to_existing alike (apply_ingress replaces
+    # the ingress block either way).
+    for target_id in rules.planned_policy_ids(policies, cfg, conn.profile, this_ws):
+        _confirm_overwrite_policy(account, target_id, "ingress", yes)
+
     if not _confirm_write(cfg.policy_mode, yes):
         console.banner("info", "Aborted — nothing written.")
         return
@@ -1586,6 +1628,13 @@ def _run_egress(cfg: EgressConfig, conn: Connection, yes: bool) -> None:
     ):
         new_id = eg._single_policy_id(cfg, conn.profile, apply_ws)
         _egress_preflight(account, apply_ws, new_id, yes)
+
+    # Guard against silently clobbering an existing policy's egress rules — for every id apply()
+    # would write (one for single-policy scopes, one per workspace target for per_workspace). Covers
+    # create_new whose id happens to already exist and add_to_existing alike (apply_egress replaces
+    # the egress block either way). `previews` keys are the targets that actually get a policy.
+    for target_id in eg.planned_policy_ids(previews, cfg, conn.profile, apply_ws):
+        _confirm_overwrite_policy(account, target_id, "egress", yes)
 
     if not _confirm_write(cfg.policy_mode, yes):
         console.banner("info", "Aborted — nothing written.")
