@@ -39,7 +39,8 @@ THEME = Theme(
 
 console = Console(theme=THEME, highlight=False)
 
-# Default cap on rows rendered to the terminal; full data can be written out with --output.
+# Default cap on rows rendered to the terminal (the analysis is unaffected — only the display is
+# capped). Narrow the window with --min-events / --lookback-days to see fewer, higher-signal rows.
 MAX_TABLE_ROWS = 100
 
 
@@ -131,7 +132,8 @@ def dataframe(
     if len(df) > max_rows:
         console.print(
             f"[muted]… showing {max_rows:,} of {len(df):,} rows "
-            f"(use --output to write the full result).[/muted]"
+            f"(display only — the full set is still analysed; "
+            f"narrow with --min-events / --lookback-days).[/muted]"
         )
 
 
