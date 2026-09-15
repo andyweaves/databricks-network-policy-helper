@@ -83,6 +83,37 @@ def egress_enforced(egress) -> bool:
     return str(getattr(mode, "value", mode) or "") == "ENFORCED"
 
 
+def _ingress_rule_summary(ingress) -> str:
+    """'<n> allow / <m> deny rule(s)' for an ingress block's public_access sub-block."""
+    pa = getattr(ingress, "public_access", None)
+    n_allow = len(getattr(pa, "allow_rules", None) or [])
+    n_deny = len(getattr(pa, "deny_rules", None) or [])
+    return f"{n_allow} allow / {n_deny} deny rule(s)"
+
+
+def ingress_content(policy) -> list[str]:
+    """Human-readable descriptions of the non-empty ingress blocks on a fetched policy — the enforced
+    `ingress` and/or log-only `ingress_dry_run` — i.e. what the `ingress` command would REPLACE.
+    Empty list for a policy with no restrictive ingress (a permissive / default policy)."""
+    lines = []
+    for attr, label in (("ingress", "enforced ingress"), ("ingress_dry_run", "dry-run ingress")):
+        blk = getattr(policy, attr, None)
+        if public_restrictive(blk):
+            lines.append(f"{label}: public — {_ingress_rule_summary(blk)}")
+        elif private_or_xws_restrictive(blk):
+            lines.append(f"{label}: private-access / cross-workspace rules")
+    return lines
+
+
+def egress_content(policy) -> list[str]:
+    """Human-readable description of the non-empty egress block on a fetched policy — what the
+    `egress` command would REPLACE. Empty list for a permissive (FULL_ACCESS) / absent egress."""
+    egr = getattr(policy, "egress", None)
+    if not egress_restrictive(egr):
+        return []
+    return [f"{'enforced' if egress_enforced(egr) else 'dry-run'} egress: restricted destinations"]
+
+
 def assigned_policy(account, workspace_id) -> tuple[str | None, object | None]:
     """(assigned_policy_id, full policy object) for the workspace — (id, None) if the policy read
     failed, (None, None) if nothing is assigned. Best-effort."""

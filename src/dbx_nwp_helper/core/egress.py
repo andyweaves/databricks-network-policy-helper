@@ -656,6 +656,24 @@ def _single_policy_id(cfg: EgressConfig, profile, this_workspace_id) -> str:
     return policy.policy_name("", explicit=name)
 
 
+def _ws_policy_id(cfg: EgressConfig, profile, workspace_id) -> str:
+    """The per-workspace policy id ('<prefix>-ws-<id>') apply() writes under per_workspace scope."""
+    from . import policy
+
+    prefix = cfg.policy_name or profile or DEFAULT_NAME_PREFIX
+    return policy.policy_name(prefix, workspace_id=int(workspace_id))
+
+
+def planned_policy_ids(blocks: dict, cfg: EgressConfig, profile, this_workspace_id) -> list[str]:
+    """The policy id(s) apply() will create/update — one for single-policy scopes, one per workspace
+    target (with content) for per_workspace. The CLI overwrite pre-check inspects exactly these ids.
+    Pass the preview/blocks dict so per_workspace enumerates only targets that actually get a policy."""
+    if cfg.policy_scope != "per_workspace":
+        return [_single_policy_id(cfg, profile, this_workspace_id)]
+    ws_targets = sorted(t for t in blocks if t != ALL_WORKSPACES and int(t) != 0)
+    return [_ws_policy_id(cfg, profile, tgt) for tgt in ws_targets]
+
+
 def export_payload(
     analysis: EgressAnalysis,
     cfg: EgressConfig,
@@ -700,8 +718,7 @@ def apply(
         if tgt == ALL_WORKSPACES:
             pid = _single_policy_id(cfg, profile, this_workspace_id)
         else:
-            prefix = cfg.policy_name or profile or DEFAULT_NAME_PREFIX
-            pid = policy.policy_name(prefix, workspace_id=int(tgt))
+            pid = _ws_policy_id(cfg, profile, tgt)
         bind_ws = this_workspace_id if tgt == ALL_WORKSPACES else int(tgt)
         try:
             action, effective_id = policy.apply_egress(

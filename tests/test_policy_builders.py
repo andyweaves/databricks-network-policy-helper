@@ -113,6 +113,53 @@ def test_apply_ingress_update_leaves_existing_egress_untouched():
     assert acct.updated.egress.network_access.restriction_mode.value == "RESTRICTED_ACCESS"
 
 
+def test_apply_ingress_update_clears_opposite_mode_field():
+    # Regression: ingress and ingress_dry_run are mutually exclusive on the API. Updating a policy
+    # that already has an enforced `ingress` block, in dry_run mode, must CLEAR ingress and set only
+    # ingress_dry_run — otherwise both are sent and the API rejects the PUT.
+    from databricks.sdk.service.settings import AccountNetworkPolicy
+
+    existing = AccountNetworkPolicy(
+        account_id="acc",
+        network_policy_id="p",
+        egress=policy.build_full_access_egress(),
+        ingress=policy.build_ingress_block([_allow()], [], "enforced", ""),
+    )
+    acct = _UpdateAcct(existing)
+    block = policy.build_ingress_block([_allow()], [], "dry-run", "")
+    policy.apply_ingress(acct, "acc", "p", block, "ingress_dry_run")
+    assert acct.updated.ingress is None  # opposite mode cleared
+    assert acct.updated.ingress_dry_run is not None  # new dry-run block set
+
+
+def test_ingress_content_reports_populated_blocks_and_empty_for_permissive():
+    from dbx_nwp_helper.core import acl
+
+    populated = types_ns(
+        ingress=policy.build_ingress_block([_allow()], [], "enforced", ""),
+        ingress_dry_run=None,
+    )
+    assert acl.ingress_content(populated) == ["enforced ingress: public — 1 allow / 0 deny rule(s)"]
+
+    permissive = types_ns(ingress=policy.build_full_access_ingress(), ingress_dry_run=None)
+    assert acl.ingress_content(permissive) == []
+
+
+def test_egress_content_reports_restricted_and_empty_for_full_access():
+    from dbx_nwp_helper.core import acl
+
+    assert acl.egress_content(types_ns(egress=_restricted_egress())) == [
+        "dry-run egress: restricted destinations"
+    ]
+    assert acl.egress_content(types_ns(egress=policy.build_full_access_egress())) == []
+
+
+def types_ns(**kw):
+    import types
+
+    return types.SimpleNamespace(**kw)
+
+
 def test_ingress_rule_ip_ranges_wrapped():
     rule = policy.build_ingress_rule(_allow(), "dry-run").as_dict()
     assert rule["origin"]["included_ip_ranges"]["ip_ranges"] == ["1.2.3.4/32"]

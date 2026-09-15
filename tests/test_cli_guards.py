@@ -3,6 +3,8 @@ message and a non-zero exit, not crash with a KeyError."""
 
 from __future__ import annotations
 
+import types
+
 import pandas as pd
 import pytest
 from typer.testing import CliRunner
@@ -154,6 +156,91 @@ def test_confirm_truncation_accept_proceeds(monkeypatch):
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     monkeypatch.setattr("typer.confirm", lambda *a, **k: True)
     cli._confirm_truncation(["capped 60 rules -> 50"], yes=False)  # must not raise
+
+
+class _PolicyAcct:
+    """Fake account whose get_network_policy_rpc returns `pol`, or raises NotFound if pol is None."""
+
+    def __init__(self, pol):
+        from databricks.sdk.errors import NotFound
+
+        class _NP:
+            def get_network_policy_rpc(self, network_policy_id):
+                if pol is None:
+                    raise NotFound("no such policy")
+                return pol
+
+        self.network_policies = _NP()
+
+
+def _policy_with_ingress():
+    from dbx_nwp_helper.core import policy
+
+    return types.SimpleNamespace(
+        ingress=policy.build_ingress_block([_allow_spec()], [], "enforced", ""),
+        ingress_dry_run=None,
+    )
+
+
+def _allow_spec():
+    return {
+        "label": "r",
+        "cidrs": ["1.2.3.4/32"],
+        "destination": "all_destinations",
+        "identity_type": "ALL_USERS",
+        "identities": [],
+    }
+
+
+def test_confirm_overwrite_missing_policy_is_noop(monkeypatch):
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr(
+        "typer.confirm", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not prompt"))
+    )
+    cli._confirm_overwrite_policy(_PolicyAcct(None), "p", "ingress", yes=False)  # NotFound -> no raise
+
+
+def test_confirm_overwrite_permissive_policy_is_noop(monkeypatch):
+    from dbx_nwp_helper.core import policy
+
+    permissive = types.SimpleNamespace(ingress=policy.build_full_access_ingress(), ingress_dry_run=None)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr(
+        "typer.confirm", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not prompt"))
+    )
+    cli._confirm_overwrite_policy(_PolicyAcct(permissive), "p", "ingress", yes=False)  # empty -> no raise
+
+
+def test_confirm_overwrite_populated_yes_skips_prompt(monkeypatch):
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr(
+        "typer.confirm", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not prompt with --yes"))
+    )
+    cli._confirm_overwrite_policy(_PolicyAcct(_policy_with_ingress()), "p", "ingress", yes=True)
+
+
+def test_confirm_overwrite_populated_noninteractive_skips_prompt(monkeypatch):
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    monkeypatch.setattr(
+        "typer.confirm", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not prompt scripted"))
+    )
+    cli._confirm_overwrite_policy(_PolicyAcct(_policy_with_ingress()), "p", "ingress", yes=False)
+
+
+def test_confirm_overwrite_populated_decline_aborts(monkeypatch):
+    import typer
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("typer.confirm", lambda *a, **k: False)
+    with pytest.raises(typer.Exit) as exc:
+        cli._confirm_overwrite_policy(_PolicyAcct(_policy_with_ingress()), "p", "ingress", yes=False)
+    assert exc.value.exit_code == 0
+
+
+def test_confirm_overwrite_populated_accept_proceeds(monkeypatch):
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("typer.confirm", lambda *a, **k: True)
+    cli._confirm_overwrite_policy(_PolicyAcct(_policy_with_ingress()), "p", "ingress", yes=False)
 
 
 def test_run_analysis_returns_value_on_success():
