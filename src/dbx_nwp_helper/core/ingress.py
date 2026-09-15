@@ -55,6 +55,9 @@ class IngressAnalysis:
     excluded_flagged: int = 0
     excluded_unresolved: int = 0
     skipped_ipv6: int = 0
+    # Truncation messages recorded when rules/CIDRs/identities were auto-capped to fit policy limits
+    # (see build_rules / core.limits). Drives the CLI's truncation decision-point gate.
+    truncations: list[str] = field(default_factory=list)
     # Populated only when the candidate set is empty: a one-row filter-funnel dict explaining where
     # the audit rows were dropped (see queries.candidate_funnel).
     funnel: dict | None = None

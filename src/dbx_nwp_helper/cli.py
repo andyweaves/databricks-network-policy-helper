@@ -885,6 +885,25 @@ def _interactive(yes: bool) -> bool:
     return not yes and sys.stdin.isatty()
 
 
+def _confirm_truncation(truncations: list[str], yes: bool) -> None:
+    """Decision point when rules / CIDRs / destinations were auto-capped to fit policy limits. The
+    per-item warnings already printed inline during build/preview; this forces the operator to
+    acknowledge that some rules were dropped before continuing to export/apply. Skipped by --yes and
+    non-interactively (scripted runs proceed). 'No' stops the run cleanly (exit 0)."""
+    if not truncations or not _interactive(yes):
+        return
+    n = len(truncations)
+    if not typer.confirm(
+        typer.style(
+            f"⚠️  {n} truncation(s) were applied to fit policy limits (see warnings above). Continue?",
+            fg="yellow",
+        ),
+        default=False,
+    ):
+        console.banner("info", "Stopped — nothing further was done.")
+        raise typer.Exit(code=0)
+
+
 def _checkbox_keep(title: str, choices: list) -> list | None:
     """Show a pre-checked checkbox of `choices` (questionary.Choice with .value); return the list of
     kept values, or None if the user cancelled (Ctrl-C). All start checked so 'keep everything' is a
@@ -1414,6 +1433,7 @@ def _run_ingress(cfg: IngressConfig, conn: Connection, yes: bool) -> None:
     render.ingress_preview(previews, cfg, analysis)
     if previews:
         console.responsibility_warning("source IP addresses / CIDRs")
+    _confirm_truncation(analysis.truncations, yes)
 
     if cfg.export:
         if previews:
@@ -1534,6 +1554,7 @@ def _run_egress(cfg: EgressConfig, conn: Connection, yes: bool) -> None:
     render.egress_preview(previews, cfg)
     if previews:
         console.responsibility_warning("FQDNs and storage destinations")
+    _confirm_truncation(analysis.truncations, yes)
 
     if cfg.export:
         if previews:
