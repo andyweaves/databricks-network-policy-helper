@@ -91,6 +91,25 @@ def test_policy_url_strips_trailing_slash():
     assert "//security" not in url
 
 
+def test_dataframe_truncation_footer_has_no_bogus_flag(capsys):
+    # The over-cap footer used to point at a non-existent --output flag; it must not anymore.
+    from dbx_nwp_helper import console
+
+    df = pd.DataFrame({"n": range(console.MAX_TABLE_ROWS + 5)})
+    console.dataframe(df, "Big table")
+    out = capsys.readouterr().out
+    assert f"showing {console.MAX_TABLE_ROWS:,} of {len(df):,} rows" in out
+    assert "--output" not in out
+
+
+def test_dataframe_no_footer_when_within_cap(capsys):
+    from dbx_nwp_helper import console
+
+    df = pd.DataFrame({"n": range(3)})
+    console.dataframe(df, "Small table")
+    assert "showing" not in capsys.readouterr().out
+
+
 def test_fmt_flag_none_is_no():
     assert render._fmt_flag(None) == "no"
 
