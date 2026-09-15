@@ -1373,6 +1373,48 @@ _SQL_UNAVAILABLE_SIGNATURES = (
 )
 
 
+# A source system table the analysis reads doesn't exist — the `system.access` schema (or that
+# specific table) isn't enabled/available in this workspace's metastore. An enablement issue, not a
+# bug, so give clear guidance rather than a traceback.
+_MISSING_TABLE_SIGNATURE = "TABLE_OR_VIEW_NOT_FOUND"
+
+# Per-table guidance keyed by the system.access table name. outbound_network is the serverless-egress
+# (SEG) monitoring table; audit is the audit log. Both live in the `access` system schema.
+_SYSTEM_TABLE_GUIDANCE = {
+    "outbound_network": (
+        "`system.access.outbound_network` records serverless egress (SEG) network traffic and is "
+        "what the egress command analyses. It's available only once the `access` system schema is "
+        "enabled for the workspace's metastore AND serverless egress logging has produced data — "
+        "stand up a dry-run egress network policy first so outbound traffic is logged, give it time "
+        "to populate, then re-run."
+    ),
+    "audit": (
+        "`system.access.audit` is the audit-log system table the ingress command analyses. Enable "
+        "the `access` system schema for the workspace's metastore (an account / metastore admin), "
+        "then re-run."
+    ),
+}
+
+
+def _missing_table_message(msg: str) -> str:
+    """Actionable message for a TABLE_OR_VIEW_NOT_FOUND on one of the source system tables — names the
+    missing table (parsed from the error) and how to enable it. Falls back to generic guidance."""
+    import re
+
+    m = re.search(r"`system`\.`access`\.`([a-z_]+)`", msg)
+    table = m.group(1) if m else None
+    head = (
+        f"The system table system.access.{table} isn't available in this workspace."
+        if table
+        else "A system.access system table isn't available in this workspace."
+    )
+    tail = _SYSTEM_TABLE_GUIDANCE.get(table) or (
+        "Enable the `access` system schema for the workspace's metastore (an account / metastore "
+        "admin) and confirm the table exists, then re-run."
+    )
+    return f"{head}\n\n{tail}\n\nNothing was written."
+
+
 def _run_analysis(analyze_call):
     """Run an engine's analysis SQL, turning known SQL/warehouse failures into a clear, actionable
     message instead of a raw traceback. Unrecognised errors are re-raised unchanged."""
@@ -1380,6 +1422,9 @@ def _run_analysis(analyze_call):
         return analyze_call()
     except Exception as e:  # noqa: BLE001 - narrowed by message signature below, else re-raised
         msg = str(e)
+        if _MISSING_TABLE_SIGNATURE in msg:
+            console.banner("danger", _missing_table_message(msg))
+            raise typer.Exit(code=1) from None
         if any(sig in msg for sig in _UNSUPPORTED_SQL_SIGNATURES):
             console.banner(
                 "danger",
