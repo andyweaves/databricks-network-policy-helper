@@ -31,7 +31,8 @@ def _group_label(row) -> str:
     """Owner-grouped allow-rule label (the policy name already identifies the policy, so rule
     labels don't repeat it):
       (a) databricks-<cloud>     when the group is Databricks-owned
-      (b) <cloud>-<rdap_owner>   when it's in a cloud-provider range
+      (b) <cloud>-<rdap_owner>   when it's in a cloud-provider range and the owner doesn't already
+                                 name the cloud; otherwise just <rdap_owner>
       (c) <rdap_owner>           otherwise (non-cloud candidate)
     `rdap_owner` may be a bare CIDR when RDAP didn't resolve — still a valid, readable label."""
     owner = _slug(row["rdap_owner"])
@@ -39,8 +40,12 @@ def _group_label(row) -> str:
         cloud = _slug((row["databricks_owned"] or ["databricks"])[0])
         base = f"databricks-{cloud}"
     elif row["cloud_provider"]:
+        # For cloud-owned IPs the owner is already the friendly cloud label (see
+        # ingress._known_owner), so prefixing the cloud token would double it up
+        # ("aws-Amazon-Web-Services-AWS"). Only add the prefix when the owner doesn't already
+        # name the cloud.
         cloud = _slug((row["cloud_provider"] or [""])[0])
-        base = f"{cloud}-{owner}"
+        base = owner if cloud.lower() in owner.lower() else f"{cloud}-{owner}"
     else:
         base = owner
     return base[:250]
@@ -188,12 +193,18 @@ def build_rules(
     if deny_specs and not target_specs:
         target_specs[ALL_WORKSPACES] = []
 
+    # Capture the limit-enforcement warnings so the CLI can surface a truncation decision-point gate,
+    # while still emitting them inline via `note` exactly as before.
+    truncations: list[str] = []
+
+    def _limit_warn(m):
+        truncations.append(m)
+        note(m)
+
     policies = {}
     for tgt in sorted(target_specs, key=str):
         label = "single policy" if tgt == ALL_WORKSPACES else f"workspace {tgt}"
-        allow, deny = limits.enforce_limits(
-            list(target_specs[tgt]), list(deny_specs), label, lambda m: note(m)
-        )
+        allow, deny = limits.enforce_limits(list(target_specs[tgt]), list(deny_specs), label, _limit_warn)
         policies[tgt] = {"allow": allow, "deny": deny}
 
     if cfg.policy_scope == "per_workspace" and len(policies) > MAX_POLICIES_PER_ACCOUNT:
@@ -214,6 +225,7 @@ def build_rules(
     analysis.excluded_flagged = excluded_flagged
     analysis.excluded_unresolved = excluded_unresolved
     analysis.skipped_ipv6 = skipped_ipv6
+    analysis.truncations = truncations
     return policies
 
 

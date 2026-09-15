@@ -79,6 +79,9 @@ class EgressAnalysis:
     # Storage destinations excluded because their cloud != the workspace's (the API rejects them).
     # List of (provider_label, display_name) — flagged only, never allow-listed.
     skipped_cross_cloud_storage: list = field(default_factory=list)
+    # Truncation messages recorded when destinations were auto-capped to fit the per-policy egress
+    # limits (see _blocked_domains / _warn_egress_limits). Drives the CLI truncation gate.
+    truncations: list[str] = field(default_factory=list)
 
 
 def _classify(host: str) -> tuple[str, dict]:
@@ -487,9 +490,11 @@ def _blocked_domains(analysis: EgressAnalysis, cfg: EgressConfig, note: Note):
     else:
         blocked = sorted(feed)
     if len(blocked) > MAX_INTERNET_DESTINATIONS:
-        note(
+        _record_truncation(
+            analysis,
             f"{len(blocked)} blocked domains > {MAX_INTERNET_DESTINATIONS} limit — keeping the "
-            f"first {MAX_INTERNET_DESTINATIONS}. Use matched_only to narrow."
+            f"first {MAX_INTERNET_DESTINATIONS}. Use matched_only to narrow.",
+            note,
         )
         blocked = blocked[:MAX_INTERNET_DESTINATIONS]
     analysis.blocked_domains = blocked
@@ -589,27 +594,39 @@ def _target_has_content(t: dict, blocked_domains: list) -> bool:
     return bool(t["s3"] or t["gcs"] or t["azure"] or t["internet"] or blocked_domains)
 
 
-def _warn_egress_limits(t: dict, tgt, note: Note) -> None:
+def _record_truncation(analysis: EgressAnalysis, msg: str, note: Note) -> None:
+    """Emit a truncation message via `note` and record it on the analysis (deduped — build_blocks
+    runs several times per flow) so the CLI can gate on whether any truncation happened."""
+    note(msg)
+    if msg not in analysis.truncations:
+        analysis.truncations.append(msg)
+
+
+def _warn_egress_limits(analysis: EgressAnalysis, t: dict, tgt, note: Note) -> None:
     """Warn when a target's destinations exceed the per-policy egress caps (100 internet FQDNs / 100
     storage destinations). The excess is dropped from the allow-list — and would be *blocked* in
     enforce mode — so the operator must be told rather than have it happen silently."""
     where = "" if tgt == ALL_WORKSPACES else f" [workspace {tgt}]"
     n_internet = len(t["internet"])
     if n_internet > MAX_INTERNET_DESTINATIONS:
-        note(
+        _record_truncation(
+            analysis,
             f"{n_internet} internet FQDN destinations{where} exceed the "
             f"{MAX_INTERNET_DESTINATIONS}-destination egress limit — keeping the "
             f"{MAX_INTERNET_DESTINATIONS} highest-traffic; the rest won't be allow-listed (and "
             f"would be blocked in enforce mode). Raise --min-events or narrow --lookback-days to "
-            f"fit under the cap."
+            f"fit under the cap.",
+            note,
         )
     n_storage = len(t["s3"]) + len(t["gcs"]) + len(t["azure"])
     if n_storage > MAX_STORAGE_DESTINATIONS:
-        note(
+        _record_truncation(
+            analysis,
             f"{n_storage} storage destinations{where} exceed the "
             f"{MAX_STORAGE_DESTINATIONS}-destination egress limit — keeping the "
             f"{MAX_STORAGE_DESTINATIONS} highest-traffic; the rest won't be allow-listed (and "
-            f"would be blocked in enforce mode)."
+            f"would be blocked in enforce mode).",
+            note,
         )
 
 
@@ -619,7 +636,7 @@ def build_blocks(analysis: EgressAnalysis, cfg: EgressConfig, note: Note = lambd
     for tgt, t in analysis.targets.items():
         if not _target_has_content(t, analysis.blocked_domains):
             continue
-        _warn_egress_limits(t, tgt, note)
+        _warn_egress_limits(analysis, t, tgt, note)
         blocks[tgt] = _build_egress_block(t, analysis.blocked_domains, cfg.policy_mode)
     return blocks
 

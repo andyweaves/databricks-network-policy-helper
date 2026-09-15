@@ -116,6 +116,46 @@ def test_checkpoint_decline_aborts_cleanly(monkeypatch):
     assert exc.value.exit_code == 0  # 'n' -> clean abort
 
 
+def test_confirm_truncation_no_truncations_is_noop(monkeypatch):
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr(
+        "typer.confirm", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not prompt"))
+    )
+    cli._confirm_truncation([], yes=False)  # nothing truncated -> no prompt, no raise
+
+
+def test_confirm_truncation_yes_skips_prompt(monkeypatch):
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr(
+        "typer.confirm", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not prompt with --yes"))
+    )
+    cli._confirm_truncation(["capped 60 rules -> 50"], yes=True)  # must not raise
+
+
+def test_confirm_truncation_noninteractive_skips_prompt(monkeypatch):
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    monkeypatch.setattr(
+        "typer.confirm", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not prompt scripted"))
+    )
+    cli._confirm_truncation(["capped 60 rules -> 50"], yes=False)  # must not raise
+
+
+def test_confirm_truncation_decline_aborts_cleanly(monkeypatch):
+    import typer
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("typer.confirm", lambda *a, **k: False)
+    with pytest.raises(typer.Exit) as exc:
+        cli._confirm_truncation(["capped 60 rules -> 50"], yes=False)
+    assert exc.value.exit_code == 0  # 'n' -> clean abort
+
+
+def test_confirm_truncation_accept_proceeds(monkeypatch):
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("typer.confirm", lambda *a, **k: True)
+    cli._confirm_truncation(["capped 60 rules -> 50"], yes=False)  # must not raise
+
+
 def test_run_analysis_returns_value_on_success():
     assert cli._run_analysis(lambda: "ok") == "ok"
 

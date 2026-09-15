@@ -84,6 +84,21 @@ def test_cloud_owned_included_with_cloud_label():
     assert a.excluded_flagged == 0
 
 
+def test_cloud_owned_label_not_redundant_with_friendly_owner():
+    # When the owner is the friendly cloud label (the usual case for cloud-owned IPs, set by
+    # ingress._known_owner), the <cloud>- prefix would double up ("aws-Amazon-Web-Services-AWS").
+    # The label should just be the friendly owner slug — matching the table's owner column.
+    for owner, cloud, expected in [
+        ("Amazon Web Services (AWS)", "aws", "Amazon-Web-Services-AWS"),
+        ("Google Cloud Platform (GCP)", "gcp", "Google-Cloud-Platform-GCP"),
+        ("Microsoft Azure", "azure", "Microsoft-Azure"),
+    ]:
+        a = _analysis([_suggestion(rdap_owner=owner, cloud_provider=[cloud], minimal_cidrs=["8.8.8.8/32"])])
+        pols = rules.build_rules(a, IngressConfig(scoping_mode="ip_only"))
+        labels = [s["label"] for s in pols[ALL_WORKSPACES]["allow"]]
+        assert labels == [expected], f"{cloud}: {labels}"
+
+
 def test_only_threat_groups_excluded():
     a = _analysis(
         [
