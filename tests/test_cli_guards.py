@@ -259,6 +259,57 @@ def test_run_analysis_handles_inet_unsupported(capsys):
     assert "preview" in _plain(capsys.readouterr().out).lower()
 
 
+def test_run_analysis_handles_missing_outbound_network_table(capsys):
+    import typer
+
+    # The reported failure: egress source system table absent on the workspace.
+    def boom():
+        raise RuntimeError(
+            "[TABLE_OR_VIEW_NOT_FOUND] The table or view `system`.`access`.`outbound_network` "
+            "cannot be found. Verify the spelling and correctness of the schema and catalog. "
+            "SQLSTATE: 42P01; line 12 pos 9"
+        )
+
+    with pytest.raises(typer.Exit) as exc:
+        cli._run_analysis(boom)
+    assert exc.value.exit_code == 1
+    out = _plain(capsys.readouterr().out)
+    assert "system.access.outbound_network" in out
+    assert "serverless egress" in out.lower()
+    assert "Traceback" not in out
+
+
+def test_run_analysis_handles_missing_audit_table(capsys):
+    import typer
+
+    def boom():
+        raise RuntimeError(
+            "[TABLE_OR_VIEW_NOT_FOUND] The table or view `system`.`access`.`audit` cannot be found. "
+            "SQLSTATE: 42P01"
+        )
+
+    with pytest.raises(typer.Exit) as exc:
+        cli._run_analysis(boom)
+    assert exc.value.exit_code == 1
+    out = _plain(capsys.readouterr().out)
+    assert "system.access.audit" in out
+    assert "system schema" in out.lower()
+
+
+def test_run_analysis_missing_table_generic_fallback(capsys):
+    import typer
+
+    # Unparseable table name -> generic enablement guidance, still no traceback.
+    def boom():
+        raise RuntimeError("[TABLE_OR_VIEW_NOT_FOUND] something is missing. SQLSTATE: 42P01")
+
+    with pytest.raises(typer.Exit) as exc:
+        cli._run_analysis(boom)
+    assert exc.value.exit_code == 1
+    out = _plain(capsys.readouterr().out)
+    assert "system schema" in out.lower()
+
+
 def test_run_analysis_handles_warehouse_timeout(capsys):
     import typer
 
