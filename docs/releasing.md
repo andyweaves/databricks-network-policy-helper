@@ -10,8 +10,8 @@ How to cut a release of `dbx-nwp-helper`. Versioning is **tag-driven** (via
   flag surface: a breaking change bumps the **major**, a backward-compatible addition the
   **minor**, a fix the **patch**.
 - The version is derived from the git tag. `dbx-nwp-helper --version` reports it. On a clean,
-  tagged commit it's the exact number (`1.0.0`); between tags it's a PEP 440 dev version
-  (`1.0.1.devN+g<sha>`); a dirty working tree adds a `.dYYYYMMDD` suffix.
+  tagged commit it's the exact number (`0.1.0`); between tags it's a PEP 440 dev version
+  (`0.1.1.devN+g<sha>`); a dirty working tree adds a `.dYYYYMMDD` suffix.
 
 ## Steps
 
