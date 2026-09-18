@@ -1,6 +1,9 @@
 [project]
 name = "databricks-network-policy-helper"
-version = "0.1.0"
+# Version is derived from the git tag by hatch-vcs (see [tool.hatch.version]); a release is
+# cut by tagging the commit `vX.Y.Z`. Between tags the build reports a PEP 440 dev version
+# (e.g. 1.0.1.dev3+g<sha>). Never hardcode it here.
+dynamic = ["version"]
 description = "Build Databricks account network policies from real observed traffic — a visually engaging CLI for context-based ingress (CBI), serverless egress (SEG), and IP ACL migration."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -38,8 +41,15 @@ dev = [
 ]
 
 [build-system]
-requires = ["hatchling"]
+# Upper bounds keep the build resolvable behind the internal PyPI mirror, which does not serve the
+# very latest hatchling / the setuptools-scm 10.x → vcs-versioning chain. Public PyPI (CI) is happy
+# with these too. Relax the ceilings once the mirror approves the newer releases.
+requires = ["hatchling<1.32", "hatch-vcs>=0.4,<0.5", "setuptools-scm<10"]
 build-backend = "hatchling.build"
+
+# Derive the package version from the git tag (single source of truth). Tag `v1.0.0` -> 1.0.0.
+[tool.hatch.version]
+source = "vcs"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/dbx_nwp_helper"]

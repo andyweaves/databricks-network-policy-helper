@@ -45,8 +45,24 @@ feeds_app = typer.Typer(no_args_is_help=True, help="Manage the local feed cache.
 app.add_typer(feeds_app, name="feeds")
 
 
+def _version_callback(value: bool) -> None:
+    if value:
+        from . import __version__
+
+        typer.echo(f"dbx-nwp-helper {__version__}")
+        raise typer.Exit()
+
+
 @app.callback()
-def _main() -> None:
+def _main(
+    version: bool = typer.Option(
+        None,
+        "--version",
+        callback=_version_callback,
+        is_eager=True,
+        help="Show the version and exit.",
+    ),
+) -> None:
     """Runs before every command — tag SDK requests with the tool name (usage tracking, before any
     client is built) and make TLS verification use the OS trust store so corporate proxy CAs are
     honoured by the SDK, the SQL connector, and feed downloads alike."""
