@@ -317,6 +317,34 @@ Please keep `pytest` and `ruff` green before opening a PR. When you change behav
 test — the engines (`core/`), feed parsers (`feeds/`), and query builders (`queries.py`) are all
 covered by fast, network-free unit tests, and CLI flows are exercised via Typer's `CliRunner`.
 
+## 🏷️ Versioning & releases
+
+The project follows [Semantic Versioning](https://semver.org): for this CLI the "public API" is
+the command + flag surface — a breaking change to it bumps the **major**, a backward-compatible
+addition the **minor**, a fix the **patch**.
+
+The version is **derived from the git tag** by [`hatch-vcs`](https://github.com/ofek/hatch-vcs) —
+there is no hardcoded version string. Check `dbx-nwp-helper --version` (or `uv run dbx-nwp-helper
+--version`) at any time. Between tags the build reports a PEP 440 dev version like
+`1.0.1.dev3+g<sha>`; on a tagged commit it reports the clean number.
+
+**Build or run a specific version** by checking out its tag:
+
+```bash
+git checkout v1.0.0
+uv sync                        # version resolves to 1.0.0 from the tag
+uv run dbx-nwp-helper --version
+uv build                       # -> dist/…-1.0.0-…whl
+```
+
+**Cut a release:** land your changes, then tag the commit and push the tag (record the highlights
+in [`CHANGELOG.md`](CHANGELOG.md) first):
+
+```bash
+git tag -a v1.1.0 -m "dbx-nwp-helper 1.1.0"
+git push origin v1.1.0
+```
+
 ## 📝 Notes & caveats
 
 - **Policy naming.** Both commands (`ingress` / `egress`) name the policy the same way: they
