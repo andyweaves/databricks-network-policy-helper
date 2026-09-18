@@ -326,15 +326,15 @@ addition the **minor**, a fix the **patch**.
 The version is **derived from the git tag** by [`hatch-vcs`](https://github.com/ofek/hatch-vcs) —
 there is no hardcoded version string. Check `dbx-nwp-helper --version` (or `uv run dbx-nwp-helper
 --version`) at any time. Between tags the build reports a PEP 440 dev version like
-`1.0.1.dev3+g<sha>`; on a tagged commit it reports the clean number.
+`0.1.1.dev3+g<sha>`; on a tagged commit it reports the clean number.
 
 **Build or run a specific version** by checking out its tag:
 
 ```bash
-git checkout v1.0.0
-uv sync                        # version resolves to 1.0.0 from the tag
+git checkout v0.1.0
+uv sync                        # version resolves to 0.1.0 from the tag
 uv run dbx-nwp-helper --version
-uv build                       # -> dist/…-1.0.0-…whl
+uv build                       # -> dist/…-0.1.0-…whl
 ```
 
 **Cut a release:** land your changes, then tag the commit and push the tag (record the highlights

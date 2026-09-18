@@ -13,9 +13,9 @@ commit `vX.Y.Z` — see the "Versioning & releases" section of the README.
 
 ## [Unreleased]
 
-## [1.0.0] - 2026-09-18
+## [0.1.0] - 2026-09-18
 
-First stable release. `dbx-nwp-helper` turns real observed traffic in the Databricks system
+First release. `dbx-nwp-helper` turns real observed traffic in the Databricks system
 tables into proposed **account network policies**, with a dry-run-first, review-gated apply path.
 
 ### Added
@@ -38,5 +38,5 @@ tables into proposed **account network policies**, with a dry-run-first, review-
   a best-effort Terraform `.tf`, working in propose-only mode.
 - **`--version`.** All commands expose the tool version via `dbx-nwp-helper --version`.
 
-[Unreleased]: https://github.com/andyweaves/databricks-network-policy-helper/compare/v1.0.0...HEAD
-[1.0.0]: https://github.com/andyweaves/databricks-network-policy-helper/releases/tag/v1.0.0
+[Unreleased]: https://github.com/andyweaves/databricks-network-policy-helper/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/andyweaves/databricks-network-policy-helper/releases/tag/v0.1.0

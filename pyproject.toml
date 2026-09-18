@@ -2,7 +2,7 @@
 name = "databricks-network-policy-helper"
 # Version is derived from the git tag by hatch-vcs (see [tool.hatch.version]); a release is
 # cut by tagging the commit `vX.Y.Z`. Between tags the build reports a PEP 440 dev version
-# (e.g. 1.0.1.dev3+g<sha>). Never hardcode it here.
+# (e.g. 0.1.1.dev3+g<sha>). Never hardcode it here.
 dynamic = ["version"]
 description = "Build Databricks account network policies from real observed traffic — a visually engaging CLI for context-based ingress (CBI), serverless egress (SEG), and IP ACL migration."
 readme = "README.md"
@@ -47,7 +47,7 @@ dev = [
 requires = ["hatchling<1.32", "hatch-vcs>=0.4,<0.5", "setuptools-scm<10"]
 build-backend = "hatchling.build"
 
-# Derive the package version from the git tag (single source of truth). Tag `v1.0.0` -> 1.0.0.
+# Derive the package version from the git tag (single source of truth). Tag `v0.1.0` -> 0.1.0.
 [tool.hatch.version]
 source = "vcs"
 
