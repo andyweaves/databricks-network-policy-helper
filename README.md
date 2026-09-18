@@ -345,6 +345,9 @@ git tag -a v1.1.0 -m "dbx-nwp-helper 1.1.0"
 git push origin v1.1.0
 ```
 
+The full step-by-step checklist — post-merge tagging, publishing a GitHub Release, and the
+`gh`-account gotcha for API operations — is in [`docs/releasing.md`](docs/releasing.md).
+
 ## 📝 Notes & caveats
 
 - **Policy naming.** Both commands (`ingress` / `egress`) name the policy the same way: they
