@@ -86,7 +86,7 @@ def test_apply_egress_update_leaves_existing_ingress_untouched():
         account_id="acc",
         network_policy_id="p",
         egress=policy.build_full_access_egress(),
-        ingress=policy.build_ingress_block([_allow()], [], "enforced", ""),
+        ingress=policy.build_ingress_block([_allow()], []),
     )
     acct = _UpdateAcct(existing)
     policy.apply_egress(acct, "acc", "p", _restricted_egress())
@@ -97,7 +97,7 @@ def test_apply_egress_update_leaves_existing_ingress_untouched():
 
 def test_apply_ingress_create_adds_full_access_egress_default():
     acct = _CreateAcct()
-    block = policy.build_ingress_block([_allow()], [], "dry-run", "")
+    block = policy.build_ingress_block([_allow()], [])
     policy.apply_ingress(acct, "acc", "p", block, "ingress")
     assert acct.created.as_dict()["egress"]["network_access"]["restriction_mode"] == "FULL_ACCESS"
 
@@ -107,7 +107,7 @@ def test_apply_ingress_update_leaves_existing_egress_untouched():
 
     existing = AccountNetworkPolicy(account_id="acc", network_policy_id="p", egress=_restricted_egress())
     acct = _UpdateAcct(existing)
-    block = policy.build_ingress_block([_allow()], [], "enforced", "")
+    block = policy.build_ingress_block([_allow()], [])
     policy.apply_ingress(acct, "acc", "p", block, "ingress")
     # the pre-existing restricted egress is preserved, not overwritten with a full-access default
     assert acct.updated.egress.network_access.restriction_mode.value == "RESTRICTED_ACCESS"
@@ -123,10 +123,10 @@ def test_apply_ingress_update_clears_opposite_mode_field():
         account_id="acc",
         network_policy_id="p",
         egress=policy.build_full_access_egress(),
-        ingress=policy.build_ingress_block([_allow()], [], "enforced", ""),
+        ingress=policy.build_ingress_block([_allow()], []),
     )
     acct = _UpdateAcct(existing)
-    block = policy.build_ingress_block([_allow()], [], "dry-run", "")
+    block = policy.build_ingress_block([_allow()], [])
     policy.apply_ingress(acct, "acc", "p", block, "ingress_dry_run")
     assert acct.updated.ingress is None  # opposite mode cleared
     assert acct.updated.ingress_dry_run is not None  # new dry-run block set
@@ -136,7 +136,7 @@ def test_ingress_content_reports_populated_blocks_and_empty_for_permissive():
     from dbx_nwp_helper.core import acl
 
     populated = types_ns(
-        ingress=policy.build_ingress_block([_allow()], [], "enforced", ""),
+        ingress=policy.build_ingress_block([_allow()], []),
         ingress_dry_run=None,
     )
     assert acl.ingress_content(populated) == ["enforced ingress: public — 1 allow / 0 deny rule(s)"]
@@ -161,16 +161,16 @@ def types_ns(**kw):
 
 
 def test_ingress_rule_ip_ranges_wrapped():
-    rule = policy.build_ingress_rule(_allow(), "dry-run").as_dict()
+    rule = policy.build_ingress_rule(_allow()).as_dict()
     assert rule["origin"]["included_ip_ranges"]["ip_ranges"] == ["1.2.3.4/32"]
     assert rule["destination"]["all_destinations"] is True
-    assert rule["label"].endswith("(dry-run)")
+    assert rule["label"] == "r"  # verbatim label, no mode suffix
 
 
 def test_ingress_rule_apps_and_lakebase_destinations():
-    apps = policy.build_ingress_rule(_allow(destination="apps_runtime"), "dry-run").as_dict()
+    apps = policy.build_ingress_rule(_allow(destination="apps_runtime")).as_dict()
     assert apps["destination"]["apps_runtime"]["all_destinations"] is True
-    lb = policy.build_ingress_rule(_allow(destination="lakebase_runtime"), "dry-run").as_dict()
+    lb = policy.build_ingress_rule(_allow(destination="lakebase_runtime")).as_dict()
     assert lb["destination"]["lakebase_runtime"]["all_destinations"] is True
 
 
@@ -183,18 +183,18 @@ def test_ingress_rule_selected_identities_auth_omitted_on_broad_destinations():
     ]
     for dest in ("all_destinations", "apps_runtime", "lakebase_runtime"):
         spec = _allow(destination=dest, identity_type="SELECTED_IDENTITIES", identities=ids)
-        rule = policy.build_ingress_rule(spec, "enforced").as_dict()
+        rule = policy.build_ingress_rule(spec).as_dict()
         assert "authentication" not in rule, dest
 
 
 def test_catch_all_origin():
-    rule = policy.build_ingress_rule(_allow(catch_all=True), "dry-run").as_dict()
+    rule = policy.build_ingress_rule(_allow(catch_all=True)).as_dict()
     assert rule["origin"]["all_ip_ranges"] is True
     assert "included_ip_ranges" not in rule["origin"]
 
 
 def test_deny_rule_shape():
-    rule = policy.build_deny_rule({"label": "d", "cidrs": ["9.9.9.0/24"]}, "enforced").as_dict()
+    rule = policy.build_deny_rule({"label": "d", "cidrs": ["9.9.9.0/24"]}).as_dict()
     assert rule["origin"]["included_ip_ranges"]["ip_ranges"] == ["9.9.9.0/24"]
     assert rule["destination"]["all_destinations"] is True
 
@@ -204,7 +204,6 @@ def test_deny_without_allow_injects_catch_all():
     block = policy.build_ingress_block(
         allow=[],
         deny=[{"label": "np-deny", "cidrs": ["9.9.9.0/24"]}],
-        mode_label="dry-run",
         note=notes.append,
     ).as_dict()
     pub = block["public_access"]
@@ -218,7 +217,6 @@ def test_allow_with_deny_no_catch_all():
     block = policy.build_ingress_block(
         allow=[_allow()],
         deny=[{"label": "d", "cidrs": ["9.9.9.0/24"]}],
-        mode_label="dry-run",
         note=notes.append,
     ).as_dict()
     pub = block["public_access"]
@@ -228,7 +226,7 @@ def test_allow_with_deny_no_catch_all():
 
 
 def test_restriction_mode_always_restricted():
-    block = policy.build_ingress_block([_allow()], [], "dry-run", "np").as_dict()
+    block = policy.build_ingress_block([_allow()], []).as_dict()
     assert block["public_access"]["restriction_mode"] == "RESTRICTED_ACCESS"
 
 

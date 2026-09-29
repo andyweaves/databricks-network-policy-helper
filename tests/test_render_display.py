@@ -32,8 +32,8 @@ def test_denied_requests_note_says_not_applied_when_flag_off(capsys):
 
     render.ingress_analysis(_analysis_with_denied(), IngressConfig(deny_denied_ips=False))
     out = capsys.readouterr().out
-    assert "Recently denied requests" in out
-    assert "recently blocked by the IP ACL" in out
+    assert "Recently denied inbound requests" in out
+    assert "recently blocked inbound" in out
     assert "NOT added as deny rules" in out
 
 
@@ -215,7 +215,7 @@ def test_egress_analysis_renders_all_destination_tables(capsys, monkeypatch):
     monkeypatch.setattr(console.console, "_width", 220)  # keep cells from folding for assertions
     render.egress_analysis(_egress_analysis())
     out = capsys.readouterr().out
-    assert "Internet FQDNs" in out and "api.openai.com" in out
+    assert "Observed FQDNs to review" in out and "api.openai.com" in out
     assert "AWS S3 buckets" in out and "GCS buckets" in out and "Azure storage" in out
     assert "evil.com" in out  # threat-intel blocked-domain table
     assert "globalbucket" in out  # dropped-S3-no-region warning names the bucket

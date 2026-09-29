@@ -22,14 +22,7 @@ _DESTINATIONS_WITHOUT_AUTH = {None, "all_destinations", "apps_runtime", "lakebas
 
 
 # --------------------------------------------------------------------------- ingress block builders
-def _rule_label(spec: dict, mode_label: str | None) -> str:
-    """The rule label. With a mode_label it's suffixed `<label> (<mode>)` (the ingress command, so
-    generated rules are self-describing); with mode_label=None the label is verbatim (migrate-acl,
-    which recreates the IP ACLs exactly)."""
-    return f"{spec['label']} ({mode_label})" if mode_label else spec["label"]
-
-
-def build_ingress_rule(spec: dict, mode_label: str | None):
+def build_ingress_rule(spec: dict):
     from databricks.sdk.service.settings import (  # noqa: I001
         CustomerFacingIngressNetworkPolicyAppsRuntimeDestination as AppsDest,
         CustomerFacingIngressNetworkPolicyAuthentication as Auth,
@@ -81,14 +74,14 @@ def build_ingress_rule(spec: dict, mode_label: str | None):
         )
 
     return Rule(
-        label=_rule_label(spec, mode_label),
+        label=spec["label"],
         origin=origin,
         destination=destination,
         authentication=authentication,
     )
 
 
-def build_deny_rule(spec: dict, mode_label: str | None):
+def build_deny_rule(spec: dict):
     from databricks.sdk.service.settings import (  # noqa: I001
         CustomerFacingIngressNetworkPolicyIpRanges as IpRanges,
         CustomerFacingIngressNetworkPolicyPublicIngressRule as Rule,
@@ -97,15 +90,13 @@ def build_deny_rule(spec: dict, mode_label: str | None):
     )
 
     return Rule(
-        label=_rule_label(spec, mode_label),
+        label=spec["label"],
         origin=Origin(included_ip_ranges=IpRanges(ip_ranges=list(spec["cidrs"]))),
         destination=Destination(all_destinations=True),
     )
 
 
-def build_ingress_block(
-    allow: list[dict], deny: list[dict], mode_label: str | None, note: Note = lambda _m: None
-):
+def build_ingress_block(allow: list[dict], deny: list[dict], note: Note = lambda _m: None):
     """Assemble a CustomerFacingIngressNetworkPolicy from allow specs (+ optional deny specs).
 
     RESTRICTED_ACCESS is default-DENY; if a policy ends up with deny rules but no allow rules,
@@ -135,8 +126,8 @@ def build_ingress_block(
 
     public = PublicAccess(
         restriction_mode=RestrictionMode.RESTRICTED_ACCESS,
-        allow_rules=[build_ingress_rule(s, mode_label) for s in allow],
-        deny_rules=[build_deny_rule(s, mode_label) for s in (deny or [])] or None,
+        allow_rules=[build_ingress_rule(s) for s in allow],
+        deny_rules=[build_deny_rule(s) for s in (deny or [])] or None,
     )
     return IngressPolicy(public_access=public)
 

@@ -1,0 +1,385 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Network Policy Helper Guide</title>
+<style>
+  :root {
+    --bg: #f7f8fa; --panel: #ffffff; --ink: #1b1f24; --muted: #5b6570;
+    --border: #e3e7ec; --accent: #1a7f5a; --accent-ink: #0d5c40;
+    --warn-bg: #fff3cd; --warn-border: #d9b100; --warn-ink: #6b5300;
+    --danger-bg: #f8d7da; --danger-border: #c04250; --danger-ink: #7a232f;
+    --code-bg: #0f1720; --code-ink: #e6edf3; --chip: #eef4f1;
+    --radius: 12px; --maxw: 860px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0e1116; --panel: #161b22; --ink: #e6edf3; --muted: #9aa4af;
+      --border: #2a313a; --accent: #3fb98a; --accent-ink: #7fd8b6;
+      --warn-bg: #3a3316; --warn-border: #b7930f; --warn-ink: #f0d789;
+      --danger-bg: #3a1c20; --danger-border: #c04250; --danger-ink: #f0a8b0;
+      --code-bg: #0b0f14; --code-ink: #e6edf3; --chip: #1c2530;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0e1116; --panel: #161b22; --ink: #e6edf3; --muted: #9aa4af;
+    --border: #2a313a; --accent: #3fb98a; --accent-ink: #7fd8b6;
+    --warn-bg: #3a3316; --warn-border: #b7930f; --warn-ink: #f0d789;
+    --danger-bg: #3a1c20; --danger-border: #c04250; --danger-ink: #f0a8b0;
+    --code-bg: #0b0f14; --code-ink: #e6edf3; --chip: #1c2530;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: var(--maxw); margin: 0 auto; padding: 0 16px 96px; }
+  header.hero {
+    max-width: var(--maxw); margin: 0 auto; padding: 40px 16px 8px;
+  }
+  .eyebrow { color: var(--accent-ink); font-weight: 700; letter-spacing: .04em; text-transform: uppercase; font-size: 12px; }
+  h1 { font-size: clamp(28px, 5vw, 40px); line-height: 1.15; margin: 6px 0 8px; }
+  .lede { color: var(--muted); font-size: 18px; margin: 0 0 8px; }
+  h2 { font-size: 22px; margin: 40px 0 10px; scroll-margin-top: 64px; }
+  ol.steps > li[id], .callout[id] { scroll-margin-top: 64px; }
+  h3 { font-size: 17px; margin: 0 0 4px; }
+  a { color: var(--accent-ink); text-underline-offset: 2px; }
+  p { margin: 8px 0; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 16px 18px; margin: 14px 0;
+  }
+  .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+  .chip { display: inline-block; background: var(--chip); border: 1px solid var(--border); border-radius: 999px; padding: 2px 10px; font-size: 13px; color: var(--muted); margin: 2px 4px 2px 0; }
+  code, kbd { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .92em; }
+  code.inline { background: var(--chip); border: 1px solid var(--border); border-radius: 6px; padding: 1px 6px; }
+  pre {
+    background: var(--code-bg); color: var(--code-ink); border-radius: 10px; padding: 14px 16px;
+    overflow-x: auto; font-size: 13.5px; line-height: 1.5; margin: 10px 0;
+  }
+  pre .c { color: #8aa0b4; }
+  .callout { border-left: 4px solid var(--border); border-radius: 8px; padding: 10px 14px; margin: 12px 0; background: var(--panel); }
+  .callout.warn { background: var(--warn-bg); border-color: var(--warn-border); color: var(--warn-ink); }
+  .callout.danger { background: var(--danger-bg); border-color: var(--danger-border); color: var(--danger-ink); }
+  .callout.safe { background: var(--panel); border-color: var(--accent); }
+  ol.steps { list-style: none; counter-reset: step; padding: 0; margin: 8px 0; }
+  ol.steps > li {
+    counter-increment: step; position: relative; background: var(--panel);
+    border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 18px 16px 60px; margin: 12px 0;
+  }
+  ol.steps > li::before {
+    content: counter(step); position: absolute; left: 16px; top: 16px;
+    width: 30px; height: 30px; border-radius: 50%; background: var(--accent); color: #fff;
+    display: grid; place-items: center; font-weight: 700; font-size: 15px;
+  }
+  ol.steps > li.stepnote { counter-increment: none; padding-left: 18px; border-style: dashed; }
+  ol.steps > li.stepnote::before { display: none; }
+  ol.steps > li.stepnote h3 { color: var(--accent-ink); }
+  details { margin: 8px 0 0; }
+  details > summary {
+    cursor: pointer; color: var(--accent-ink); font-weight: 600; font-size: 14px; list-style: none;
+  }
+  details > summary::-webkit-details-marker { display: none; }
+  details > summary::before { content: "▸ "; }
+  details[open] > summary::before { content: "▾ "; }
+  details .body { padding: 6px 0 2px; color: var(--muted); font-size: 14.5px; }
+  nav.toc { position: sticky; top: 0; background: var(--bg); padding: 10px 0; border-bottom: 1px solid var(--border); z-index: 5; margin-bottom: 8px; }
+  nav.toc a { margin-right: 14px; font-size: 13.5px; white-space: nowrap; }
+  nav.toc .row { max-width: var(--maxw); margin: 0 auto; padding: 0 16px; overflow-x: auto; display: flex; }
+  .theme-toggle { position: fixed; right: 14px; top: 12px; background: var(--panel); border: 1px solid var(--border); color: var(--ink); border-radius: 999px; padding: 6px 12px; font-size: 13px; cursor: pointer; z-index: 10; }
+  .pdf-btn { position: fixed; right: 92px; top: 12px; background: var(--panel); border: 1px solid var(--border); color: var(--ink); border-radius: 999px; padding: 6px 12px; font-size: 13px; cursor: pointer; z-index: 10; }
+  footer { color: var(--muted); font-size: 13.5px; margin-top: 40px; border-top: 1px solid var(--border); padding-top: 16px; }
+  .learn { font-size: 13.5px; }
+  details.optgroup { margin: 10px 0 0; border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel); }
+  details.optgroup > summary { font-size: 16px; font-weight: 700; color: var(--ink); cursor: pointer; padding: 14px 18px; list-style: none; }
+  details.optgroup > summary::-webkit-details-marker { display: none; }
+  details.optgroup > summary::before { content: "▸ "; color: var(--accent-ink); }
+  details.optgroup[open] > summary::before { content: "▾ "; }
+  details.optgroup > .opts { padding: 0 18px 14px; }
+  details.optgroup > summary .chip { font-weight: 400; }
+  /* PDF / print: full content, ink-friendly, sensible page breaks. Every <details> is force-opened
+     by script (button, Ctrl+P, or the #print hash) so nothing collapsible is missing from the PDF. */
+  @media print {
+    .theme-toggle, .pdf-btn, nav.toc { display: none !important; }
+    :root, :root[data-theme="dark"] {
+      --bg: #fff; --panel: #fff; --ink: #111; --muted: #444; --border: #bbb;
+      --code-bg: #f2f2f2; --code-ink: #111; color-scheme: light;
+    }
+    body { background: #fff; color: #111; }
+    header.hero { padding-top: 0; }
+    a { color: #0d5c40; }
+    details > summary::before, details.optgroup > summary::before { content: "" !important; }
+    .panel, .callout, ol.steps > li, details.optgroup, .opt { break-inside: avoid; }
+    h2, h3 { break-after: avoid; }
+    pre { white-space: pre-wrap; word-break: break-word; }
+  }
+  .opts { display: flex; flex-direction: column; }
+  .opt { padding: 12px 0; border-bottom: 1px solid var(--border); }
+  .opt:last-child { border-bottom: none; padding-bottom: 0; }
+  .opt:first-child { padding-top: 0; }
+  .opt .flag { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-weight: 700; color: var(--ink); font-size: 14px; overflow-wrap: anywhere; }
+  .opt .chip { vertical-align: middle; margin-left: 6px; }
+  .opt p { margin: 5px 0 0; color: var(--muted); font-size: 14.5px; }
+  .opt .choices { color: var(--ink); }
+</style>
+</head>
+<body>
+<button class="pdf-btn" onclick="npgPrint()" title="Expand everything and save as PDF">⭳ PDF</button>
+<button class="theme-toggle" onclick="(function(){var r=document.documentElement;var d=r.getAttribute('data-theme');var n=d==='dark'?'light':(d==='light'?'dark':(matchMedia('(prefers-color-scheme: dark)').matches?'light':'dark'));r.setAttribute('data-theme',n);try{localStorage.setItem('npg-theme',n)}catch(e){}})()">◐ theme</button>
+<script>try{var t=localStorage.getItem('npg-theme');if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+
+<header class="hero">
+  <div class="eyebrow">🛡️ Databricks Network Policy Helper</div>
+  <h1>Your companion guide</h1>
+  <p class="lede">Build a Databricks <strong>account network policy</strong> from your workspace's real observed traffic — safely, one reviewed step at a time. This page walks through what each step does and what you're deciding. Keep it open beside your terminal.</p>
+</header>
+
+<nav class="toc">
+  <div class="row">
+    <a href="#what">What it does</a>
+    <a href="#before">Before you start</a>
+    <a href="#commands">Commands</a>
+    <a href="#walkthrough">Ingress walkthrough</a>
+    <a href="#egress">Egress walkthrough</a>
+    <a href="#safety">Safety</a>
+    <a href="#options">CLI options</a>
+  </div>
+</nav>
+
+<div class="wrap">
+
+  <h2 id="what">What this tool does</h2>
+  <div class="panel">
+    <p>It reads Databricks <strong>system tables</strong> to see how your workspace is actually used, then proposes an account network policy you review before anything is written. Two directions:</p>
+    <div class="grid">
+      <div>
+        <h3>📥 Ingress (CBI)</h3>
+        <p class="learn">Context-Based Ingress — who may connect <em>in</em>, by source IP. Built from <code class="inline">system.access.audit</code>.</p>
+      </div>
+      <div>
+        <h3>📤 Egress (SEG)</h3>
+        <p class="learn">Serverless Egress — where workloads may connect <em>out</em>, by destination. Built from <code class="inline">system.access.outbound_network</code>.</p>
+      </div>
+    </div>
+    <div class="callout safe"><strong>Nothing is written unless you opt in.</strong> Analysis and the proposed policy are always side-effect-free. A write happens only when you pass <code class="inline">--create-policy</code> and clear the review gate — and even then it defaults to log-only <em>dry-run</em>.</div>
+  </div>
+
+  <h2 id="before">Before you start</h2>
+  <ol class="steps">
+    <li>
+      <h3>Install &amp; authenticate</h3>
+      <p>You need <a href="https://docs.astral.sh/uv/">uv</a> and a Databricks workspace you can authenticate to. Auth uses the SDK's unified auth — a profile from <code class="inline">~/.databrickscfg</code>, <code class="inline">DATABRICKS_*</code> env vars, or OAuth.</p>
+      <pre><span class="c"># set up, then see the commands</span>
+uv sync
+uv run dbx-nwp-helper --help</pre>
+    </li>
+    <li>
+      <h3>Know when you need an <em>account admin</em></h3>
+      <p>Analysis and proposing a policy need only workspace read on the system tables plus a SQL warehouse. <strong>Applying</strong> a policy, or identity-scoping, additionally needs <strong>account-admin</strong> credentials — separate from your workspace login — and your numeric <code class="inline">--account-id</code>.</p>
+      <details><summary>Learn more — account-admin auth</summary><div class="body">A workspace OAuth session can't call the account API. Use <code class="inline">--account-profile &lt;name&gt;</code> pointing at an account login (<code class="inline">databricks auth login --host &lt;account-console-host&gt; --account-id &lt;id&gt;</code>), or set account credentials via environment variables. See the Databricks docs on <a href="https://docs.databricks.com/dev-tools/auth">unified authentication</a>.</div></details>
+    </li>
+  </ol>
+
+  <h2 id="commands">The commands</h2>
+  <div class="panel">
+    <p><code class="inline">dbx-nwp-helper ingress</code> — propose &amp; apply a CBI allow-list.<br />
+    <code class="inline">dbx-nwp-helper egress</code> — propose &amp; apply a serverless-egress allow-list.<br />
+    <code class="inline">dbx-nwp-helper guided</code> — an interactive Q&amp;A wizard that walks you through either.<br />
+    <code class="inline">dbx-nwp-helper feeds</code> — manage the local threat-intel / cloud-range cache.<br />
+    <code class="inline">dbx-nwp-helper guide</code> — open this page.</p>
+    <p class="learn">New? Start with <code class="inline">guided</code>, or run <code class="inline">ingress</code> with no write flags to see a proposal safely:</p>
+    <pre>uv run dbx-nwp-helper ingress --profile &lt;profile&gt; --lookback-days 30</pre>
+  </div>
+
+  <h2 id="walkthrough">An ingress run, step by step</h2>
+  <p>This is what happens on a typical <code class="inline">ingress</code> run. The tool pauses between sections so you review each one; answering <em>no</em> aborts cleanly, writing nothing. (<code class="inline">--yes</code> skips the pauses for scripting.)</p>
+  <ol class="steps">
+    <li id="ig-workspace">
+      <h3>The CLI asks you to confirm the target workspace</h3>
+      <p>Before anything else, the CLI shows exactly which workspace it's pointed at — profile, URL, and id — and <strong>asks you to confirm</strong>, so a mis-set <code class="inline">--profile</code> can't act on the wrong workspace. Answer <em>no</em> and it stops, having done nothing.</p>
+    </li>
+    <li id="ig-name">
+      <h3>Name the policy</h3>
+      <p>You're prompted for a name (blank = your profile name). It's normalised to a lowercase, id-safe form and the CLI prints the result.</p>
+    </li>
+    <li class="stepnote" id="ig-params">
+      <h3>You confirm your runtime parameters</h3>
+      <p>After naming the policy and before the analysis runs, the CLI prints the full set of runtime parameters it's about to use — lookback window, framing, scope, mode, enrichment, and the rest — and <strong>asks you to confirm them</strong>. Check they're what you intended before the (potentially slow) analysis begins; answer <em>no</em> to stop. Every parameter is explained in <a href="#options">CLI options</a>.</p>
+    </li>
+    <li id="ig-analyse">
+      <h3>Analyse audit traffic &amp; enrich</h3>
+      <p>It finds the public source IPs that successfully connected (from <code class="inline">system.access.audit</code>), then enriches them with open threat-intel feeds, cloud-provider and Databricks-owned IP ranges, and (optionally) RDAP ownership lookups. This is the slow part — it shows live progress.</p>
+      <details><summary>Learn more — what is RDAP?</summary><div class="body">RDAP (Registration Data Access Protocol) is the successor to WHOIS: a public query to the regional internet registries (ARIN, RIPE, APNIC, …) that returns who an IP range is registered to. The tool uses it to label each observed source IP with an owner, so the proposed rules are reviewable ("Acme Corp" rather than a bare CIDR). <strong>Treat RDAP as a signal, not a source of truth</strong> — registration data can be stale, generic (a hosting provider rather than the real user), or delegated, so use it to inform your review, not to make the decision for you. It's disabled with <code class="inline">--no-enable-rdap</code> (but the <code class="inline">maximum</code> framing needs it).</div></details>
+      <details><summary>Learn more — threat-intel enrichment</summary><div class="body">Observed IPs that fall in known-bad ranges are excluded from the allow-list and surfaced for investigation. Databricks-owned control-plane / serverless ranges you actually saw are always kept. All feeds are free, need no API key, and are cached locally.</div></details>
+      <details><summary>No candidate IPs?</summary><div class="body">Usually the workspace uses <strong>PrivateLink/NAT</strong> (the audit log records the relay's private IP, not the user's public IP), or the public IPs only appear on account-level rows — pass <code class="inline">--include-account-level</code>. The CLI prints a diagnostic funnel explaining where rows dropped out. See <a href="https://docs.databricks.com/admin/system-tables/audit-logs.html">audit system table docs</a>.</div></details>
+    </li>
+    <li id="ig-denied">
+      <h3>Review recently-denied inbound requests</h3>
+      <p>As part of the analysis, the tool flags source IPs that were recently <em>blocked</em> inbound — both IP-access-list 403s (<code class="inline">system.access.audit</code>) and CBI network-policy denials (<code class="inline">system.access.inbound_network</code>, when that table is available). Shown for context; add them as deny rules with <code class="inline">--deny-denied-ips</code>.</p>
+    </li>
+    <li id="ig-acls">
+      <h3>Existing IP access lists — migrate them?</h3>
+      <p>If the workspace has enabled IP access lists, the tool detects them and shows their actual IP entries. Interactive runs get a pre-checked checkbox to pick exactly which entries to fold into the new CBI policy, <em>alongside</em> the rules learned from observed traffic — everything starts checked, so a single Enter keeps them all. Scripted runs migrate them all by default.</p>
+      <details><summary>Learn more — IP ACL → CBI</summary><div class="body">The CBI policy is designed to replace the workspace's IP access lists. After the policy is created and assigned you can optionally turn the old lists off with <code class="inline">--disable-existing-ip-acls</code> (they're preserved and reversible; the flag is refused unless the run both creates and assigns the replacement, so it can't leave the workspace unprotected). See <a href="https://docs.databricks.com/security/network/front-end/ip-access-list.html">IP access lists docs</a>.</div></details>
+    </li>
+    <li id="ig-select">
+      <h3>Select which rules to include</h3>
+      <p>By default (interactive runs) you get a checkbox to curate exactly which observed source-IP groups become allow rules — everything starts checked, so a single Enter keeps them all. Use <code class="inline">--no-select-rules</code> to skip the prompt.</p>
+    </li>
+    <li id="ig-preview">
+      <h3>Preview the proposed policy</h3>
+      <p>The exact allow (and any deny) rules are shown before anything is written. This is the object that would be sent to the account API.</p>
+    </li>
+    <li id="ig-export">
+      <h3>Export (optional)</h3>
+      <p><code class="inline">--export &lt;path&gt;</code> writes the proposed policy as REST-ready JSON <em>and</em> a best-effort Terraform file — handy for review or applying out-of-band. Works in propose-only mode.</p>
+    </li>
+    <li id="ig-create">
+      <h3>Create the policy — dry-run first</h3>
+      <p>Nothing is written until you pass <code class="inline">--create-policy</code>. The default <code class="inline">--policy-mode dry_run</code> writes a <strong>log-only</strong> block that blocks nothing — so you can review would-be denials in the network system tables first.</p>
+      <div class="callout danger"><strong>Enforce with intent.</strong> <code class="inline">--policy-mode enforce</code> writes the blocking block and can lock users or workloads out if the allow-list is incomplete. Stay in <code class="inline">dry_run</code> until the logged denials are only bad actors.</div>
+      <details><summary>Learn more — account network policies</summary><div class="body">See the Databricks docs on <a href="https://docs.databricks.com/security/network/serverless-network-security/network-policies.html">network policies</a> for how ingress/egress blocks and enforcement modes behave.</div></details>
+    </li>
+    <li id="ig-assign">
+      <h3>Assign to the workspace</h3>
+      <p>With <code class="inline">--auto-assign</code> the policy is bound to the workspace. Before creating and assigning, the tool inspects the currently-assigned policy and aborts (or warns) rather than silently clobbering PrivateLink, cross-workspace, or enforced restrictive policies.</p>
+    </li>
+  </ol>
+
+  <h2 id="egress">An egress run, step by step</h2>
+  <div class="callout warn">
+    <strong>Prerequisite:</strong> <code class="inline">system.access.outbound_network</code> only logs <em>denied</em> egress (including dry-run would-be-denials). So stand up an egress policy in <code class="inline">dry_run</code> first and let it observe for a while — that's what populates the table the <code class="inline">egress</code> command reads.
+  </div>
+  <ol class="steps">
+    <li id="eg-workspace">
+      <h3>The CLI asks you to confirm the target workspace</h3>
+      <p>Just like ingress: the exact workspace (profile, URL, id) is shown and you confirm it before anything runs.</p>
+    </li>
+    <li id="eg-name">
+      <h3>Name the policy</h3>
+      <p>Prompted for a name (blank = your profile name), normalised to an id-safe form. Point a later run at this same policy with <code class="inline">--policy-action add_to_existing</code> to carry both ingress and egress in one policy.</p>
+    </li>
+    <li class="stepnote" id="eg-params">
+      <h3>You confirm your runtime parameters</h3>
+      <p>Before the analysis runs, the CLI prints the runtime parameters it's about to use — lookback window, scope, mode, threat-domain blocking, and the rest — and <strong>asks you to confirm them</strong>. Answer <em>no</em> to stop. Every parameter is explained in <a href="#options">CLI options</a>.</p>
+    </li>
+    <li id="eg-analyse">
+      <h3>Analyse outbound traffic &amp; classify</h3>
+      <p>It reads the observed destinations and classifies them into <strong>storage</strong> (S3 / GCS / Azure) and <strong>internet FQDNs</strong>, looking up the cloud owner of each FQDN for context.</p>
+      <details><summary>Learn more — blocking known-bad domains</summary><div class="body">The allow-list itself is what stops exfiltration. As a secondary layer, <code class="inline">--block-threat-domains matched_only|all</code> adds known-bad domains (from the <code class="inline">--threat-feed</code>, default abuse.ch ThreatFox) to the policy's block-list. It only catches <em>known</em> bad domains, so treat it as defence-in-depth, not the primary control.</div></details>
+    </li>
+    <li id="eg-select">
+      <h3>Select which destinations to allow-list</h3>
+      <p>By default (interactive runs) you get <strong>two pre-checked checkboxes</strong> — one for the internet FQDNs, then one for the storage destinations (S3 / GCS / Azure) — so you curate each kind separately. Everything starts checked, so a single Enter on each keeps them all. Use <code class="inline">--no-select-rules</code> to skip the prompts.</p>
+    </li>
+    <li id="eg-preview">
+      <h3>Preview the proposed egress</h3>
+      <p>The exact storage + internet allow rules (and any blocked domains) are shown before anything is written — the object that would be sent to the account API. Egress limits (100 internet / 100 storage) are enforced here, keeping the highest-traffic destinations.</p>
+    </li>
+    <li id="eg-export">
+      <h3>Export (optional)</h3>
+      <p><code class="inline">--export &lt;path&gt;</code> writes the proposed policy as REST-ready JSON and a best-effort Terraform file (with a permissive ingress default). Works in propose-only mode.</p>
+    </li>
+    <li id="eg-create">
+      <h3>Create the policy — dry-run first</h3>
+      <p>Nothing is written until <code class="inline">--create-policy</code>. Default <code class="inline">--policy-mode dry_run</code> writes a restricted-but-log-only egress block, so you can confirm nothing legitimate is caught before enforcing.</p>
+      <div class="callout danger"><strong>Enforce with intent.</strong> <code class="inline">--policy-mode enforce</code> blocks outbound traffic not on the allow-list — an incomplete list can break legitimate workloads. Stay in <code class="inline">dry_run</code> until the logged denials are only traffic you mean to block.</div>
+    </li>
+    <li id="eg-assign">
+      <h3>Assign to the workspace</h3>
+      <p>With <code class="inline">--auto-assign</code> the policy is bound to the workspace. As with ingress, the tool pre-checks the currently-assigned policy and aborts rather than clobbering an enforced restrictive egress.</p>
+    </li>
+  </ol>
+
+  <div class="panel">
+    <p class="learn"><strong>Combine both directions into one policy:</strong> run the first with <code class="inline">--create-policy --policy-action create_new</code> (a single-policy scope, not <code class="inline">per_workspace</code>), note the printed policy id, then run the second with <code class="inline">--policy-action add_to_existing --existing-policy-id &lt;id&gt;</code>. Each run updates only its own direction.</p>
+  </div>
+
+  <h2 id="safety">The safety model, in one place</h2>
+  <div class="panel">
+    <ul>
+      <li>🛑 <strong>Opt-in writes.</strong> No write without <code class="inline">--create-policy</code>; a review gate confirms first.</li>
+      <li>🎯 <strong>Confirm the workspace.</strong> The exact target is shown and gated before any analysis or write.</li>
+      <li>🧪 <strong>Dry-run first.</strong> Default mode is log-only — it blocks nothing.</li>
+      <li>🧬 <strong>Databricks-owned traffic is prioritised, never blanket-allowed.</strong> Only ranges actually seen in your traffic are kept.</li>
+      <li>#️⃣ <strong>IPv4 only.</strong> The CBI schema is IPv4-only; IPv6 is analysed but never placed in a policy.</li>
+      <li>🧱 <strong>add_to_existing never clobbers the other direction.</strong> It replaces only its own block.</li>
+    </ul>
+    <div class="callout warn">The tool generates <em>candidate</em> policies from observed traffic — a starting point, not guaranteed complete or correct. You are responsible for reviewing them before use. An incomplete allow-list can block legitimate users (in enforce mode) or fail to block bad ones.</div>
+  </div>
+
+  <h2 id="options">CLI options — a readable reference</h2>
+  <p>Every option, grouped by command — <strong>click a group to expand it</strong>. Flags without a listed default are off (<code class="inline">false</code>) unless noted; each takes a <code class="inline">--no-…</code> form to turn it off. Run <code class="inline">dbx-nwp-helper &lt;command&gt; --help</code> for the terse version.</p>
+
+  <details class="optgroup"><summary>Shared by <code class="inline">ingress</code> and <code class="inline">egress</code></summary>
+  <div class="opts">
+    <div class="opt"><code class="flag">--profile &lt;name&gt;</code><span class="chip">default: unified auth</span><p>Which Databricks config profile (from <code class="inline">~/.databrickscfg</code>) to use for the workspace analysis and the SQL warehouse. If omitted, the SDK's unified auth resolves credentials from env vars / OAuth.</p></div>
+    <div class="opt"><code class="flag">--warehouse-http-path &lt;path&gt;</code><span class="chip">default: auto</span><p>The SQL warehouse to run analysis on. If omitted, a small serverless warehouse named <code class="inline">dbx-nwp-helper</code> is reused or created.</p></div>
+    <div class="opt"><code class="flag">--warehouse-size &lt;size&gt;</code><span class="chip">default: X-Small</span><p>Cluster size for the auto-created serverless warehouse (<span class="choices">2X-Small, X-Small, Small, Medium, Large, X-Large, 2X-Large, 3X-Large, 4X-Large</span>). Bump it if the analysis query is slow on a large audit log. Ignored with <code class="inline">--warehouse-http-path</code>.</p></div>
+    <div class="opt"><code class="flag">--lookback-days &lt;n&gt;</code><span class="chip">default: 30</span><p>How many days of system-table history to analyse (<code class="inline">system.access.audit</code> for ingress, <code class="inline">outbound_network</code> for egress).</p></div>
+    <div class="opt"><code class="flag">--min-events &lt;n&gt;</code><span class="chip">default: 1</span><p>Drop sources below this many events — a source IP (ingress) or destination (egress) must be seen at least this often to be considered.</p></div>
+    <div class="opt"><code class="flag">--enable-rdap / --no-enable-rdap</code><span class="chip">default: on</span><p>Look up ownership of observed addresses via RDAP (ingress: source-IP owners, required for <code class="inline">maximum</code> framing; egress: cloud owner of internet FQDNs). The slow, network-bound part of enrichment.</p></div>
+    <div class="opt"><code class="flag">--refresh-feeds</code><p>Force a re-download of the cached threat-intel / cloud-range feeds before analysing.</p></div>
+    <div class="opt"><code class="flag">--policy-scope &lt;scope&gt;</code><span class="chip">default: current_workspace</span><p><span class="choices">current_workspace</span> — one policy for the profile's workspace; <span class="choices">per_workspace</span> — one per workspace seen; <span class="choices">all_workspaces</span> — a single policy built from all workspaces' traffic.</p></div>
+    <div class="opt"><code class="flag">--policy-mode &lt;mode&gt;</code><span class="chip">default: dry_run</span><p><span class="choices">dry_run</span> writes the log-only block (blocks nothing); <span class="choices">enforce</span> writes the blocking block. Stay in dry-run until logged denials are only bad actors.</p></div>
+    <div class="opt"><code class="flag">--policy-name &lt;name&gt;</code><span class="chip">default: prompted</span><p>The policy name (blank at the prompt = the profile name). The policy id for single-policy scopes; the prefix (→ <code class="inline">&lt;name&gt;-ws-&lt;id&gt;</code>) for <code class="inline">per_workspace</code>. Normalised to a lowercase, id-safe form.</p></div>
+    <div class="opt"><code class="flag">--export &lt;path&gt;</code><p>Write the proposed policy as REST-ready JSON (and a best-effort Terraform <code class="inline">.tf</code>) to this path; a directory writes <code class="inline">&lt;policy-id&gt;.json</code> inside it. Single-policy scopes only; works in propose-only mode.</p></div>
+    <div class="opt"><code class="flag">--create-policy</code><p>The master write switch. Nothing is written to Databricks without it — analysis and preview are always side-effect-free.</p></div>
+    <div class="opt"><code class="flag">--policy-action &lt;action&gt;</code><span class="chip">default: create_new</span><p><span class="choices">create_new</span> creates a fresh policy; <span class="choices">add_to_existing</span> updates only this direction's block on <code class="inline">--existing-policy-id</code>, leaving the other direction intact.</p></div>
+    <div class="opt"><code class="flag">--existing-policy-id &lt;id&gt;</code><p>The target policy id for <code class="inline">--policy-action add_to_existing</code>.</p></div>
+    <div class="opt"><code class="flag">--auto-assign</code><p>After creating the policy, bind the workspace(s) to it.</p></div>
+    <div class="opt"><code class="flag">--account-id &lt;id&gt;</code><p>Your numeric Databricks account id — required to apply a policy (and, for ingress, to resolve identities).</p></div>
+    <div class="opt"><code class="flag">--account-host &lt;url&gt;</code><span class="chip">default: derived</span><p>The account-console host. When unset, derived from the workspace's environment (AWS / Azure / GCP).</p></div>
+    <div class="opt"><code class="flag">--account-profile &lt;name&gt;</code><span class="chip">default: unified auth</span><p>A separate profile for account-level calls (a workspace login can't call the account API). See <a href="https://docs.databricks.com/dev-tools/auth">account-admin auth</a>.</p></div>
+    <div class="opt"><code class="flag">--select-rules / --no-select-rules</code><span class="chip">default: on</span><p>Show a pre-checked checkbox to curate exactly which rules (ingress) or destinations (egress) to include. Use <code class="inline">--no-select-rules</code> to keep everything. Ignored with <code class="inline">--yes</code> / non-interactively.</p></div>
+    <div class="opt"><code class="flag">--yes, -y</code><p>Non-interactive mode: skip the step-through pauses and the review/write gates. For scripted / CI runs.</p></div>
+  </div></details>
+
+  <details class="optgroup"><summary><code class="inline">ingress</code> only</summary>
+  <div class="opts">
+    <div class="opt"><code class="flag">--treat-null-status-as-success</code><p>Count audit rows with a NULL status code as successful connections (some services don't record a status).</p></div>
+    <div class="opt"><code class="flag">--include-ipv6</code><p>Analyse IPv6 source addresses too. The CBI policy stays IPv4-only, so IPv6 is reported but never placed in a policy.</p></div>
+    <div class="opt"><code class="flag">--include-account-level</code><p>Include account-level (<code class="inline">workspace_id=0</code>) audit rows — account-console / SCIM traffic. Off by default; useful when public IPs only appear on those rows.</p></div>
+    <div class="opt"><code class="flag">--threat-feeds &lt;a,b,c&gt;</code><span class="chip">default: all</span><p>Comma-separated threat-intel feeds to enrich with (see <code class="inline">dbx-nwp-helper feeds list</code>). Matched source IPs are excluded from the allow-list and surfaced for investigation.</p></div>
+    <div class="opt"><code class="flag">--rdap-workers &lt;n&gt;</code><span class="chip">default: 16</span><p>How many RDAP lookups to run concurrently. 1 = sequential; higher is faster but hits RIR rate limits harder.</p></div>
+    <div class="opt"><code class="flag">--policy-framing &lt;framing&gt;</code><span class="chip">default: minimal</span><p>How tightly to frame the allow-list CIDRs: <span class="choices">minimal</span> (exact seen), <span class="choices">optimal</span>, or <span class="choices">maximum</span> (widen to the owning block; needs RDAP).</p></div>
+    <div class="opt"><code class="flag">--scoping-mode &lt;mode&gt;</code><span class="chip">default: ip_only</span><p>Whether to scope rules beyond source IP: <span class="choices">ip_only</span>, <span class="choices">ip_and_destination</span>, <span class="choices">ip_and_identity</span>, or <span class="choices">ip_identity_and_destination</span> (identity scoping needs account admin).</p></div>
+    <div class="opt"><code class="flag">--threat-deny-rules &lt;mode&gt;</code><span class="chip">default: off</span><p>Add explicit deny rules from threat intel: <span class="choices">off</span>, <span class="choices">matched_only</span> (feeds that matched observed IPs), or <span class="choices">all</span>.</p></div>
+    <div class="opt"><code class="flag">--deny-denied-ips</code><p>Add the recently-denied inbound source IPs (403 / CBI) as deny rules, rather than just reporting them.</p></div>
+    <div class="opt"><code class="flag">--disable-existing-ip-acls</code><p>After creating <em>and</em> assigning the policy, turn off the workspace's IP access lists (<code class="inline">enableIpAccessLists=false</code>). Requires <code class="inline">--create-policy</code> and <code class="inline">--auto-assign</code>; the lists are preserved (reversible).</p></div>
+  </div></details>
+
+  <details class="optgroup"><summary><code class="inline">egress</code> only</summary>
+  <div class="opts">
+    <div class="opt"><code class="flag">--source-type-filter &lt;type&gt;</code><span class="chip">default: all</span><p>Restrict analysis to one <code class="inline">network_source_type</code> (blank = all source types).</p></div>
+    <div class="opt"><code class="flag">--block-threat-domains &lt;mode&gt;</code><span class="chip">default: off</span><p>Add known-bad domains to the policy's block-list: <span class="choices">off</span>, <span class="choices">matched_only</span> (only those seen in your traffic), or <span class="choices">all</span>.</p></div>
+    <div class="opt"><code class="flag">--threat-feed &lt;name&gt;</code><span class="chip">default: threatfox</span><p>Which threat-domain feed to use for <code class="inline">--block-threat-domains</code>.</p></div>
+  </div></details>
+
+  <details class="optgroup"><summary><code class="inline">guided</code>, <code class="inline">guide</code>, <code class="inline">feeds</code> &amp; global</summary>
+  <div class="opts">
+    <div class="opt"><code class="flag">guided</code><p>The interactive Q&amp;A wizard. Takes only the connection options — <code class="inline">--profile</code>, <code class="inline">--warehouse-http-path</code>, <code class="inline">--warehouse-size</code>, <code class="inline">--account-id</code>, <code class="inline">--account-host</code>, <code class="inline">--account-profile</code> — and asks the rest.</p></div>
+    <div class="opt"><code class="flag">guide [--print-path]</code><p>Open this guide in your browser. <code class="inline">--print-path</code> prints the file path instead (handy for scripts).</p></div>
+    <div class="opt"><code class="flag">feeds list | refresh | clear</code><p>Manage the local threat-intel / cloud-range feed cache: <span class="choices">list</span> the cached tables, force a <span class="choices">refresh</span> (re-download), or <span class="choices">clear</span> the cache.</p></div>
+    <div class="opt"><code class="flag">--version</code><p>Print the tool version and exit (available on the top-level command).</p></div>
+    <div class="opt"><code class="flag">--help</code><p>Show the terse help for the tool or any command, then exit.</p></div>
+  </div></details>
+
+  <footer>
+    <p>Run <code class="inline">dbx-nwp-helper &lt;command&gt; --help</code> for every option. This guide ships with the tool and works offline. External links point to the official Databricks documentation.</p>
+  </footer>
+</div>
+<script>
+  // Force every collapsible section open so a PDF / print includes all content. Triggered by the
+  // PDF button, by the browser's own print (Ctrl/Cmd+P), and by loading with the #print hash (how
+  // `dbx-nwp-helper guide --pdf` renders it headlessly).
+  function npgExpandAll(){document.querySelectorAll('details').forEach(function(d){d.open=true});}
+  function npgPrint(){npgExpandAll();window.print();}
+  window.addEventListener('beforeprint',npgExpandAll);
+  if(location.hash==='#print'){npgExpandAll();}
+</script>
+</body>
+</html>

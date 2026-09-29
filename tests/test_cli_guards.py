@@ -177,7 +177,7 @@ def _policy_with_ingress():
     from dbx_nwp_helper.core import policy
 
     return types.SimpleNamespace(
-        ingress=policy.build_ingress_block([_allow_spec()], [], "enforced", ""),
+        ingress=policy.build_ingress_block([_allow_spec()], []),
         ingress_dry_run=None,
     )
 
@@ -418,6 +418,45 @@ def test_select_egress_rules_filters_targets(monkeypatch):
     monkeypatch.setattr(cli, "_checkbox_keep", lambda t, c: [("internet", "keep.com")])
     cli._select_egress_rules(a, EgressConfig(select_rules=True), yes=False)
     assert eg.union(a.targets, "internet") == {"keep.com": 5}
+
+
+def test_select_egress_rules_splits_fqdn_and_storage_prompts(monkeypatch):
+    from dbx_nwp_helper.config import EgressConfig
+    from dbx_nwp_helper.core import egress as eg
+
+    a = eg.EgressAnalysis(
+        observed=pd.DataFrame(),
+        targets={
+            eg.ALL_WORKSPACES: {
+                "s3": {("my-bucket", "us-east-1"): 5},
+                "gcs": {},
+                "azure": {("acct1", "blob"): 3},
+                "internet": {"api.openai.com": 10},
+            }
+        },
+    )
+    a.fqdn_owner = {}
+    prompts = []  # (title, [choice titles]) per checkbox shown
+
+    def capture(title, choices):
+        prompts.append((title, [getattr(c, "title", "") for c in choices]))
+        # keep only the internet FQDNs in each prompt (so the storage prompt deselects everything)
+        return [c.value for c in choices if getattr(c, "value", (None,))[0] == "internet"]
+
+    monkeypatch.setattr(cli, "_interactive", lambda yes: True)
+    monkeypatch.setattr(cli, "_checkbox_keep", capture)
+    cli._select_egress_rules(a, EgressConfig(select_rules=True), yes=False)
+
+    # two distinct prompts: one for FQDNs, one for storage
+    assert len(prompts) == 2
+    fqdn_prompt, storage_prompt = prompts
+    assert "FQDN" in fqdn_prompt[0] and any("api.openai.com" in t for t in fqdn_prompt[1])
+    assert "storage" in storage_prompt[0]
+    assert any("S3  my-bucket" in t for t in storage_prompt[1])
+    assert any("Azure  acct1.blob" in t for t in storage_prompt[1])
+    # deselecting the storage entries removes them; the FQDN is kept
+    assert eg.union(a.targets, "s3") == {} and eg.union(a.targets, "azure") == {}
+    assert eg.union(a.targets, "internet") == {"api.openai.com": 10}
 
 
 def test_select_rules_noop_non_interactive(monkeypatch):
@@ -1183,3 +1222,162 @@ def test_confirm_workspace_rejects_account_console_profile(monkeypatch, capsys):
     assert exc.value.exit_code == 1
     out = _sq(capsys.readouterr().out)
     assert "accountconsole" in out.lower() and "--account-profile" in out
+
+
+# ---------------------------------------------------------------- IP ACL auto-detect / migrate prompt
+def _analysis_with_acls(acls):
+    return types.SimpleNamespace(ip_acls=acls)
+
+
+def _acl(label="office", enabled=True, ips=("8.8.8.8",)):
+    return {"label": label, "list_type": "ALLOW", "enabled": enabled, "ip_addresses": list(ips)}
+
+
+def test_reconcile_ip_acls_no_enabled_lists_sets_false():
+    from dbx_nwp_helper.config import IngressConfig
+
+    cfg = IngressConfig()
+    cli._reconcile_ip_acls(_analysis_with_acls([_acl(enabled=False)]), cfg, yes=True)
+    assert cfg.migrate_ip_acls is False  # nothing enabled → nothing to migrate
+
+
+def test_reconcile_ip_acls_non_interactive_migrates(capsys):
+    from dbx_nwp_helper.config import IngressConfig
+
+    cfg = IngressConfig()
+    cli._reconcile_ip_acls(_analysis_with_acls([_acl(ips=("8.8.8.8", "1.1.1.1"))]), cfg, yes=True)
+    assert cfg.migrate_ip_acls is True
+    out = _sq(capsys.readouterr().out)
+    # shows the actual IPs (not just a count) and notes it's migrating them all non-interactively
+    assert "office" in out and "8.8.8.8" in out and "1.1.1.1" in out and "Non-interactive" in out
+
+
+def test_reconcile_ip_acls_interactive_deselect_all(monkeypatch):
+    from dbx_nwp_helper.config import IngressConfig
+
+    monkeypatch.setattr(cli, "_interactive", lambda yes: True)
+    monkeypatch.setattr(cli, "_checkbox_keep", lambda title, choices: [])  # user unchecks everything
+    cfg = IngressConfig()
+    cli._reconcile_ip_acls(_analysis_with_acls([_acl()]), cfg, yes=False)
+    assert cfg.migrate_ip_acls is False  # nothing kept → build from traffic only
+
+
+def test_reconcile_ip_acls_interactive_keep_all(monkeypatch):
+    from dbx_nwp_helper.config import IngressConfig
+
+    monkeypatch.setattr(cli, "_interactive", lambda yes: True)
+    monkeypatch.setattr(cli, "_checkbox_keep", lambda title, choices: [c.value for c in choices])
+    analysis = _analysis_with_acls([_acl(ips=("8.8.8.8", "1.1.1.1"))])
+    cfg = IngressConfig()
+    cli._reconcile_ip_acls(analysis, cfg, yes=False)
+    assert cfg.migrate_ip_acls is True
+    assert analysis.ip_acls[0]["ip_addresses"] == ["8.8.8.8", "1.1.1.1"]
+
+
+def test_reconcile_ip_acls_interactive_partial_selection_prunes(monkeypatch):
+    from dbx_nwp_helper.config import IngressConfig
+
+    monkeypatch.setattr(cli, "_interactive", lambda yes: True)
+    # keep only the first entry of whatever is offered
+    monkeypatch.setattr(cli, "_checkbox_keep", lambda title, choices: [choices[0].value])
+    analysis = _analysis_with_acls([_acl(ips=("8.8.8.8", "1.1.1.1"))])
+    cfg = IngressConfig()
+    cli._reconcile_ip_acls(analysis, cfg, yes=False)
+    assert cfg.migrate_ip_acls is True
+    assert analysis.ip_acls[0]["ip_addresses"] == ["8.8.8.8"]  # pruned to the selected IP
+
+
+def test_reconcile_ip_acls_interactive_cancel_aborts(monkeypatch):
+    import typer
+
+    from dbx_nwp_helper.config import IngressConfig
+
+    monkeypatch.setattr(cli, "_interactive", lambda yes: True)
+    monkeypatch.setattr(cli, "_checkbox_keep", lambda title, choices: None)  # Ctrl-C
+    with pytest.raises(typer.Exit):
+        cli._reconcile_ip_acls(_analysis_with_acls([_acl()]), cfg=IngressConfig(), yes=False)
+
+
+# ---------------------------------------------------------------------------------- guide command
+def test_guide_print_path_points_at_packaged_html():
+    from pathlib import Path
+
+    result = runner.invoke(cli.app, ["guide", "--print-path"])
+    assert result.exit_code == 0
+    printed = _plain(result.stdout).strip().splitlines()[-1].strip()
+    p = Path(printed)
+    assert p.name == "index.html" and p.exists()  # the packaged guide is really there
+
+
+def test_guide_html_has_pdf_affordances():
+    html = cli._guide_path().read_text()
+    assert 'class="pdf-btn"' in html and "npgExpandAll" in html  # button + expand-all script
+    assert "@media print" in html  # print stylesheet
+    assert "location.hash==='#print'" in html  # headless render expands via the #print hash
+
+
+def test_guide_pdf_renders_via_headless_browser(monkeypatch, tmp_path):
+    import subprocess
+    import types
+    from pathlib import Path
+
+    out = tmp_path / "guide.pdf"
+    seen = {}
+    monkeypatch.setattr(cli, "_find_chrome", lambda: "/fake/chrome")
+
+    def fake_run(cmd, **kw):
+        seen["cmd"] = cmd
+        pdf_arg = next(a for a in cmd if a.startswith("--print-to-pdf="))
+        Path(pdf_arg.split("=", 1)[1]).write_bytes(b"%PDF-1.4\n")  # emulate the browser writing it
+        return types.SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = runner.invoke(cli.app, ["guide", "--pdf", str(out)])
+    assert result.exit_code == 0 and out.exists()
+    assert any(a.startswith("--print-to-pdf=") for a in seen["cmd"])
+    assert seen["cmd"][-1].endswith("#print")  # rendered with every section expanded
+
+
+def test_guide_pdf_directory_gets_default_filename(monkeypatch, tmp_path):
+    import subprocess
+    import types
+    from pathlib import Path
+
+    seen = {}
+    monkeypatch.setattr(cli, "_find_chrome", lambda: "/fake/chrome")
+
+    def fake_run(cmd, **kw):
+        seen["cmd"] = cmd
+        pdf_arg = next(a for a in cmd if a.startswith("--print-to-pdf="))
+        Path(pdf_arg.split("=", 1)[1]).write_bytes(b"%PDF-1.4\n")
+        return types.SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    # pass a directory, not a file — should get the default filename inside it
+    result = runner.invoke(cli.app, ["guide", "--pdf", str(tmp_path)])
+    assert result.exit_code == 0
+    assert (tmp_path / "dbx-nwp-helper-guide.pdf").is_file()
+    pdf_arg = next(a for a in seen["cmd"] if a.startswith("--print-to-pdf="))
+    assert pdf_arg.endswith("dbx-nwp-helper-guide.pdf")
+
+
+def test_guide_pdf_reports_failure_when_no_file_written(monkeypatch, tmp_path):
+    # Regression: a directory used to pass the success check because it "exists"; now we require a
+    # real file, so a browser run that writes nothing is reported as a failure, not a success.
+    import subprocess
+    import types
+
+    monkeypatch.setattr(cli, "_find_chrome", lambda: "/fake/chrome")
+    monkeypatch.setattr(
+        subprocess, "run", lambda cmd, **kw: types.SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+    )
+    result = runner.invoke(cli.app, ["guide", "--pdf", str(tmp_path / "out.pdf")])
+    assert result.exit_code == 1
+    assert not (tmp_path / "out.pdf").exists()
+
+
+def test_guide_pdf_without_browser_points_to_button(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "_find_chrome", lambda: None)
+    result = runner.invoke(cli.app, ["guide", "--pdf", str(tmp_path / "g.pdf")])
+    assert result.exit_code == 1
+    assert "Save as PDF" in _plain(result.stdout)  # falls back to the on-page button

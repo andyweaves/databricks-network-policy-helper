@@ -16,7 +16,6 @@ import questionary
 from . import console
 from .config import (
     BLOCK_THREAT_DOMAINS,
-    IP_ACL_HANDLING,
     POLICY_FRAMINGS,
     POLICY_MODES,
     POLICY_SCOPES,
@@ -107,9 +106,6 @@ def _ingress_wizard(conn: Connection) -> IngressConfig:
             or list(THREAT_FEEDS)
         )
     )
-    acl_handling = _select(
-        "How should an existing IP ACL be treated?", IP_ACL_HANDLING, default="migrate_and_enrich"
-    )
     threat_deny = _select("Add threat-intel deny rules?", THREAT_DENY_RULES, default="off")
 
     apply = _apply_wizard(conn, scope, other="egress")
@@ -135,7 +131,6 @@ def _ingress_wizard(conn: Connection) -> IngressConfig:
         policy_scope=scope,
         policy_mode=mode,
         threat_deny_rules=threat_deny,
-        ip_acl_handling=acl_handling,
         disable_existing_ip_acls=disable_acls,
         apply=apply,
     )

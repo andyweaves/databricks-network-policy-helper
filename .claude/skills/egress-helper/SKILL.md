@@ -44,7 +44,10 @@ If the table is empty, no egress policy is logging yet — start with step 1.
    published ranges. Shows `resolved_ip` + `hosting_owner` (the cloud, "non-cloud / unknown", or
    `DNS_RESOLUTION_FAILED` — DNS is resolved locally on the CLI host, so this is a local
    resolution failure, not the workspace's egress control). Context only.
-4. **Review tables** (internet + per-cloud storage) — confirm before creating.
+4. **Review tables** (internet + per-cloud storage) — confirm before creating. In interactive runs
+   a pre-checked selector (on by default; `--no-select-rules` to skip, or `--yes` non-interactively)
+   lets you curate destinations before the policy is built, as **two separate prompts** — one for
+   internet FQDNs, one for storage destinations (S3 / GCS / Azure).
 5. Optional **threat-intel domain blocking** (`--block-threat-domains`: off / matched_only / all) →
    `blocked_internet_destinations` (FQDN-only, enforced in any mode, takes precedence over allows).
    Feed (`--threat-feed`, free/no key): `threatfox` — abuse.ch ThreatFox botnet-C2 IOCs, the best
@@ -68,6 +71,9 @@ If the table is empty, no egress policy is logging yet — start with step 1.
   scopes, the prefix → `<name>-ws-<id>` for per_workspace), `--policy-mode`
   (**dry_run** default / enforce), `--policy-scope` (**current_workspace** default / per_workspace /
   all_workspaces), `--block-threat-domains`, `--threat-feed`
+- `--select-rules` / `--no-select-rules` — interactively curate which observed destinations to
+  allow-list (on by default in interactive runs, as two prompts: FQDNs then storage; skipped with
+  `--yes`)
 - `--export <path>` — write the proposed `AccountNetworkPolicy` JSON (egress block + a `FULL_ACCESS`
   ingress default) for curl / the REST API, **and** a sibling best-effort Terraform `.tf`
   (`databricks_account_network_policy` — review before `terraform apply`); a directory writes
@@ -102,3 +108,5 @@ Egress policy limits: 100 internet destinations, 100 storage destinations per po
 - The egress block replaces only the policy's `egress`; `ingress` / `ingress_dry_run` are untouched.
 - Storage destinations and the CBI egress schema are documented at `docs/cbi-sdk-schema.md`.
 - Also runnable via `dbx-nwp-helper guided` (interactive Q&A).
+- New to the tool? `dbx-nwp-helper guide` opens a self-contained, offline companion guide
+  (step-by-step walkthroughs + a readable CLI-options reference); `--print-path` prints its path and `--pdf <path>` renders it to a PDF (all sections expanded).

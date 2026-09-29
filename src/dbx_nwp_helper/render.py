@@ -41,7 +41,6 @@ def ingress_decisions(cfg: IngressConfig) -> None:
                 cfg.policy_name,
                 "Policy id (single scope) / prefix (per_workspace); blank = profile name.",
             ),
-            ("ip_acl_handling", cfg.ip_acl_handling, "Existing IP ACL treatment."),
             ("deny_denied_ips", cfg.deny_denied_ips, "Deny source IPs recently seen blocked (403)."),
             (
                 "disable_existing_ip_acls",
@@ -140,13 +139,13 @@ def ingress_analysis(analysis: IngressAnalysis, cfg: IngressConfig | None = None
         )
 
     if not analysis.denied_requests.empty:
-        console.rule("Recently denied requests (403 / IpAccessDenied)")
+        console.rule("Recently denied inbound requests (IP ACL 403 + CBI policy)")
         console.dataframe(
             _trim(
                 analysis.denied_requests,
                 ["source_ip", "denied_events", "principals", "first_denied", "last_denied"],
             ),
-            "Source IPs recently blocked by the IP ACL",
+            "Source IPs recently blocked inbound (IP access list and/or CBI network policy)",
         )
         if cfg is not None and cfg.deny_denied_ips:
             console.banner("info", "These will be added as deny rules (--deny-denied-ips is on).")
@@ -278,7 +277,7 @@ def egress_analysis(analysis: EgressAnalysis) -> None:
                 for f, n in sorted(internet.items(), key=lambda kv: kv[1], reverse=True)
             ]
         ),
-        f"Internet FQDNs to allow ({len(internet)})",
+        f"Observed FQDNs to review ({len(internet)})",
     )
     # Storage destinations are inherently cloud-owned buckets/accounts -> cloud-owned recommendation.
     console.dataframe(

@@ -803,6 +803,16 @@ def test_denied_requests_query_filters_403():
     assert "INTERVAL 14 DAYS" in q
 
 
+def test_inbound_network_denied_query_shape():
+    q = queries.inbound_network_denied(21)
+    assert "system.access.inbound_network" in q
+    assert "source.ip AS source_ip" in q  # the CBI source IP lives in the source struct
+    assert "INTERVAL 21 DAYS" in q
+    # same output columns as denied_requests(), so the two frames union cleanly
+    for col in ("denied_events", "principals", "principal_list", "first_denied", "last_denied"):
+        assert col in q
+
+
 def test_queries_portable_mode_uses_no_inet_functions():
     # The INET built-ins (try_ip_host / ip_version() / ip_cidr_contains / try_ip_cidr) are a
     # non-public preview; a warehouse without them raises INET_FUNCTIONS_NOT_ENABLED. In portable

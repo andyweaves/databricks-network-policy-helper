@@ -205,41 +205,44 @@ def _acl(label, list_type, ips, enabled=True):
     return {"label": label, "list_type": list_type, "enabled": enabled, "ip_addresses": ips}
 
 
-def test_acl_migrate_and_enrich_adds_acl_allow_to_traffic():
+def test_acl_migrate_adds_acl_allow_to_traffic():
+    # migrate_ip_acls (default True) folds the ACL rules in AND keeps the enriched traffic rules.
     a = _analysis(
         [_suggestion(minimal_cidrs=["1.1.1.1/32"])], ip_acls=[_acl("office", "ALLOW", ["8.8.8.8/32"])]
     )
-    pols = rules.build_rules(a, IngressConfig(scoping_mode="ip_only", ip_acl_handling="migrate_and_enrich"))
+    pols = rules.build_rules(a, IngressConfig(scoping_mode="ip_only", migrate_ip_acls=True))
     labels = [s["label"] for s in pols[ALL_WORKSPACES]["allow"]]
-    assert "migrated-acl-office" in labels  # migrated ACL rule (as-is, no name_prefix)
-    assert "Acme" in labels  # traffic-derived owner-grouped rule
-    assert not any("ip-only" in lbl for lbl in labels)  # no blanket collapse anymore
+    assert "office" in labels  # migrated ACL rule, verbatim label (no migrated-acl- prefix)
+    assert "migrated-acl-office" not in labels
+    assert "Acme" in labels  # traffic-derived owner-grouped rule kept alongside
 
 
-def test_acl_migrate_only_drops_traffic_rules():
+def test_acl_migrate_always_keeps_traffic_rules():
+    # There's no longer an ACL-only mode: observed-traffic rules are always included when migrating.
     a = _analysis(
         [_suggestion(minimal_cidrs=["1.1.1.1/32"])], ip_acls=[_acl("office", "ALLOW", ["8.8.8.8/32"])]
     )
-    pols = rules.build_rules(a, IngressConfig(scoping_mode="ip_only", ip_acl_handling="migrate"))
+    pols = rules.build_rules(a, IngressConfig(scoping_mode="ip_only", migrate_ip_acls=True))
     labels = [s["label"] for s in pols[ALL_WORKSPACES]["allow"]]
-    assert all("ip-only" not in lbl for lbl in labels)
-    assert any("migrated-acl-office" in lbl for lbl in labels)
+    assert "Acme" in labels  # traffic rule present
+    assert "office" in labels  # ACL rule present too
 
 
-def test_acl_ignore_excludes_acl():
+def test_acl_not_migrated_excludes_acl():
     a = _analysis(
         [_suggestion(minimal_cidrs=["1.1.1.1/32"])], ip_acls=[_acl("office", "ALLOW", ["8.8.8.8/32"])]
     )
-    pols = rules.build_rules(a, IngressConfig(scoping_mode="ip_only", ip_acl_handling="ignore"))
+    pols = rules.build_rules(a, IngressConfig(scoping_mode="ip_only", migrate_ip_acls=False))
     labels = [s["label"] for s in pols[ALL_WORKSPACES]["allow"]]
-    assert not any("acl" in lbl for lbl in labels)
+    assert "office" not in labels  # ACL excluded
+    assert "Acme" in labels  # but traffic rules still built
 
 
 def test_acl_block_becomes_deny_rule():
     a = _analysis(ip_acls=[_acl("blocklist", "BLOCK", ["6.6.6.0/24"])])
-    pols = rules.build_rules(a, IngressConfig(scoping_mode="ip_only"))
+    pols = rules.build_rules(a, IngressConfig(scoping_mode="ip_only", migrate_ip_acls=True))
     deny = pols[ALL_WORKSPACES]["deny"]
-    assert any("acl-blocklist" in s["label"] for s in deny)
+    assert any(s["label"] == "blocklist" for s in deny)  # verbatim label, no prefix
 
 
 def test_disabled_acl_skipped():
@@ -256,7 +259,7 @@ def test_deny_denied_ips_builds_deny_rule():
     a = _analysis([_suggestion(minimal_cidrs=["1.1.1.1/32"])], denied=denied)
     pols = rules.build_rules(a, IngressConfig(scoping_mode="ip_only", deny_denied_ips=True))
     deny = pols[ALL_WORKSPACES]["deny"]
-    denied_rule = [s for s in deny if "currently-denied" in s["label"]][0]
+    denied_rule = [s for s in deny if "recently-denied" in s["label"]][0]
     assert denied_rule["cidrs"] == ["70.1.2.3/32"]  # deduped, IPv6 dropped
 
 
@@ -492,7 +495,7 @@ def test_denied_specs_skips_ipv6():
     a = _analysis([_suggestion(minimal_cidrs=["203.0.55.10/32"])], denied=denied)
     pols = rules.build_rules(a, IngressConfig(scoping_mode="ip_only", deny_denied_ips=True))
     deny = pols[ALL_WORKSPACES]["deny"]
-    denied_rule = next(s for s in deny if s["label"] == "deny-currently-denied")
+    denied_rule = next(s for s in deny if s["label"] == "deny-recently-denied")
     assert denied_rule["cidrs"] == ["1.2.3.4/32"]  # ipv6 omitted (CBI is IPv4-only)
 
 
