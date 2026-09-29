@@ -278,6 +278,25 @@ def denied_requests(lookback_days: int, use_inet: bool = True) -> str:
     """
 
 
+def inbound_network_denied(lookback_days: int) -> str:
+    """Inbound requests denied by a **CBI network policy** (log-only DENY_DRY_RUN or enforced DENY),
+    from system.access.inbound_network. That table records only denied inbound events and exists only
+    where network monitoring is enabled, so the caller runs this best-effort and degrades if the
+    table is absent/empty. Same output shape as `denied_requests` so the two union cleanly."""
+    return f"""
+    SELECT source.ip AS source_ip,
+      COUNT(*) AS denied_events,
+      COUNT(DISTINCT authenticated_as) AS principals,
+      sort_array(collect_set(authenticated_as)) AS principal_list,
+      MIN(CAST(event_time AS DATE)) AS first_denied, MAX(CAST(event_time AS DATE)) AS last_denied
+    FROM system.access.inbound_network
+    WHERE event_time >= current_date() - INTERVAL {lookback_days} DAYS
+      AND source.ip IS NOT NULL
+    GROUP BY source.ip
+    ORDER BY denied_events DESC
+    """
+
+
 def observed_egress(
     lookback_days: int, min_events: int, source_type_filter: str, only_workspace_id: int | None = None
 ) -> str:

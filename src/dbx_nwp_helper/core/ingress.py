@@ -121,6 +121,16 @@ def analyze(
     with _phase("Reading the workspace IP access list + recently denied requests…"):
         ip_acls = _read_ip_acls(workspace_client)
         denied = sql.query(sql_conn, queries.denied_requests(cfg.lookback_days, use_inet=use_inet))
+        # Also fold in CBI-policy denials (system.access.inbound_network), so the "recently denied"
+        # view flags everything blocked inbound — IP-ACL 403s AND network-policy DENY/DENY_DRY_RUN —
+        # not just IP-ACL denials. Best-effort: the table exists only where network monitoring is on.
+        inbound_denied = _read_inbound_network_denied(sql_conn, cfg.lookback_days)
+        if inbound_denied is not None and not inbound_denied.empty and "source_ip" in inbound_denied.columns:
+            denied = _merge_denied(denied, inbound_denied)
+            on_step(
+                f"Included {len(inbound_denied):,} source IP(s) blocked by a CBI network policy "
+                "(system.access.inbound_network) in the denied-requests view."
+            )
 
     with _phase("Loading enrichment feeds (threat-intel / cloud / Databricks ranges)…"):
         threat_df = loaders.threat_intel(cfg.threat_feeds, refresh=cfg.refresh_feeds)
@@ -183,6 +193,43 @@ def analyze(
         threat_ranges=threat_ranges,
         funnel=funnel,
     )
+
+
+def _read_inbound_network_denied(sql_conn, lookback_days: int):
+    """CBI-policy inbound denials from system.access.inbound_network, or None if that table isn't
+    available (it exists only where network monitoring is enabled). Best-effort: any query error —
+    most commonly TABLE_OR_VIEW_NOT_FOUND — degrades to None so the audit-based denials still show."""
+    from .. import queries, sql
+
+    try:
+        return sql.query(sql_conn, queries.inbound_network_denied(lookback_days))
+    except Exception:  # noqa: BLE001 - table absent / not enabled / no access → just skip it
+        return None
+
+
+def _merge_denied(audit_denied: pd.DataFrame, inbound_denied: pd.DataFrame) -> pd.DataFrame:
+    """Combine the audit (IP-ACL 403) and inbound_network (CBI-policy) denial frames into one row per
+    source IP: sum denied_events, union principal_list (principals = its size), min/max the dates.
+    Both frames share the denied_requests output columns."""
+    cols = ["source_ip", "denied_events", "principals", "principal_list", "first_denied", "last_denied"]
+    combined = pd.concat([audit_denied, inbound_denied], ignore_index=True)
+    if combined.empty:
+        return audit_denied
+
+    def _agg(group: pd.DataFrame) -> pd.Series:
+        principals = sorted({p for lst in group["principal_list"].dropna() for p in (lst or [])})
+        return pd.Series(
+            {
+                "denied_events": int(group["denied_events"].sum()),
+                "principals": len(principals) or int(group["principals"].max()),
+                "principal_list": principals,
+                "first_denied": group["first_denied"].min(),
+                "last_denied": group["last_denied"].max(),
+            }
+        )
+
+    merged = combined.groupby("source_ip", as_index=False).apply(_agg).reset_index(drop=True)
+    return merged[cols].sort_values("denied_events", ascending=False).reset_index(drop=True)
 
 
 def _read_ip_acls(workspace_client) -> list[dict]:

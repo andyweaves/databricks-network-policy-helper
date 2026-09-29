@@ -113,9 +113,8 @@ def build_rules(
     excluded_flagged = 0
     excluded_unresolved = 0
     identity_scoped_rules = 0
-    use_traffic_rules = cfg.ip_acl_handling != "migrate"
 
-    if use_traffic_rules and not suggestions.empty:
+    if not suggestions.empty:
         for _, row in suggestions.iterrows():
             # Threat-intel-matched groups are never allow-listed (they only appear in the threat
             # table for investigation). Cloud-provider-owned groups ARE included, as labeled rules
@@ -243,7 +242,7 @@ def _acl_ipv4(cidrs):
 
 def _acl_specs(analysis: IngressAnalysis, cfg: IngressConfig):
     allow_specs, deny_specs = [], []
-    if cfg.ip_acl_handling == "ignore" or not analysis.ip_acls:
+    if not cfg.migrate_ip_acls or not analysis.ip_acls:
         return allow_specs, deny_specs
     for a in analysis.ip_acls:
         if not a["enabled"]:
@@ -251,7 +250,7 @@ def _acl_specs(analysis: IngressAnalysis, cfg: IngressConfig):
         cidrs = _acl_ipv4(a["ip_addresses"])
         if not cidrs:
             continue
-        label = f"migrated-acl-{a['label']}"[:250]
+        label = (a["label"] or "acl")[:250]
         if a["list_type"] == "ALLOW":
             allow_specs.append(
                 {
@@ -281,7 +280,7 @@ def _denied_specs(analysis: IngressAnalysis, cfg: IngressConfig):
         except ValueError:
             pass
     if denied_cidrs:
-        return [{"label": "deny-currently-denied", "cidrs": denied_cidrs}]
+        return [{"label": "deny-recently-denied", "cidrs": denied_cidrs}]
     return []
 
 
@@ -393,9 +392,8 @@ def export_payload(
     ingress block + a permissive FULL_ACCESS egress default. Single-policy scopes only."""
     from databricks.sdk.service.settings import AccountNetworkPolicy
 
-    mode_label = {"dry_run": "dry-run", "enforce": "enforced"}[cfg.policy_mode]
     p = policies.get(ALL_WORKSPACES) or next(iter(policies.values()))
-    block = policy.build_ingress_block(p["allow"], p["deny"], mode_label, note)
+    block = policy.build_ingress_block(p["allow"], p["deny"], note)
     pid = _single_policy_id(cfg, profile, this_workspace_id)
     np = AccountNetworkPolicy(
         account_id=account_id, network_policy_id=pid, egress=policy.build_full_access_egress()
@@ -406,13 +404,12 @@ def export_payload(
 
 def preview_blocks(policies: dict, cfg: IngressConfig, note: Note = lambda _m: None) -> dict:
     """Build the SDK ingress block per target and return {target -> block_dict} for display."""
-    mode_label = {"dry_run": "dry-run", "enforce": "enforced"}[cfg.policy_mode]
     out = {}
     for tgt in sorted(policies, key=str):
         allow, deny = policies[tgt]["allow"], policies[tgt]["deny"]
         if not (allow or deny):
             continue
-        block = policy.build_ingress_block(allow, deny, mode_label, note)
+        block = policy.build_ingress_block(allow, deny, note)
         out[tgt] = {cfg.policy_mode_target: block.as_dict()}
     return out
 
@@ -427,7 +424,6 @@ def apply(
     note: Note = lambda _m: None,
 ) -> list[dict]:
     """Create/update policy(ies) and optionally assign. Returns a list of result dicts for display."""
-    mode_label = {"dry_run": "dry-run", "enforce": "enforced"}[cfg.policy_mode]
     target_attr = cfg.policy_mode_target
     results = []
 
@@ -436,7 +432,7 @@ def apply(
         p = policies.get(ALL_WORKSPACES) or next(iter(policies.values()))
         add_to_existing = cfg.apply.policy_action == "add_to_existing"
         single_id = _single_policy_id(cfg, profile, this_workspace_id)
-        block = policy.build_ingress_block(p["allow"], p["deny"], mode_label, note)
+        block = policy.build_ingress_block(p["allow"], p["deny"], note)
         action, effective_id, sent = policy.apply_ingress(
             account, account_id, single_id, block, target_attr, must_exist=add_to_existing
         )
@@ -450,7 +446,7 @@ def apply(
         for tgt in ws_targets:
             pid = _ws_policy_id(cfg, profile, tgt)
             p = policies[tgt]
-            block = policy.build_ingress_block(p["allow"], p["deny"], mode_label, note)
+            block = policy.build_ingress_block(p["allow"], p["deny"], note)
             try:
                 action, effective_id, _ = policy.apply_ingress(account, account_id, pid, block, target_attr)
                 result = {"target": tgt, "action": action, "policy_id": effective_id}

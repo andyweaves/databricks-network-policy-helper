@@ -35,6 +35,8 @@ The CLI is a uv project. From a checkout: `uv sync`, then run via `uv run dbx-nw
 - **SQL warehouse**: the CLI queries the system tables through a SQL warehouse. Pass
   `--warehouse-http-path` to use a specific one; otherwise it reuses (or creates) a small serverless
   warehouse named `dbx-nwp-helper`.
+- **New to the tool?** `dbx-nwp-helper guide` opens a self-contained, offline companion guide
+  (step-by-step walkthroughs + a readable CLI-options reference); `--print-path` prints its path and `--pdf <path>` renders it to a PDF (all sections expanded).
 
 ## Safety model — read first
 
@@ -59,7 +61,9 @@ The CLI is a uv project. From a checkout: `uv sync`, then run via `uv run dbx-nw
    ```
    This runs the analysis, prints the candidate IPs, ranked CIDR suggestions, the ⚠️ threat-match
    table, and the JSON policy preview — writing nothing.
-2. **Review** the proposal with the user: framing, scoping, mode, and the exact CIDRs.
+2. **Review** the proposal with the user: framing, scoping, mode, and the exact CIDRs. In interactive
+   runs a pre-checked **rule selector** (on by default; `--no-select-rules` to skip, or `--yes` for
+   non-interactive) lets you drop specific owner-groups before the policy is built.
 3. **Apply (gated)** — only with explicit go-ahead, add `--create-policy` (defaults to `dry_run`)
    and, when ready, `--policy-mode enforce`. Add `--auto-assign` to bind the workspace(s).
 4. Or run **`uv run dbx-nwp-helper guided --profile <profile>`** for a structured Q&A wizard that
@@ -138,12 +142,18 @@ the egress helper already created (and vice-versa) for a combined policy.
 The CLI knows the Databricks network-policy limits and **warns + auto-caps** to keep proposals
 valid: **50 ingress rules, 2000 CIDR blocks, 100 identities per policy; 1000 policies per account.**
 
-## Existing IP access list & denied requests
+## Existing IP access lists & denied requests
 
-`--ip-acl-handling`: `migrate_and_enrich` (default — recreate the ACL as CBI rules **and** add
-traffic-derived rules), `migrate` (recreate the ACL exactly), or `ignore` (traffic-derived only).
-The CLI also surfaces requests **currently being denied** (403 / IpAccessDenied); pass
-`--deny-denied-ips` to turn those source IPs into explicit deny rules.
+Existing IP access lists are **auto-detected** (there is no `--ip-acl-handling` flag). When the
+workspace has enabled lists, the CLI shows their **actual IP entries** and — interactively — offers a
+pre-checked **checkbox** to pick exactly which entries to fold into the CBI policy, kept **alongside**
+the traffic-derived rules. Non-interactive / `--yes` runs migrate them all. Observed-traffic rules are
+always included.
+
+The CLI also surfaces requests **recently blocked inbound** — both IP-access-list 403s
+(`system.access.audit`) and CBI network-policy denials (`system.access.inbound_network`, when that
+table is available/non-empty; it degrades cleanly if not). Pass `--deny-denied-ips` to turn those
+source IPs into explicit deny rules (labelled `deny-recently-denied`).
 
 Once the CBI policy replaces the old IP access list, pass `--disable-existing-ip-acls` (off by
 default) to turn the workspace's IP access lists off (`enableIpAccessLists=false`) so both controls

@@ -15,6 +15,44 @@ from dbx_nwp_helper.core import ingress as ing
 from dbx_nwp_helper.core import ingress_rules as rules
 
 
+def _denied(source_ip, events, principals):
+    return {
+        "source_ip": source_ip,
+        "denied_events": events,
+        "principals": len(principals),
+        "principal_list": principals,
+        "first_denied": "2026-01-01",
+        "last_denied": "2026-02-01",
+    }
+
+
+def test_merge_denied_combines_audit_and_inbound_by_ip():
+    # An IP seen in both the IP-ACL (audit) and CBI (inbound_network) denials collapses to one row
+    # with summed events and a unioned principal list; a CBI-only IP is added.
+    audit = pd.DataFrame([_denied("1.2.3.4", 3, ["alice"]), _denied("5.6.7.8", 2, ["bob"])])
+    inbound = pd.DataFrame([_denied("1.2.3.4", 4, ["carol"]), _denied("9.9.9.9", 1, ["dan"])])
+    merged = ing._merge_denied(audit, inbound)
+
+    by_ip = {r["source_ip"]: r for r in merged.to_dict(orient="records")}
+    assert set(by_ip) == {"1.2.3.4", "5.6.7.8", "9.9.9.9"}
+    assert by_ip["1.2.3.4"]["denied_events"] == 7  # 3 + 4
+    assert by_ip["1.2.3.4"]["principal_list"] == ["alice", "carol"]  # unioned + sorted
+    assert by_ip["1.2.3.4"]["principals"] == 2
+    assert by_ip["9.9.9.9"]["denied_events"] == 1  # CBI-only IP carried through
+    # rows ordered by denied_events desc
+    assert merged.iloc[0]["source_ip"] == "1.2.3.4"
+
+
+def test_read_inbound_network_denied_degrades_when_table_absent(monkeypatch):
+    import dbx_nwp_helper.sql as sqlmod
+
+    def _raise(_c, _t):
+        raise Exception("TABLE_OR_VIEW_NOT_FOUND: system.access.inbound_network")
+
+    monkeypatch.setattr(sqlmod, "query", _raise)
+    assert ing._read_inbound_network_denied(object(), 30) is None  # best-effort → None, no crash
+
+
 class _FakeIpAclApi:
     def __init__(self, acls):
         self._acls = acls
@@ -114,6 +152,8 @@ def test_ingress_ip_only_dry_run(monkeypatch, candidates_df):
     def fake_query(_conn, text):
         if "outbound_network" in text:
             return pd.DataFrame()
+        if "inbound_network" in text:  # CBI-policy denials — table absent in this fixture
+            return pd.DataFrame()
         if "IpAccessDenied" in text:
             return pd.DataFrame(columns=["source_ip"])
         return candidates_df
@@ -157,11 +197,14 @@ def test_ingress_databricks_owned_takes_precedence(monkeypatch, candidates_df):
     )
     import dbx_nwp_helper.sql as sqlmod
 
-    monkeypatch.setattr(
-        sqlmod,
-        "query",
-        lambda _c, t: (pd.DataFrame(columns=["source_ip"]) if "IpAccessDenied" in t else candidates_df),
-    )
+    def _q(_c, t):
+        if "inbound_network" in t:
+            return pd.DataFrame()
+        if "IpAccessDenied" in t:
+            return pd.DataFrame(columns=["source_ip"])
+        return candidates_df
+
+    monkeypatch.setattr(sqlmod, "query", _q)
     cfg = IngressConfig(enable_rdap=False, scoping_mode="ip_only", policy_scope="all_workspaces")
     analysis = ing.analyze(cfg, None, _FakeWorkspaceClient())
     recs = {r["rdap_owner"]: r for _, r in analysis.suggestions.iterrows()}

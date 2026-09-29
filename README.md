@@ -38,6 +38,9 @@ uv run dbx-nwp-helper ingress --profile <profile> --lookback-days 30
 
 # Or let it walk you through it interactively
 uv run dbx-nwp-helper guided --profile <profile>
+
+# New here? Open the interactive companion guide in your browser
+uv run dbx-nwp-helper guide
 ```
 
 `uv tool install .` exposes `dbx-nwp-helper` on your PATH so you can drop the `uv run` prefix.
@@ -57,6 +60,7 @@ an account admin** — pass `--account-id` with account-admin credentials (see
 | 📤 `dbx-nwp-helper egress` | Propose & apply a SEG allow-list from `system.access.outbound_network` destinations (S3 / GCS / Azure storage + internet FQDNs), with optional threat-intel domain blocking. |
 | 🧭 `dbx-nwp-helper guided` | Interactive Q&A wizard — point it at a workspace and it walks you through building any of the above. |
 | 📦 `dbx-nwp-helper feeds` | Manage the local threat-intel / cloud-range feed cache (`list` / `refresh` / `clear`). |
+| 📖 `dbx-nwp-helper guide` | Open the interactive companion guide — a self-contained, offline page explaining each step (`--print-path` prints its path; `--pdf <path>` renders the whole guide to a PDF with every section expanded). |
 
 Every option is discoverable with `--help` on any command. The full detail for each tool lives in its
 Claude skill under [`.claude/skills/`](.claude/skills/).
@@ -76,11 +80,11 @@ Claude skill under [`.claude/skills/`](.claude/skills/).
 | `--account-id` / `--account-profile` | Account-admin auth, required to create/assign (separate from workspace auth). |
 | `--yes` / `-y` | Non-interactive: skip the step-through + review gates (for scripting/CI). |
 
-**Both also take** `--policy-scope current_workspace\|per_workspace\|all_workspaces`, `--policy-action create_new\|add_to_existing` + `--existing-policy-id <id>` (compose a combined policy), `--lookback-days`, `--min-events`, `--enable-rdap`.
+**Both also take** `--policy-scope current_workspace\|per_workspace\|all_workspaces`, `--policy-action create_new\|add_to_existing` + `--existing-policy-id <id>` (compose a combined policy), `--lookback-days`, `--min-events`, `--enable-rdap`, and `--select-rules`/`--no-select-rules` (interactively curate which rules/destinations to include — **on by default** in interactive runs).
 
 **Command-specific:**
 
-- 📥 **`ingress`**: `--scoping-mode`, `--policy-framing` (minimal/optimal/maximum), `--ip-acl-handling`, `--threat-deny-rules`, `--deny-denied-ips`, `--include-ipv6`, `--include-account-level`, `--disable-existing-ip-acls`.
+- 📥 **`ingress`**: `--scoping-mode`, `--policy-framing` (minimal/optimal/maximum), `--threat-deny-rules`, `--deny-denied-ips`, `--include-ipv6`, `--include-account-level`, `--disable-existing-ip-acls`. Existing IP access lists are **auto-detected** and you're prompted (a per-entry checkbox) to migrate them — no flag.
 - 📤 **`egress`**: `--block-threat-domains` (off/matched_only/all), `--threat-feed`, `--source-type-filter`.
 
 ## 🗺️ How each command flows
@@ -107,7 +111,7 @@ flowchart TD
     G --> H
     G2 --> H
     G3 --> H
-    H["IP ACL handling: migrate_and_enrich / migrate / ignore<br/>+ threat-deny rules + deny-denied-IPs optional"] --> P["Preview proposed policy"]
+    H["Existing IP ACLs auto-detected → prompt to migrate (kept with traffic rules)<br/>+ threat-deny rules + deny-denied-IPs optional"] --> P["Preview proposed policy"]
     P --> EXP{"--export?"}
     EXP -->|yes| EXPW["Write JSON + Terraform"]
     EXP -->|no| CR{"--create-policy?"}
@@ -277,6 +281,7 @@ drive the CLI conversationally. Each skill's `SKILL.md` is also the tool's refer
 |---|---|
 | `src/dbx_nwp_helper/cli.py` | 🎛️ The Typer CLI (all commands + flags). |
 | `src/dbx_nwp_helper/guided.py` | 🧭 The interactive Q&A wizard. |
+| `src/dbx_nwp_helper/guide/index.html` | 📖 The self-contained companion guide opened by `dbx-nwp-helper guide`. |
 | `src/dbx_nwp_helper/core/` | 🧠 Engines: ingress, egress, network-policy state queries, policy builders, limits, Terraform export. |
 | `src/dbx_nwp_helper/feeds/` | 🕵️ Threat-intel / cloud / Databricks range loaders + local cache + RDAP. |
 | `src/dbx_nwp_helper/{auth,sql,queries}.py` | 🔌 Unified auth, SQL-warehouse connection, system-table queries. |
@@ -384,6 +389,10 @@ The full step-by-step checklist — post-merge tagging, publishing a GitHub Rele
 - The egress table (`system.access.outbound_network`) only logs **denied** egress, including
   dry-run would-be-denials — so stand up an egress policy in `dry_run` first, let it observe, then
   run `dbx-nwp-helper egress` to turn the observed destinations into an allow-list.
+- **Recently-denied inbound** combines two sources: IP-access-list 403s (`system.access.audit`) and
+  CBI network-policy denials (`system.access.inbound_network`, when that table is available — it
+  records only denied inbound events and exists where network monitoring is enabled). Both are
+  merged by source IP; the CBI source is best-effort and skipped cleanly if the table is absent.
 - **Ingress shows no candidate IPs?** The CLI prints a diagnostic funnel explaining where the audit
   rows dropped out. The usual causes: the workspace uses **PrivateLink/NAT** (the audit log records
   the relay's private IP, not the user's public IP — a source-IP allow-list can't be built from

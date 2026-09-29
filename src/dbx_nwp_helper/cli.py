@@ -55,6 +55,7 @@ def _version_callback(value: bool) -> None:
 
 @app.callback()
 def _main(
+    ctx: typer.Context,
     version: bool = typer.Option(
         None,
         "--version",
@@ -66,10 +67,19 @@ def _main(
     """Runs before every command — tag SDK requests with the tool name (usage tracking, before any
     client is built) and make TLS verification use the OS trust store so corporate proxy CAs are
     honoured by the SDK, the SQL connector, and feed downloads alike."""
+    import sys
+
     from . import tls, usage
 
     usage.tag()
     tls.enable()
+    # A one-line discoverability nudge toward the companion guide, for interactive runs of the
+    # policy-building commands (not `guide` itself, and never in scripted / piped output).
+    if ctx.invoked_subcommand not in (None, "guide") and sys.stdout.isatty():
+        console.console.print(
+            "[muted]New here? Run [bold]dbx-nwp-helper guide[/bold] for a step-by-step "
+            "walkthrough. 📖[/muted]"
+        )
 
 
 # --- Enums so Typer validates + shows choices (mirroring config.py) ---
@@ -101,12 +111,6 @@ class ThreatDeny(str, Enum):
     off = "off"
     matched_only = "matched_only"
     all = "all"  # noqa: E702
-
-
-class AclHandling(str, Enum):
-    migrate_and_enrich = "migrate_and_enrich"
-    migrate = "migrate"
-    ignore = "ignore"  # noqa: E702
 
 
 class Action(str, Enum):
@@ -366,6 +370,15 @@ def _is_expired_auth(msg: str) -> bool:
     )
 
 
+def _is_default_auth_failure(msg: str) -> bool:
+    """True if an SDK client-construction error means unified auth found no credentials at all — as
+    opposed to an expired token (`_is_expired_auth`) or a mistyped profile. It's what you get when
+    nothing (no --account-profile, no matching config profile, no DATABRICKS_* env) resolves for the
+    host, so the SDK reports `default auth: cannot configure default credentials`."""
+    m = msg.lower()
+    return "cannot configure default credentials" in m or "default auth:" in m
+
+
 def _reauth_profile(msg: str, fallback: str | None) -> str | None:
     """The profile that actually needs re-authenticating. The SDK error spells out the fix as
     `databricks auth login --profile <name>`, so prefer that exact profile — account access is often
@@ -424,10 +437,15 @@ def _reauthenticate(profile: str) -> bool:
     return True
 
 
-def _client_or_exit(build, profile: str | None, flag: str):
+def _client_or_exit(build, profile: str | None, flag: str, on_config_error=None):
     """Build a Databricks client, turning a config/auth ValueError into a clean CLI error. If the
     failure is expired CLI credentials and a profile is set, offer to re-authenticate and retry the
-    build once; any other ValueError (or a declined/failed re-auth) exits cleanly."""
+    build once; any other ValueError (or a declined/failed re-auth) exits cleanly.
+
+    `on_config_error(e, profile, flag)` is the terminal handler for a non-reauthable ValueError; it
+    defaults to `_profile_config_error`. The account path passes its own so a no-account-credentials
+    failure gets account-admin guidance instead of the generic message."""
+    on_config_error = on_config_error or _profile_config_error
     try:
         return build()
     except ValueError as e:
@@ -438,8 +456,8 @@ def _client_or_exit(build, profile: str | None, flag: str):
             try:
                 return build()
             except ValueError as e2:
-                _profile_config_error(e2, profile, flag)
-        _profile_config_error(e, profile, flag)
+                on_config_error(e2, profile, flag)
+        on_config_error(e, profile, flag)
 
 
 def _profile_config_error(e: Exception, profile: str | None, flag: str) -> None:
@@ -480,10 +498,38 @@ def _account_client_or_exit(conn: Connection, workspace_id: int | None = None):
         lambda: auth.account_client(conn),
         conn.account_profile or conn.profile,
         "--account-profile" if conn.account_profile else "--profile",
+        on_config_error=lambda e, prof, flag: _account_build_error(e, conn, prof, flag),
     )
     if workspace_id is not None:
         account = _verify_account_access_or_exit(conn, account, workspace_id)
     return account
+
+
+def _account_build_error(e: Exception, conn: Connection, profile: str | None, flag: str) -> None:
+    """Terminal handler for a failed *account* client construction. When unified auth resolved no
+    account credentials at all (the common case: no --account-profile and no matching config
+    profile), explain that account auth is separate from the workspace --profile and how to set it
+    up — rather than the generic 'couldn't initialise the client' message. Any other construction
+    error defers to the standard profile/config handler. Always raises."""
+    if not _is_default_auth_failure(str(e)):
+        _profile_config_error(e, profile, flag)  # raises
+        return
+    login = (
+        f"databricks auth login --host {conn.account_host} "
+        f"--account-id {conn.account_id or '<account-id>'}"
+    )
+    console.banner(
+        "danger",
+        f"Couldn't authenticate to the Databricks account API at {conn.account_host} for account "
+        f"'{conn.account_id or '(unset)'}'.\n"
+        "  This operation is account-level and needs account-admin credentials, which are separate "
+        "from your workspace --profile — a workspace login can't call the account API.\n"
+        "  No --account-profile was given and no profile in your Databricks config matches this "
+        "account's host + id, so unified auth found no account credentials at all.\n"
+        f"  Fix: create an account-admin login — {login} — then re-run with --account-profile <name> "
+        "(or set DATABRICKS_* account env vars). See docs/account-admin-setup.md.",
+    )
+    raise typer.Exit(code=1) from None
 
 
 def _account_access_error(e: Exception, conn: Connection) -> None:
@@ -955,6 +1001,76 @@ def _confirm_truncation(truncations: list[str], yes: bool) -> None:
         raise typer.Exit(code=0)
 
 
+def _reconcile_ip_acls(analysis, cfg: IngressConfig, yes: bool) -> None:
+    """Detect the workspace's *enabled* IP access list entries and decide which to fold into the CBI
+    policy (alongside the enriched observed-traffic rules). The detected entries are shown with their
+    actual IPs. Interactive runs get a pre-checked checkbox to curate exactly which IPs to migrate;
+    --yes / non-interactive runs migrate them all (the safe default — the CBI policy is meant to
+    replace the ACL, so dropping it silently could lose coverage). Prunes analysis.ip_acls to the
+    selection and sets cfg.migrate_ip_acls. No-op when the workspace has no enabled IP access lists."""
+    all_acls = list(analysis.ip_acls or [])
+    enabled = [a for a in all_acls if a.get("enabled")]
+    disabled = [a for a in all_acls if not a.get("enabled")]
+    entries = [(a, ip) for a in enabled for ip in a["ip_addresses"]]
+    if not entries:
+        cfg.migrate_ip_acls = False  # nothing enabled with any IPs; keep the preview/echo honest
+        return
+
+    # Show the detected lists with their actual IPs (not just a count).
+    listing = "\n".join(
+        f"    • {a['label']} ({a['list_type'] or '?'}): {', '.join(a['ip_addresses'])}" for a in enabled
+    )
+    console.banner(
+        "info",
+        f"Detected {len(enabled)} enabled IP access list(s) ({len(entries)} entr"
+        f"{'y' if len(entries) == 1 else 'ies'}) on this workspace:\n{listing}",
+    )
+
+    if not _interactive(yes):
+        cfg.migrate_ip_acls = True
+        console.banner(
+            "info",
+            "Non-interactive run — folding all of these IP access list entries into the CBI policy "
+            "(use the interactive mode to choose a subset, or disable a list to leave it out).",
+        )
+        return
+
+    import questionary
+
+    choices = [
+        questionary.Choice(
+            title=f"{ip}  [{a['label']} · {a['list_type'] or '?'}]", value=(id(a), ip), checked=True
+        )
+        for a, ip in entries
+    ]
+    kept = _checkbox_keep(
+        "Select the IP access list entries to migrate into the policy (space=toggle, enter=confirm):",
+        choices,
+    )
+    if kept is None:
+        console.banner("info", "Selection cancelled — aborting, nothing written.")
+        raise typer.Exit(code=0)
+    kept_keys = set(kept)
+    pruned = []
+    for a in enabled:
+        keep_ips = [ip for ip in a["ip_addresses"] if (id(a), ip) in kept_keys]
+        if keep_ips:
+            pruned.append({**a, "ip_addresses": keep_ips})
+    # Disabled lists aren't migrated (build_rules skips them) but stay in the analysis untouched.
+    analysis.ip_acls = pruned + disabled
+    cfg.migrate_ip_acls = bool(pruned)
+    if pruned:
+        kept_n = sum(len(a["ip_addresses"]) for a in pruned)
+        console.banner(
+            "info", f"Including {kept_n} IP access list entr{'y' if kept_n == 1 else 'ies'} in the policy."
+        )
+    else:
+        console.banner(
+            "info",
+            "No IP access list entries selected — the policy will be built from observed traffic only.",
+        )
+
+
 def _checkbox_keep(title: str, choices: list) -> list | None:
     """Show a pre-checked checkbox of `choices` (questionary.Choice with .value); return the list of
     kept values, or None if the user cancelled (Ctrl-C). All start checked so 'keep everything' is a
@@ -1008,44 +1124,59 @@ def _select_ingress_rules(analysis, cfg: IngressConfig, yes: bool) -> None:
     console.banner("info", f"Excluded {len(drop)} rule(s) from your selection; kept {len(kept_keys)}.")
 
 
-def _select_egress_rules(analysis, cfg: EgressConfig, yes: bool) -> None:
-    """Let the user pick which observed egress destinations to allow-list, then remove the deselected
-    ones from every target. No-op under --yes / non-interactive / when --select-rules wasn't passed."""
-    if not cfg.select_rules or not _interactive(yes):
-        return
+def _egress_pick(title: str, entries: list) -> set:
+    """Show one pre-checked checkbox for a list of (value, title) egress destinations and return the
+    set of kept values. Cancelling (Ctrl-C) aborts the whole run, writing nothing."""
     import questionary
 
-    from .core import egress as eg
-
-    # (kind, key, display) for every distinct destination across targets.
-    dests = []
-    for fqdn, n in sorted(eg.union(analysis.targets, "internet").items(), key=lambda kv: -kv[1]):
-        owner = analysis.fqdn_owner.get(fqdn)
-        dests.append(("internet", fqdn, f"{fqdn}  ({owner or 'owner unknown'}, {n} events)"))
-    for (bucket, region), n in sorted(eg.union(analysis.targets, "s3").items(), key=lambda kv: -kv[1]):
-        dests.append(("s3", (bucket, region), f"S3  {bucket} ({region}, {n} events)"))
-    for bucket, n in sorted(eg.union(analysis.targets, "gcs").items(), key=lambda kv: -kv[1]):
-        dests.append(("gcs", bucket, f"GCS  {bucket} ({n} events)"))
-    for (acct, svc), n in sorted(eg.union(analysis.targets, "azure").items(), key=lambda kv: -kv[1]):
-        dests.append(("azure", (acct, svc), f"Azure  {acct}.{svc} ({n} events)"))
-    if not dests:
-        return
-
-    choices = [questionary.Choice(title=d, value=(kind, key), checked=True) for kind, key, d in dests]
-    kept = _checkbox_keep(
-        "Select the egress destinations to allow-list (space=toggle, enter=confirm):", choices
-    )
+    choices = [questionary.Choice(title=t, value=v, checked=True) for v, t in entries]
+    kept = _checkbox_keep(title, choices)
     if kept is None:
         console.banner("info", "Selection cancelled — aborting, nothing written.")
         raise typer.Exit(code=0)
-    kept_set = set(kept)
-    drop = {(kind, key) for kind, key, _d in dests} - kept_set
+    return set(kept)
+
+
+def _select_egress_rules(analysis, cfg: EgressConfig, yes: bool) -> None:
+    """Let the user pick which observed egress destinations to allow-list, then remove the deselected
+    ones from every target. Runs as two distinct prompts — one for **internet FQDNs**, one for
+    **storage destinations** (S3 / GCS / Azure) — so the two kinds are curated separately rather than
+    in a single mixed list. No-op under --yes / non-interactive / when --select-rules wasn't passed."""
+    if not cfg.select_rules or not _interactive(yes):
+        return
+
+    from .core import egress as eg
+
+    def _ranked(kind):  # observed destinations of one kind, busiest first
+        return sorted(eg.union(analysis.targets, kind).items(), key=lambda kv: -kv[1])
+
+    fqdns = [
+        (("internet", f), f"{f}  ({analysis.fqdn_owner.get(f) or 'owner unknown'}, {n} events)")
+        for f, n in _ranked("internet")
+    ]
+    storage = (
+        [(("s3", (b, r)), f"S3  {b} ({r}, {n} events)") for (b, r), n in _ranked("s3")]
+        + [(("gcs", b), f"GCS  {b} ({n} events)") for b, n in _ranked("gcs")]
+        + [(("azure", (a, s)), f"Azure  {a}.{s} ({n} events)") for (a, s), n in _ranked("azure")]
+    )
+    if not fqdns and not storage:
+        return
+
+    drop = set()
+    if fqdns:
+        kept = _egress_pick("Select the internet FQDNs to allow-list (space=toggle, enter=confirm):", fqdns)
+        drop |= {value for value, _title in fqdns} - kept
+    if storage:
+        kept = _egress_pick(
+            "Select the storage destinations to allow-list (space=toggle, enter=confirm):", storage
+        )
+        drop |= {value for value, _title in storage} - kept
     if not drop:
         return
     for t in analysis.targets.values():
         for kind, key in drop:
             t[kind].pop(key, None)
-    console.banner("info", f"Excluded {len(drop)} destination(s) from your selection; kept {len(kept_set)}.")
+    console.banner("info", f"Excluded {len(drop)} destination(s) from your selection.")
 
 
 def _maybe_disable_ip_acls(disable: bool, results: list[dict], workspace_client) -> None:
@@ -1125,14 +1256,12 @@ def ingress(
         "policy id for single-policy scopes; the prefix (→ <name>-ws-<id>) for "
         "per_workspace. Normalised: lowercased, non-alphanumerics → '-', length-capped.",
     ),
-    ip_acl_handling: AclHandling = typer.Option(
-        AclHandling.migrate_and_enrich, help="How to treat an existing IP ACL."
-    ),
-    deny_denied_ips: bool = typer.Option(False, help="Deny currently-denied (403) source IPs."),
+    deny_denied_ips: bool = typer.Option(False, help="Deny recently-denied (403) source IPs."),
     select_rules: bool = typer.Option(
-        False,
+        True,
         help="Interactively pick which proposed allow rules to include (a checkbox after the "
-        "preview). Ignored with --yes / non-interactively.",
+        "preview). On by default; use --no-select-rules to keep everything. Ignored with --yes / "
+        "non-interactively.",
     ),
     export: str = typer.Option(
         "",
@@ -1186,7 +1315,6 @@ def ingress(
         threat_deny_rules=threat_deny_rules.value,
         policy_name=policy_name,
         export=export,
-        ip_acl_handling=ip_acl_handling.value,
         deny_denied_ips=deny_denied_ips,
         select_rules=select_rules,
         disable_existing_ip_acls=disable_existing_ip_acls,
@@ -1232,9 +1360,10 @@ def egress(
     ),
     threat_feed: str = typer.Option("threatfox", help="Threat-domain feed."),
     select_rules: bool = typer.Option(
-        False,
+        True,
         help="Interactively pick which observed destinations to allow-list (a checkbox after the "
-        "analysis). Ignored with --yes / non-interactively.",
+        "analysis). On by default; use --no-select-rules to keep everything. Ignored with --yes / "
+        "non-interactively.",
     ),
     policy_name: str = typer.Option(
         "",
@@ -1321,6 +1450,129 @@ def guided(
         profile, warehouse_http_path, account_id, account_host, account_profile, warehouse_size.value
     )
     run_wizard(conn)
+
+
+def _guide_path():
+    """Filesystem path to the packaged interactive guide (shipped inside the package so it's present
+    after `uv tool install`)."""
+    from pathlib import Path
+
+    return Path(__file__).parent / "guide" / "index.html"
+
+
+def _find_chrome() -> str | None:
+    """Path to a Chromium-family browser that can render a PDF headlessly (Chrome / Chromium / Edge),
+    or None. Checks the usual PATH names plus the macOS app-bundle locations."""
+    import shutil
+
+    for name in (
+        "google-chrome",
+        "google-chrome-stable",
+        "chromium",
+        "chromium-browser",
+        "chrome",
+        "microsoft-edge",
+        "msedge",
+    ):
+        found = shutil.which(name)
+        if found:
+            return found
+    from pathlib import Path
+
+    for app in (
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+    ):
+        if Path(app).exists():
+            return app
+    return None
+
+
+def _guide_to_pdf(guide, out: str) -> None:
+    """Render the guide to a PDF at `out` using a headless Chromium-family browser, with every section
+    expanded (the guide auto-expands on the #print hash). Falls back to a clear message — and the
+    on-page 'Save as PDF' button — when no such browser is found. Always returns or raises typer.Exit."""
+    import os
+    import subprocess
+    from pathlib import Path
+
+    # Accept either a file path or a directory. A directory (existing, or written with a trailing
+    # slash) gets the default filename so we never try to "write" onto the directory itself.
+    dest = Path(out).expanduser()
+    if dest.is_dir() or out.endswith(("/", os.sep)):
+        dest = dest / "dbx-nwp-helper-guide.pdf"
+    out_abs = dest.resolve()
+    chrome = _find_chrome()
+    if chrome is None:
+        console.banner(
+            "danger",
+            "Couldn't find a Chrome / Chromium / Edge browser to render the PDF.\n"
+            "  Open the guide (`dbx-nwp-helper guide`) and use the on-page '⭳ PDF' button (or your "
+            "browser's Save as PDF) — it expands every section first, so nothing is missing.",
+        )
+        raise typer.Exit(code=1)
+    out_abs.parent.mkdir(parents=True, exist_ok=True)  # create the target dir if needed
+    url = f"{guide.as_uri()}#print"
+    cmd = [
+        chrome,
+        "--headless=new",
+        "--disable-gpu",
+        "--no-sandbox",
+        "--no-pdf-header-footer",
+        f"--print-to-pdf={out_abs}",
+        url,
+    ]
+    with console.status(f"Rendering the guide to PDF via {Path(chrome).name}…"):
+        try:
+            result = subprocess.run(cmd, capture_output=True, timeout=90)
+        except (OSError, subprocess.TimeoutExpired) as e:  # noqa: BLE001 - surface a clean message
+            console.banner("danger", f"Couldn't run the browser to render the PDF: {e}")
+            raise typer.Exit(code=1) from None
+    if result.returncode != 0 or not out_abs.is_file():
+        detail = (result.stderr or b"").decode("utf-8", "replace").strip().splitlines()[-1:] or [""]
+        console.banner(
+            "danger",
+            f"The browser didn't produce a PDF (exit {result.returncode}). {detail[0]}\n"
+            "  Try `dbx-nwp-helper guide` and use the on-page '⭳ PDF' button instead.",
+        )
+        raise typer.Exit(code=1)
+    console.banner("success", f"Wrote the guide PDF (all sections expanded) to:\n  {out_abs}")
+
+
+@app.command()
+def guide(
+    print_path: bool = typer.Option(
+        False, "--print-path", help="Print the guide's file path instead of opening a browser."
+    ),
+    pdf: str = typer.Option(
+        "",
+        "--pdf",
+        metavar="PATH",
+        help="Render the guide to a PDF at PATH, with every section expanded (needs a headless "
+        "Chrome / Chromium / Edge). PATH may be a file or a directory (a directory gets "
+        "dbx-nwp-helper-guide.pdf). Falls back to the on-page 'Save as PDF' button if none is found.",
+    ),
+) -> None:
+    """Open the interactive companion guide — a self-contained, offline page that walks through what
+    the tool does, each step of a run, and links to read more. Use --pdf to render it to a file."""
+    import webbrowser
+
+    path = _guide_path()
+    if not path.exists():
+        console.banner("danger", f"Couldn't find the guide at {path}. Try reinstalling the package.")
+        raise typer.Exit(code=1)
+    if print_path:
+        typer.echo(str(path))  # plain, unwrapped — safe to consume from a script
+        return
+    if pdf:
+        _guide_to_pdf(path, pdf)
+        return
+    console.banner("info", f"Opening the interactive guide in your browser:\n  {path}")
+    if not webbrowser.open(path.as_uri()):
+        console.banner(
+            "info", f"Couldn't launch a browser automatically — open this file yourself:\n  {path}"
+        )
 
 
 # --- feeds subcommands ---
@@ -1514,6 +1766,8 @@ def _run_ingress(cfg: IngressConfig, conn: Connection, yes: bool) -> None:
 
     render.ingress_analysis(analysis, cfg)
     _checkpoint(yes)
+    # Auto-detect the workspace's IP access lists and confirm whether to migrate them into the policy.
+    _reconcile_ip_acls(analysis, cfg, yes)
     # Optionally let the user cull the proposed allow rules before they're built (and before SCIM).
     _select_ingress_rules(analysis, cfg, yes)
 
