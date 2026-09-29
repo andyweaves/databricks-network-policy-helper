@@ -7,7 +7,7 @@ dynamic = ["version"]
 description = "Build Databricks account network policies from real observed traffic — a visually engaging CLI for context-based ingress (CBI), serverless egress (SEG), and IP ACL migration."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "Apache-2.0" }
+license = { file = "LICENSE.md" }
 authors = [{ name = "Andrew Weaver" }]
 keywords = ["databricks", "network-policy", "cbi", "seg", "security", "cli"]
 dependencies = [
