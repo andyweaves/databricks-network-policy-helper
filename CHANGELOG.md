@@ -13,6 +13,18 @@ commit `vX.Y.Z` — see the "Versioning & releases" section of the README.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-30
+
+### Changed
+
+- **A more visual companion guide.** `dbx-nwp-helper guide` gains navigation and visualisation
+  enhancements: a reading-progress bar and scroll-spy table of contents that track where you are, a
+  "you are here" step rail that lights up each stage as you move through the ingress / egress
+  walkthroughs, inline **flow diagrams** (hand-authored, theme-aware SVG) summarising each command's
+  decision path, and subtle reveal-on-scroll polish. All additive and self-contained — the guide
+  stays a single offline file, respects `prefers-reduced-motion`, and still renders every section in
+  the `--pdf` / print path.
+
 ## [0.2.0] - 2026-09-29
 
 ### Added
@@ -78,6 +90,7 @@ tables into proposed **account network policies**, with a dry-run-first, review-
   a best-effort Terraform `.tf`, working in propose-only mode.
 - **`--version`.** All commands expose the tool version via `dbx-nwp-helper --version`.
 
-[Unreleased]: https://github.com/andyweaves/databricks-network-policy-helper/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/andyweaves/databricks-network-policy-helper/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/andyweaves/databricks-network-policy-helper/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/andyweaves/databricks-network-policy-helper/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/andyweaves/databricks-network-policy-helper/releases/tag/v0.1.0

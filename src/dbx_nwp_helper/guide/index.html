@@ -43,7 +43,8 @@
   .eyebrow { color: var(--accent-ink); font-weight: 700; letter-spacing: .04em; text-transform: uppercase; font-size: 12px; }
   h1 { font-size: clamp(28px, 5vw, 40px); line-height: 1.15; margin: 6px 0 8px; }
   .lede { color: var(--muted); font-size: 18px; margin: 0 0 8px; }
-  h2 { font-size: 22px; margin: 40px 0 10px; scroll-margin-top: 64px; }
+  h2 { font-size: 22px; margin: 40px 0 10px; scroll-margin-top: 64px; position: relative; padding-left: 14px; }
+  h2::before { content: ""; position: absolute; left: 0; top: .2em; bottom: .2em; width: 4px; border-radius: 3px; background: linear-gradient(var(--accent), var(--accent-ink)); }
   ol.steps > li[id], .callout[id] { scroll-margin-top: 64px; }
   h3 { font-size: 17px; margin: 0 0 4px; }
   a { color: var(--accent-ink); text-underline-offset: 2px; }
@@ -87,7 +88,9 @@
   details[open] > summary::before { content: "▾ "; }
   details .body { padding: 6px 0 2px; color: var(--muted); font-size: 14.5px; }
   nav.toc { position: sticky; top: 0; background: var(--bg); padding: 10px 0; border-bottom: 1px solid var(--border); z-index: 5; margin-bottom: 8px; }
-  nav.toc a { margin-right: 14px; font-size: 13.5px; white-space: nowrap; }
+  nav.toc a { margin-right: 14px; font-size: 13.5px; white-space: nowrap; position: relative; padding-bottom: 3px; transition: color .15s; }
+  nav.toc a.active { color: var(--accent-ink); font-weight: 700; }
+  nav.toc a.active::after { content: ""; position: absolute; left: 0; right: 0; bottom: -2px; height: 2px; background: var(--accent); border-radius: 2px; }
   nav.toc .row { max-width: var(--maxw); margin: 0 auto; padding: 0 16px; overflow-x: auto; display: flex; }
   .theme-toggle { position: fixed; right: 14px; top: 12px; background: var(--panel); border: 1px solid var(--border); color: var(--ink); border-radius: 999px; padding: 6px 12px; font-size: 13px; cursor: pointer; z-index: 10; }
   .pdf-btn { position: fixed; right: 92px; top: 12px; background: var(--panel); border: 1px solid var(--border); color: var(--ink); border-radius: 999px; padding: 6px 12px; font-size: 13px; cursor: pointer; z-index: 10; }
@@ -124,12 +127,87 @@
   .opt .chip { vertical-align: middle; margin-left: 6px; }
   .opt p { margin: 5px 0 0; color: var(--muted); font-size: 14.5px; }
   .opt .choices { color: var(--ink); }
+
+  /* ---- Reading-progress bar (fixed, top of viewport) ---- */
+  .progress {
+    position: fixed; top: 0; left: 0; height: 3px; width: 0; z-index: 20;
+    background: linear-gradient(90deg, var(--accent), var(--accent-ink));
+    box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 45%, transparent);
+  }
+
+  /* ---- Walkthrough step rail: connector spine + progress states ---- */
+  ol.steps > li::before { z-index: 1; }
+  ol.steps > li::after {
+    content: ""; position: absolute; left: 30px; top: 31px; bottom: -43px; width: 2px;
+    background: var(--border); z-index: 0;
+  }
+  ol.steps > li:last-child::after { display: none; }
+  ol.steps > li.stepnote::after,
+  ol.steps > li:has(+ .stepnote)::after { display: none; }
+  /* JS-only "you are here" states — filled = seen/current, hollow = upcoming. No-JS keeps the
+     original all-filled badges. */
+  html.js ol.steps > li:not(.stepnote)::before {
+    background: var(--panel); color: var(--muted); border: 2px solid var(--border);
+    transition: background .3s, color .3s, border-color .3s, box-shadow .3s;
+  }
+  html.js ol.steps > li.seen:not(.stepnote)::before {
+    background: var(--accent); color: #fff; border-color: var(--accent);
+  }
+  html.js ol.steps > li.active:not(.stepnote)::before {
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 22%, transparent);
+  }
+  html.js ol.steps > li.seen::after { background: var(--accent); }
+
+  /* ---- Inline flow diagrams (hand-authored, theme-aware SVG) ---- */
+  figure.flow {
+    margin: 16px 0 8px; padding: 14px 14px 6px; background: var(--panel);
+    border: 1px solid var(--border); border-radius: var(--radius);
+  }
+  figure.flow svg { width: 100%; height: auto; display: block; }
+  figure.flow figcaption { color: var(--muted); font-size: 12.5px; text-align: center; margin-top: 8px; }
+  .flow .node rect { fill: var(--panel); stroke: var(--border); stroke-width: 1.5; }
+  .flow .node text {
+    fill: var(--ink); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-size: 13px; font-weight: 600;
+  }
+  .flow .edge { stroke: var(--muted); stroke-width: 1.5; fill: none; }
+  .flow .arrow { fill: var(--muted); }
+  .flow .elabel {
+    fill: var(--muted); font-size: 11px; font-weight: 600;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  .flow .n-decision rect { stroke: var(--accent-ink); stroke-width: 2; }
+  .flow .n-write rect { fill: color-mix(in srgb, var(--accent) 16%, var(--panel)); stroke: var(--accent); stroke-width: 2; }
+  .flow .n-write text { fill: var(--accent-ink); }
+  .flow .n-abort rect { fill: var(--danger-bg); stroke: var(--danger-border); stroke-width: 2; }
+  .flow .n-abort text { fill: var(--danger-ink); }
+  .flow .n-done rect { fill: var(--chip); stroke: var(--muted); }
+  .flow .n-done text { fill: var(--muted); }
+
+  /* ---- Decorative reveal-on-scroll (JS adds the class; no-JS shows everything) ---- */
+  html.js .reveal { opacity: 0; transform: translateY(14px); transition: opacity .55s ease, transform .55s ease; }
+  html.js .reveal.in { opacity: 1; transform: none; }
+  @media (prefers-reduced-motion: reduce) {
+    html.js .reveal { opacity: 1 !important; transform: none !important; transition: none !important; }
+  }
+
+  /* ---- Print / PDF: neutralise the dynamic chrome so every section renders fully ---- */
+  @media print {
+    .progress { display: none !important; }
+    .reveal { opacity: 1 !important; transform: none !important; }
+    html.js ol.steps > li::before {
+      background: var(--accent) !important; color: #fff !important; border-color: var(--accent) !important; box-shadow: none !important;
+    }
+    html.js ol.steps > li::after { background: var(--accent) !important; }
+    figure.flow { break-inside: avoid; }
+  }
 </style>
 </head>
 <body>
 <button class="pdf-btn" onclick="npgPrint()" title="Expand everything and save as PDF">⭳ PDF</button>
 <button class="theme-toggle" onclick="(function(){var r=document.documentElement;var d=r.getAttribute('data-theme');var n=d==='dark'?'light':(d==='light'?'dark':(matchMedia('(prefers-color-scheme: dark)').matches?'light':'dark'));r.setAttribute('data-theme',n);try{localStorage.setItem('npg-theme',n)}catch(e){}})()">◐ theme</button>
-<script>try{var t=localStorage.getItem('npg-theme');if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<script>try{var t=localStorage.getItem('npg-theme');if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}document.documentElement.classList.add('js');</script>
+<div class="progress" id="npg-progress" aria-hidden="true"></div>
 
 <header class="hero">
   <div class="eyebrow">🛡️ Databricks Network Policy Helper</div>
@@ -196,6 +274,37 @@ uv run dbx-nwp-helper --help</pre>
 
   <h2 id="walkthrough">An ingress run, step by step</h2>
   <p>This is what happens on a typical <code class="inline">ingress</code> run. The tool pauses between sections so you review each one; answering <em>no</em> aborts cleanly, writing nothing. (<code class="inline">--yes</code> skips the pauses for scripting.)</p>
+  <figure class="flow reveal" role="img" aria-label="Ingress run flow: confirm the target workspace, analyse audit traffic and enrich it, frame CIDRs and build rules, preview the policy, then a gated create — only with --create-policy and passing pre-checks does it write the policy (dry-run first) and assign it; otherwise it proposes only or aborts, writing nothing.">
+    <svg viewBox="0 0 600 660" xmlns="http://www.w3.org/2000/svg">
+      <defs><marker id="ah-ig" markerWidth="9" markerHeight="9" refX="6.5" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" class="arrow"/></marker></defs>
+      <path class="edge" marker-end="url(#ah-ig)" d="M175,58 L175,80"/>
+      <path class="edge" marker-end="url(#ah-ig)" d="M175,130 L175,152"/>
+      <path class="edge" marker-end="url(#ah-ig)" d="M175,202 L175,224"/>
+      <path class="edge" marker-end="url(#ah-ig)" d="M175,274 L175,296"/>
+      <path class="edge" marker-end="url(#ah-ig)" d="M175,346 L175,368"/>
+      <path class="edge" marker-end="url(#ah-ig)" d="M175,418 L175,440"/>
+      <path class="edge" marker-end="url(#ah-ig)" d="M175,490 L175,512"/>
+      <path class="edge" marker-end="url(#ah-ig)" d="M175,562 L175,584"/>
+      <path class="edge" marker-end="url(#ah-ig)" d="M290,323 L336,323"/>
+      <path class="edge" marker-end="url(#ah-ig)" d="M290,395 L336,395"/>
+      <text class="elabel" x="182" y="363">yes</text>
+      <text class="elabel" x="182" y="435">pass</text>
+      <text class="elabel" x="300" y="316">no</text>
+      <text class="elabel" x="300" y="388">no</text>
+      <g class="node n-decision"><rect x="60" y="12" width="230" height="46" rx="12"/><text x="175" y="35" text-anchor="middle" dominant-baseline="central">Confirm target workspace</text></g>
+      <g class="node n-process"><rect x="60" y="84" width="230" height="46" rx="10"/><text x="175" y="107" text-anchor="middle" dominant-baseline="central">Analyse audit + enrich</text></g>
+      <g class="node n-process"><rect x="60" y="156" width="230" height="46" rx="10"/><text x="175" y="179" text-anchor="middle" dominant-baseline="central">Frame CIDRs, build rules</text></g>
+      <g class="node n-process"><rect x="60" y="228" width="230" height="46" rx="10"/><text x="175" y="251" text-anchor="middle" dominant-baseline="central">Preview proposed policy</text></g>
+      <g class="node n-decision"><rect x="60" y="300" width="230" height="46" rx="12"/><text x="175" y="323" text-anchor="middle" dominant-baseline="central">--create-policy ?</text></g>
+      <g class="node n-decision"><rect x="60" y="372" width="230" height="46" rx="12"/><text x="175" y="395" text-anchor="middle" dominant-baseline="central">Pre-checks pass ?</text></g>
+      <g class="node n-write"><rect x="60" y="444" width="230" height="46" rx="10"/><text x="175" y="467" text-anchor="middle" dominant-baseline="central">Write policy — dry-run first</text></g>
+      <g class="node n-process"><rect x="60" y="516" width="230" height="46" rx="10"/><text x="175" y="539" text-anchor="middle" dominant-baseline="central">Assign to workspace</text></g>
+      <g class="node n-done"><rect x="60" y="588" width="230" height="46" rx="10"/><text x="175" y="611" text-anchor="middle" dominant-baseline="central">Done</text></g>
+      <g class="node n-done"><rect x="340" y="300" width="240" height="46" rx="10"/><text x="460" y="317" text-anchor="middle"><tspan x="460">Propose-only —</tspan><tspan x="460" dy="16">nothing written</tspan></text></g>
+      <g class="node n-abort"><rect x="340" y="372" width="240" height="46" rx="10"/><text x="460" y="389" text-anchor="middle"><tspan x="460">Abort —</tspan><tspan x="460" dy="16">nothing written</tspan></text></g>
+    </svg>
+    <figcaption>The ingress run at a glance — nothing is written until you pass <code class="inline">--create-policy</code> <em>and</em> clear the pre-checks. Each step is detailed below.</figcaption>
+  </figure>
   <ol class="steps">
     <li id="ig-workspace">
       <h3>The CLI asks you to confirm the target workspace</h3>
@@ -253,6 +362,37 @@ uv run dbx-nwp-helper --help</pre>
   <div class="callout warn">
     <strong>Prerequisite:</strong> <code class="inline">system.access.outbound_network</code> only logs <em>denied</em> egress (including dry-run would-be-denials). So stand up an egress policy in <code class="inline">dry_run</code> first and let it observe for a while — that's what populates the table the <code class="inline">egress</code> command reads.
   </div>
+  <figure class="flow reveal" role="img" aria-label="Egress run flow: confirm the target workspace, analyse outbound traffic and classify destinations, optionally block threat domains, enforce limits and preview, then a gated create — only with --create-policy and passing pre-checks does it write the egress policy (dry-run first) and assign it; otherwise it proposes only or aborts, writing nothing.">
+    <svg viewBox="0 0 600 660" xmlns="http://www.w3.org/2000/svg">
+      <defs><marker id="ah-eg" markerWidth="9" markerHeight="9" refX="6.5" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" class="arrow"/></marker></defs>
+      <path class="edge" marker-end="url(#ah-eg)" d="M175,58 L175,80"/>
+      <path class="edge" marker-end="url(#ah-eg)" d="M175,130 L175,152"/>
+      <path class="edge" marker-end="url(#ah-eg)" d="M175,202 L175,224"/>
+      <path class="edge" marker-end="url(#ah-eg)" d="M175,274 L175,296"/>
+      <path class="edge" marker-end="url(#ah-eg)" d="M175,346 L175,368"/>
+      <path class="edge" marker-end="url(#ah-eg)" d="M175,418 L175,440"/>
+      <path class="edge" marker-end="url(#ah-eg)" d="M175,490 L175,512"/>
+      <path class="edge" marker-end="url(#ah-eg)" d="M175,562 L175,584"/>
+      <path class="edge" marker-end="url(#ah-eg)" d="M290,323 L336,323"/>
+      <path class="edge" marker-end="url(#ah-eg)" d="M290,395 L336,395"/>
+      <text class="elabel" x="182" y="363">yes</text>
+      <text class="elabel" x="182" y="435">pass</text>
+      <text class="elabel" x="300" y="316">no</text>
+      <text class="elabel" x="300" y="388">no</text>
+      <g class="node n-decision"><rect x="60" y="12" width="230" height="46" rx="12"/><text x="175" y="35" text-anchor="middle" dominant-baseline="central">Confirm target workspace</text></g>
+      <g class="node n-process"><rect x="60" y="84" width="230" height="46" rx="10"/><text x="175" y="107" text-anchor="middle" dominant-baseline="central">Analyse outbound + classify</text></g>
+      <g class="node n-process"><rect x="60" y="156" width="230" height="46" rx="10"/><text x="175" y="179" text-anchor="middle" dominant-baseline="central">Block threat domains (opt.)</text></g>
+      <g class="node n-process"><rect x="60" y="228" width="230" height="46" rx="10"/><text x="175" y="251" text-anchor="middle" dominant-baseline="central">Enforce limits + preview</text></g>
+      <g class="node n-decision"><rect x="60" y="300" width="230" height="46" rx="12"/><text x="175" y="323" text-anchor="middle" dominant-baseline="central">--create-policy ?</text></g>
+      <g class="node n-decision"><rect x="60" y="372" width="230" height="46" rx="12"/><text x="175" y="395" text-anchor="middle" dominant-baseline="central">Pre-checks pass ?</text></g>
+      <g class="node n-write"><rect x="60" y="444" width="230" height="46" rx="10"/><text x="175" y="467" text-anchor="middle" dominant-baseline="central">Write egress — dry-run first</text></g>
+      <g class="node n-process"><rect x="60" y="516" width="230" height="46" rx="10"/><text x="175" y="539" text-anchor="middle" dominant-baseline="central">Assign to workspace</text></g>
+      <g class="node n-done"><rect x="60" y="588" width="230" height="46" rx="10"/><text x="175" y="611" text-anchor="middle" dominant-baseline="central">Done</text></g>
+      <g class="node n-done"><rect x="340" y="300" width="240" height="46" rx="10"/><text x="460" y="317" text-anchor="middle"><tspan x="460">Propose-only —</tspan><tspan x="460" dy="16">nothing written</tspan></text></g>
+      <g class="node n-abort"><rect x="340" y="372" width="240" height="46" rx="10"/><text x="460" y="389" text-anchor="middle"><tspan x="460">Abort —</tspan><tspan x="460" dy="16">nothing written</tspan></text></g>
+    </svg>
+    <figcaption>The egress run at a glance — the allow-list is built from observed denials; nothing is written until you opt in and clear the pre-checks. Each step is detailed below.</figcaption>
+  </figure>
   <ol class="steps">
     <li id="eg-workspace">
       <h3>The CLI asks you to confirm the target workspace</h3>
@@ -380,6 +520,55 @@ uv run dbx-nwp-helper --help</pre>
   function npgPrint(){npgExpandAll();window.print();}
   window.addEventListener('beforeprint',npgExpandAll);
   if(location.hash==='#print'){npgExpandAll();}
+</script>
+<script>
+  // Progressive enhancement: a reading-progress bar, a scroll-spy TOC, a "you are here" step rail
+  // down the walkthroughs, and reveal-on-scroll polish. All additive and null-safe — with no JS (or
+  // no IntersectionObserver) the page is fully readable, and the print path force-shows everything.
+  (function(){
+    if(!('IntersectionObserver' in window)) return;
+    var doc = document.documentElement;
+
+    // Reading-progress bar — width tracks how far through the page you've scrolled.
+    var bar = document.getElementById('npg-progress');
+    function onScroll(){ if(!bar) return; var max = doc.scrollHeight - doc.clientHeight; bar.style.width = (max > 0 ? (doc.scrollTop / max * 100) : 0) + '%'; }
+    window.addEventListener('scroll', onScroll, {passive:true});
+    window.addEventListener('resize', onScroll);
+    onScroll();
+
+    // Scroll-spy — highlight the section you're in within the sticky TOC.
+    var links = {};
+    document.querySelectorAll('nav.toc a').forEach(function(a){ links[a.getAttribute('href').slice(1)] = a; });
+    function setActive(id){
+      Object.keys(links).forEach(function(k){ links[k].classList.toggle('active', k === id); });
+      var el = links[id]; if(el){ try{ el.scrollIntoView({inline:'center', block:'nearest'}); }catch(e){} }
+    }
+    var spy = new IntersectionObserver(function(entries){
+      entries.forEach(function(e){ if(e.isIntersecting && links[e.target.id]) setActive(e.target.id); });
+    }, {rootMargin:'-64px 0px -68% 0px'});
+    document.querySelectorAll('h2[id]').forEach(function(h){ spy.observe(h); });
+
+    // Step rail — mark the current step (and those before it) as you pass each one.
+    function markSeen(el){
+      var ol = el.closest('ol.steps'); if(!ol) return;
+      var lis = Array.prototype.slice.call(ol.querySelectorAll(':scope > li'));
+      var idx = lis.indexOf(el);
+      lis.forEach(function(li, i){ li.classList.toggle('seen', i <= idx); li.classList.toggle('active', li === el); });
+    }
+    var stepObs = new IntersectionObserver(function(entries){
+      entries.forEach(function(e){ if(e.isIntersecting) markSeen(e.target); });
+    }, {rootMargin:'-45% 0px -45% 0px'});
+    document.querySelectorAll('ol.steps > li:not(.stepnote)').forEach(function(li){ stepObs.observe(li); });
+
+    // Reveal-on-scroll — respects reduced-motion (skip entirely) and print (CSS forces visible).
+    if(matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    var reveals = document.querySelectorAll('.panel, ol.steps > li, figure.flow, .callout.warn, .callout.danger, .callout.safe');
+    reveals.forEach(function(el){ el.classList.add('reveal'); });
+    var revObs = new IntersectionObserver(function(entries){
+      entries.forEach(function(e){ if(e.isIntersecting){ e.target.classList.add('in'); revObs.unobserve(e.target); } });
+    }, {rootMargin:'0px 0px -8% 0px'});
+    reveals.forEach(function(el){ revObs.observe(el); });
+  })();
 </script>
 </body>
 </html>
